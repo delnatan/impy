@@ -131,7 +131,14 @@ class ROIManager(QWidget):
         self.refresh_windows()
         # Auto-select current window if none active
         if not self.active_window and self.window_combo.count() > 0:
-            self.window_combo.setCurrentIndex(0)
+            # Manually set active window since setCurrentIndex(0) might not fire
+            # the signal if index 0 is already selected (default after addItem)
+            wid = self.window_combo.itemData(0)
+            win = manager.get(wid)
+            if win:
+                self.set_active_window(win)
+        # Always refresh the ROI list to show any ROIs drawn before manager was opened
+        self.refresh_list()
 
     def closeEvent(self, event):
         """Override close to hide instead of destroy.

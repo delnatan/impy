@@ -805,27 +805,106 @@ class LaneROI(RectangleROI):
         self._clear_marker_visuals()
         self._markers = []
 
+    def add_marker(self, y_local, label="", color=None):
+        """
+        Add a new marker at the specified y_local position.
+
+        Args:
+            y_local: Position relative to lane top
+            label: Text label for the marker
+            color: Color for the marker (defaults to SAMPLE_COLOR)
+
+        Returns:
+            Index of the new marker
+        """
+        if color is None:
+            color = self.SAMPLE_COLOR
+
+        marker = {"y_local": float(y_local), "label": label, "color": color}
+        self._markers.append(marker)
+
+        # Create visual for new marker
+        x_min, x_max, y_min, y_max = self._get_bounds()
+        y_global = y_min + y_local
+
+        line_pos = np.array(
+            [[x_min, y_global, 0], [x_max, y_global, 0]], dtype=np.float32
+        )
+        line_visual = scene.visuals.Line(
+            pos=line_pos, color=color, width=2, parent=self.view.scene
+        )
+
+        text_visual = scene.visuals.Text(
+            text=label,
+            color=color,
+            font_size=8,
+            anchor_x="left",
+            anchor_y="center",
+            parent=self.view.scene,
+        )
+        text_visual.pos = (x_max + 3, y_global, 0)
+        text_visual.visible = self.show_marker_labels and bool(label)
+
+        self._marker_visuals.append((line_visual, text_visual))
+        self.visuals.extend([line_visual, text_visual])
+
+        return len(self._markers) - 1
+
+    def remove_marker(self, idx):
+        """
+        Remove a marker by index.
+
+        Args:
+            idx: Index of the marker to remove
+
+        Returns:
+            True if removed, False if index invalid
+        """
+        if idx < 0 or idx >= len(self._markers):
+            return False
+
+        # Remove visual
+        if idx < len(self._marker_visuals):
+            line_visual, text_visual = self._marker_visuals[idx]
+            line_visual.parent = None
+            text_visual.parent = None
+            if line_visual in self.visuals:
+                self.visuals.remove(line_visual)
+            if text_visual in self.visuals:
+                self.visuals.remove(text_visual)
+            self._marker_visuals.pop(idx)
+
+        # Remove data
+        self._markers.pop(idx)
+        return True
+
     def get_marker_positions(self):
         """Get list of marker y_local positions (sorted)."""
         return sorted(m["y_local"] for m in self._markers)
 
+    def _get_sorted_marker_indices(self):
+        """Get marker indices sorted by y_local position."""
+        return sorted(range(len(self._markers)), key=lambda i: self._markers[i]["y_local"])
+
     def update_marker_labels(self, labels):
         """
-        Update marker labels.
+        Update marker labels in sorted y_local order.
 
         Args:
-            labels: List of label strings, one per marker (in order)
+            labels: List of label strings, one per marker (in sorted y position order)
         """
-        for i, label in enumerate(labels):
-            if i < len(self._markers):
-                self._markers[i]["label"] = label
-                if i < len(self._marker_visuals):
-                    _, text_visual = self._marker_visuals[i]
-                    text_visual.text = label
-                    # Also update visibility based on whether label is non-empty
-                    text_visual.visible = self.show_marker_labels and bool(
-                        label
-                    )
+        # Get indices sorted by y_local to match how positions are returned
+        sorted_indices = self._get_sorted_marker_indices()
+
+        for label_idx, marker_idx in enumerate(sorted_indices):
+            if label_idx >= len(labels):
+                break
+            label = labels[label_idx]
+            self._markers[marker_idx]["label"] = label
+            if marker_idx < len(self._marker_visuals):
+                _, text_visual = self._marker_visuals[marker_idx]
+                text_visual.text = label
+                text_visual.visible = self.show_marker_labels and bool(label)
 
     def _get_bounds(self):
         """Get lane bounds (x_min, x_max, y_min, y_max)."""
@@ -920,7 +999,8 @@ class LaneROI(RectangleROI):
         Returns:
             - ('marker', idx) if marker hit
             - handle_id if handle hit
-            - 'center' if body hit (and not locked)
+            - 'center' if body hit (and not locked, allows dragging)
+            - 'body' if body hit (and locked, no dragging but in bounds)
             - None if no hit
         """
         px, py = point
@@ -940,10 +1020,12 @@ class LaneROI(RectangleROI):
         if hid:
             return hid
 
-        # 3. Check body (only if not locked)
-        if not self.locked:
-            if x_min <= px <= x_max and y_min <= py <= y_max:
-                return "center"
+        # 3. Check body
+        if x_min <= px <= x_max and y_min <= py <= y_max:
+            if self.locked:
+                return "body"  # In bounds but can't move
+            else:
+                return "center"  # In bounds and can move
 
         return None
 

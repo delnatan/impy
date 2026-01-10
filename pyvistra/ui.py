@@ -29,7 +29,7 @@ from .io import Imaris5DProxy, Numpy5DProxy, load_image, normalize_to_5d
 from .manager import manager
 from .ortho import OrthoViewer
 from .roi_manager import get_roi_manager, roi_manager_exists
-from .rois import CircleROI, CoordinateROI, LineROI, RectangleROI
+from .rois import CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
 from .visuals import CompositeImageVisual
 from .widgets import (
     AlignmentDialog,
@@ -162,6 +162,8 @@ class ImageWindow(QMainWindow):
         self.dragging_roi = None
         self.drag_handle = None
         self.last_pos = None
+        # SPACE bar temporary pointer mode
+        self._space_held_previous_tool = None
         # Toolbar is now external
 
         # 9. Events
@@ -230,8 +232,24 @@ class ImageWindow(QMainWindow):
                 roi.select(False)
             self.canvas.update()
             self.roi_selection_changed.emit(None)
+        elif event.key() == Qt.Key_Space:
+            # Temporarily switch to pointer mode for panning/zooming
+            if self._space_held_previous_tool is None:
+                self._space_held_previous_tool = manager.active_tool
+                manager.active_tool = "pointer"
+                self.update_cursor()
         else:
             super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            # Restore previous tool when SPACE is released
+            if self._space_held_previous_tool is not None:
+                manager.active_tool = self._space_held_previous_tool
+                self._space_held_previous_tool = None
+                self.update_cursor()
+        else:
+            super().keyReleaseEvent(event)
 
     def get_data(self):
         """Return the current image data."""
@@ -536,6 +554,35 @@ class ImageWindow(QMainWindow):
                     hit_roi = roi
                     hit_handle = res
                     break
+
+            # Handle modifier clicks on LaneROIs
+            if isinstance(hit_roi, LaneROI):
+                # Ctrl+Click (or Cmd+Click on Mac) on a marker: remove it
+                has_ctrl_or_cmd = "Control" in event.modifiers or "Meta" in event.modifiers
+                if has_ctrl_or_cmd:
+                    if isinstance(hit_handle, tuple) and hit_handle[0] == "marker":
+                        marker_idx = hit_handle[1]
+                        hit_roi.remove_marker(marker_idx)
+                        # Trigger callback for live MW update
+                        if hit_roi._on_markers_changed:
+                            hit_roi._on_markers_changed()
+                        self.canvas.update()
+                        return
+
+                # Shift+Click anywhere in lane: add a marker
+                # Works on body, center, or even on existing marker position
+                if "Shift" in event.modifiers:
+                    if hit_handle in ("body", "center") or isinstance(
+                        hit_handle, tuple
+                    ):
+                        x_min, x_max, y_min, y_max = hit_roi._get_bounds()
+                        y_local = y - y_min
+                        hit_roi.add_marker(y_local)
+                        # Trigger callback for live MW update
+                        if hit_roi._on_markers_changed:
+                            hit_roi._on_markers_changed()
+                        self.canvas.update()
+                        return
 
             # Update Selection
             for roi in self.rois:
