@@ -805,6 +805,79 @@ class LaneROI(RectangleROI):
         self._clear_marker_visuals()
         self._markers = []
 
+    def add_marker(self, y_local, label="", color=None):
+        """
+        Add a new marker at the specified y_local position.
+
+        Args:
+            y_local: Position relative to lane top
+            label: Text label for the marker
+            color: Color for the marker (defaults to SAMPLE_COLOR)
+
+        Returns:
+            Index of the new marker
+        """
+        if color is None:
+            color = self.SAMPLE_COLOR
+
+        marker = {"y_local": float(y_local), "label": label, "color": color}
+        self._markers.append(marker)
+
+        # Create visual for new marker
+        x_min, x_max, y_min, y_max = self._get_bounds()
+        y_global = y_min + y_local
+
+        line_pos = np.array(
+            [[x_min, y_global, 0], [x_max, y_global, 0]], dtype=np.float32
+        )
+        line_visual = scene.visuals.Line(
+            pos=line_pos, color=color, width=2, parent=self.view.scene
+        )
+
+        text_visual = scene.visuals.Text(
+            text=label,
+            color=color,
+            font_size=8,
+            anchor_x="left",
+            anchor_y="center",
+            parent=self.view.scene,
+        )
+        text_visual.pos = (x_max + 3, y_global, 0)
+        text_visual.visible = self.show_marker_labels and bool(label)
+
+        self._marker_visuals.append((line_visual, text_visual))
+        self.visuals.extend([line_visual, text_visual])
+
+        return len(self._markers) - 1
+
+    def remove_marker(self, idx):
+        """
+        Remove a marker by index.
+
+        Args:
+            idx: Index of the marker to remove
+
+        Returns:
+            True if removed, False if index invalid
+        """
+        if idx < 0 or idx >= len(self._markers):
+            return False
+
+        # Remove visual
+        if idx < len(self._marker_visuals):
+            line_visual, text_visual = self._marker_visuals[idx]
+            line_visual.parent = None
+            text_visual.parent = None
+            if line_visual in self.visuals:
+                self.visuals.remove(line_visual)
+            if text_visual in self.visuals:
+                self.visuals.remove(text_visual)
+            self._marker_visuals.pop(idx)
+
+        # Remove data
+        self._markers.pop(idx)
+        return True
+
     def get_marker_positions(self):
         """Get list of marker y_local positions (sorted)."""
         return sorted(m["y_local"] for m in self._markers)

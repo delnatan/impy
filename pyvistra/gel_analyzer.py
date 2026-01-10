@@ -65,8 +65,11 @@ class GelAnalyzerWidget(QWidget):
         self._lane_rois = []  # Track LaneROIs we've created/converted
         self._std_idx = None  # Index of standard lane ROI
 
+        # Calibration state
+        self._calibration = None  # {std_positions, log_sizes, unit}
+
         self.setWindowTitle("Gel Analyzer")
-        self.resize(320, 500)
+        self.resize(320, 560)
 
         self._setup_ui()
 
@@ -142,11 +145,33 @@ class GelAnalyzerWidget(QWidget):
         btn_detect.clicked.connect(self._detect_peaks)
         detect_layout.addWidget(btn_detect)
 
-        btn_clear = QPushButton("Clear Markers")
-        btn_clear.clicked.connect(self._clear_markers)
-        detect_layout.addWidget(btn_clear)
-
         layout.addWidget(detect_group)
+
+        # Actions Section
+        actions_group = QGroupBox("Actions")
+        actions_layout = QVBoxLayout(actions_group)
+
+        # Calibrate and Apply buttons in a row
+        calib_row = QHBoxLayout()
+        self.btn_calibrate = QPushButton("Calibrate")
+        self.btn_calibrate.clicked.connect(self._calibrate)
+        self.btn_calibrate.setToolTip(
+            "Create calibration curve from ladder lane markers"
+        )
+        calib_row.addWidget(self.btn_calibrate)
+
+        self.btn_apply = QPushButton("Apply Calibration")
+        self.btn_apply.clicked.connect(self._apply_calibration)
+        self.btn_apply.setEnabled(False)
+        self.btn_apply.setToolTip("Estimate MW for sample lanes using calibration")
+        calib_row.addWidget(self.btn_apply)
+        actions_layout.addLayout(calib_row)
+
+        btn_clear = QPushButton("Clear All Markers")
+        btn_clear.clicked.connect(self._clear_markers)
+        actions_layout.addWidget(btn_clear)
+
+        layout.addWidget(actions_group)
 
         # Display Options
         display_group = QGroupBox("Display")
@@ -162,7 +187,10 @@ class GelAnalyzerWidget(QWidget):
         self.show_borders_check.stateChanged.connect(self._toggle_borders)
         display_layout.addWidget(self.show_borders_check)
 
-        tip_label = QLabel("Tip: Drag peak lines to adjust positions")
+        tip_label = QLabel(
+            "Tip: Shift+Click to add band, Ctrl+Click to remove\n"
+            "     Drag lines to adjust positions"
+        )
         tip_label.setStyleSheet("color: gray; font-size: 10px;")
         display_layout.addWidget(tip_label)
 
@@ -312,31 +340,19 @@ class GelAnalyzerWidget(QWidget):
         return lane
 
     def _detect_peaks(self):
-        """Detect peaks in all lanes and update markers."""
-        # Clear previous markers
+        """Detect peaks in all lanes and update markers (no MW calculation)."""
+        # Clear previous state
         self._clear_markers()
+        self._calibration = None
+        self.btn_apply.setEnabled(False)
 
         window = self.roi_manager.active_window
         if not window:
             self.results_text.setText("No active window")
             return
 
-        # Get current ladder selection
-        ladder_data = self.ladder_combo.currentData()
-        if ladder_data is None:
-            self.results_text.setText("No ladder preset selected")
-            return
-
-        # Get ladder info
-        ladder_sizes = ladder_data.get(
-            "sizes", ladder_data.get("weights_kda", [])
-        )
-
-        unit = ladder_data.get("unit", "kDa")
-
         # Get standard lane index
         self._std_idx = self.lane_combo.currentData()
-
         if self._std_idx is None:
             self.results_text.setText("No standard lane selected")
             return
@@ -373,6 +389,7 @@ class GelAnalyzerWidget(QWidget):
             return
 
         # Detect peaks in each lane
+        total_peaks = 0
         for lane, roi_idx in zip(self._lane_rois, roi_indices):
             region = lane.get_region(gray_proc)
             if region.size == 0:
@@ -388,17 +405,13 @@ class GelAnalyzerWidget(QWidget):
 
             # Determine color based on whether this is the ladder
             is_ladder = roi_idx == self._std_idx
-
             color = LaneROI.LADDER_COLOR if is_ladder else LaneROI.SAMPLE_COLOR
 
-            # Create marker data
+            # Create marker data (no labels yet - that comes from calibration)
             marker_data = []
-            for i, peak_y in enumerate(peaks):
-                label = ""
-                if is_ladder and i < len(ladder_sizes):
-                    label = f"{ladder_sizes[i]} {unit}"
+            for peak_y in peaks:
                 marker_data.append(
-                    {"y_local": float(peak_y), "label": label, "color": color}
+                    {"y_local": float(peak_y), "label": "", "color": color}
                 )
 
             # Set markers on lane
@@ -410,18 +423,35 @@ class GelAnalyzerWidget(QWidget):
             lane.set_marker_labels_visible(self.show_labels_check.isChecked())
             lane.show_border = self.show_borders_check.isChecked()
 
+            total_peaks += len(peaks)
+
         window.canvas.update()
 
         # Update ROI manager list
         self.roi_manager.refresh_list()
 
-        # Calculate and display results
-        self._calculate_and_display(ladder_sizes, unit)
+        # Show detection summary
+        results = [
+            f"Detected {total_peaks} peaks across {len(self._lane_rois)} lanes.",
+            "",
+            "Next steps:",
+            "  1. Adjust markers if needed (drag, Shift+Click, Ctrl+Click)",
+            "  2. Click 'Calibrate' to create calibration from ladder lane",
+            "  3. Click 'Apply Calibration' to estimate MW for sample lanes",
+        ]
+        self.results_text.setText("\n".join(results))
 
-    def _on_markers_adjusted(self):
-        """Called when markers are manually adjusted."""
+    def _calibrate(self):
+        """Create calibration curve from ladder lane markers."""
+        window = self.roi_manager.active_window
+        if not window:
+            self.results_text.setText("No active window")
+            return
+
+        # Get ladder data
         ladder_data = self.ladder_combo.currentData()
-        if not ladder_data:
+        if ladder_data is None:
+            self.results_text.setText("No ladder preset selected")
             return
 
         ladder_sizes = ladder_data.get(
@@ -429,47 +459,88 @@ class GelAnalyzerWidget(QWidget):
         )
         unit = ladder_data.get("unit", "kDa")
 
-        self._calculate_and_display(ladder_sizes, unit)
-
-    def _calculate_and_display(self, ladder_sizes, unit):
-        """Calculate MW and update display."""
-        if not self._lane_rois:
+        # Get standard lane index
+        if self._std_idx is None:
+            self._std_idx = self.lane_combo.currentData()
+        if self._std_idx is None:
+            self.results_text.setText("No standard lane selected")
             return
 
-        window = self.roi_manager.active_window
-        if not window:
-            return
-
-        # Find standard lane
+        # Find standard lane and its markers
         std_lane = None
-        std_peaks = None
         for i, roi in enumerate(window.rois):
             if i == self._std_idx and isinstance(roi, LaneROI):
                 std_lane = roi
-                std_peaks = roi.get_marker_positions()
                 break
 
-        if std_peaks is None or len(std_peaks) == 0:
-            self.results_text.setText("No peaks in standard lane")
+        if std_lane is None:
+            self.results_text.setText("Standard lane not found")
             return
 
-        # Use as many ladder sizes as we have peaks
+        std_peaks = std_lane.get_marker_positions()
+        if len(std_peaks) == 0:
+            self.results_text.setText("No markers in standard lane")
+            return
+
+        # Match peaks to ladder sizes
         n_peaks = min(len(std_peaks), len(ladder_sizes))
         if n_peaks < 2:
             self.results_text.setText(
-                f"Need at least 2 peaks in standard lane "
+                f"Need at least 2 markers in standard lane "
                 f"(found {len(std_peaks)})"
             )
             return
 
-        # Calibration data (in log scale)
+        # Create calibration curve (in log scale)
         std_positions = np.array(std_peaks[:n_peaks])
         log_sizes = np.log(np.array(ladder_sizes[:n_peaks]))
 
+        # Store calibration
+        self._calibration = {
+            "std_positions": std_positions,
+            "log_sizes": log_sizes,
+            "unit": unit,
+            "ladder_sizes": ladder_sizes[:n_peaks],
+        }
+
+        # Update ladder lane marker labels with sizes
+        labels = [f"{sz} {unit}" for sz in ladder_sizes[:n_peaks]]
+        # Pad with empty strings if there are extra markers
+        labels.extend([""] * (len(std_peaks) - n_peaks))
+        std_lane.update_marker_labels(labels)
+
+        # Enable apply button
+        self.btn_apply.setEnabled(True)
+
+        # Show calibration summary
+        results = [
+            "Calibration created!",
+            f"  Standard Lane: ROI {self._std_idx}",
+            f"  Using {n_peaks} bands: {', '.join(str(s) for s in ladder_sizes[:n_peaks])} {unit}",
+            "",
+            "Click 'Apply Calibration' to estimate MW for sample lanes.",
+        ]
+        self.results_text.setText("\n".join(results))
+        window.canvas.update()
+
+    def _apply_calibration(self):
+        """Apply calibration to estimate MW for sample lanes."""
+        if self._calibration is None:
+            self.results_text.setText("No calibration available. Click 'Calibrate' first.")
+            return
+
+        window = self.roi_manager.active_window
+        if not window:
+            self.results_text.setText("No active window")
+            return
+
+        std_positions = self._calibration["std_positions"]
+        log_sizes = self._calibration["log_sizes"]
+        unit = self._calibration["unit"]
+
         results = []
         results.append(f"Standard Lane (ROI {self._std_idx}):")
-        results.append(f"  Detected {len(std_peaks)} peaks")
-        results.append(f"  Using {n_peaks} bands for calibration")
+        results.append(f"  Calibration: {len(std_positions)} bands")
         results.append("")
 
         # Calculate sizes for sample lanes
@@ -481,7 +552,7 @@ class GelAnalyzerWidget(QWidget):
 
             peaks = roi.get_marker_positions()
             if len(peaks) == 0:
-                results.append(f"Lane {i} ({roi.name}): No peaks detected")
+                results.append(f"Lane {i} ({roi.name}): No markers")
                 continue
 
             # Interpolate in log space
@@ -499,8 +570,14 @@ class GelAnalyzerWidget(QWidget):
         self.results_text.setText("\n".join(results))
         window.canvas.update()
 
+    def _on_markers_adjusted(self):
+        """Called when markers are manually adjusted."""
+        # If calibrated, re-apply calibration for live updates
+        if self._calibration is not None:
+            self._apply_calibration()
+
     def _clear_markers(self):
-        """Clear all markers and unlock lanes."""
+        """Clear all markers, unlock lanes, and reset calibration."""
         window = self.roi_manager.active_window
         if not window:
             return
@@ -513,6 +590,8 @@ class GelAnalyzerWidget(QWidget):
 
         self._lane_rois = []
         self._std_idx = None
+        self._calibration = None
+        self.btn_apply.setEnabled(False)
         window.canvas.update()
 
     def _copy_results(self):
