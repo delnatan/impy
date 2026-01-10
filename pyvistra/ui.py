@@ -29,7 +29,7 @@ from .io import Imaris5DProxy, Numpy5DProxy, load_image, normalize_to_5d
 from .manager import manager
 from .ortho import OrthoViewer
 from .roi_manager import get_roi_manager, roi_manager_exists
-from .rois import CircleROI, CoordinateROI, LineROI, RectangleROI
+from .rois import CircleROI, CoordinateROI, FreehandROI, LineROI, RectangleROI
 from .visuals import CompositeImageVisual
 from .widgets import (
     AlignmentDialog,
@@ -568,12 +568,19 @@ class ImageWindow(QMainWindow):
             self.drawing_roi = CircleROI(self.view, name=roi_index)
         elif tool == "line":
             self.drawing_roi = LineROI(self.view, name=roi_index)
+        elif tool == "freehand":
+            self.drawing_roi = FreehandROI(self.view, name=roi_index)
 
         if self.drawing_roi:
             self.rois.append(self.drawing_roi)
             self.roi_added.emit(self.drawing_roi)
-            # Initial update (zero size/length)
-            self.drawing_roi.update((x, y), (x, y))
+            # Initial update
+            if tool == "freehand":
+                # For freehand, add the first point
+                self.drawing_roi.add_point((x, y))
+            else:
+                # For other tools, update with start/end (zero size/length)
+                self.drawing_roi.update((x, y), (x, y))
             self.canvas.update()
 
     def on_mouse_move(self, event):
@@ -617,6 +624,12 @@ class ImageWindow(QMainWindow):
         if self.drawing_roi and event.button == 1:
             x, y = self._map_event_to_image(event)
             end_pos = (x, y)
+
+            # Handle freehand differently - add points during drag
+            if isinstance(self.drawing_roi, FreehandROI):
+                self.drawing_roi.add_point((x, y))
+                self.canvas.update()
+                return
 
             # Shift key constrains LineROI to horizontal/vertical
             if (
@@ -697,11 +710,16 @@ class Toolbar(QMainWindow):
         self.act_line.setCheckable(True)
         self.act_line.triggered.connect(lambda: self.set_tool("line"))
 
+        self.act_freehand = QAction("Freehand", self)
+        self.act_freehand.setCheckable(True)
+        self.act_freehand.triggered.connect(lambda: self.set_tool("freehand"))
+
         self.tools.addAction(self.act_pointer)
         self.tools.addAction(self.act_coord)
         self.tools.addAction(self.act_rect)
         self.tools.addAction(self.act_circle)
         self.tools.addAction(self.act_line)
+        self.tools.addAction(self.act_freehand)
 
         # ROI Manager Button
         self.tools.addSeparator()
@@ -723,6 +741,7 @@ class Toolbar(QMainWindow):
         group.addAction(self.act_rect)
         group.addAction(self.act_circle)
         group.addAction(self.act_line)
+        group.addAction(self.act_freehand)
 
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")

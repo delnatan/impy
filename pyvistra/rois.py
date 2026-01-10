@@ -1036,3 +1036,137 @@ class LaneROI(RectangleROI):
         self.locked = locked
         if markers:
             self.set_markers(markers)
+
+
+class FreehandROI(ROI):
+    """
+    Freehand line ROI for tracing arbitrary paths.
+
+    Stores a sequence of (x, y) points that define the path.
+    """
+    def __init__(self, view, name="Freehand"):
+        super().__init__(view, name)
+        self.points = []  # List of (x, y) tuples
+        self.line = scene.visuals.Line(
+            pos=np.zeros((0, 3)),
+            color="magenta",
+            width=2,
+            connect="strip",
+            parent=self.view.scene,
+        )
+        self.visuals.append(self.line)
+
+    def add_point(self, point):
+        """Add a point to the freehand line during drawing."""
+        self.points.append(tuple(point))
+        self.data = {"points": self.points}
+        self._update_line_visual()
+        self._update_label_position()
+
+    def update(self, points):
+        """
+        Update the freehand line with a list of points.
+
+        Args:
+            points: List of (x, y) tuples
+        """
+        self.points = [tuple(p) for p in points]
+        self.data = {"points": self.points}
+        self._update_line_visual()
+        self._update_label_position()
+
+        if self.selected:
+            self._update_handles()
+
+    def _update_line_visual(self):
+        """Update the line visual from current points."""
+        if len(self.points) < 2:
+            # Need at least 2 points for a line
+            pos = np.zeros((0, 3))
+        else:
+            pos = np.zeros((len(self.points), 3))
+            for i, (x, y) in enumerate(self.points):
+                pos[i, :2] = (x, y)
+        self.line.set_data(pos=pos)
+
+    def _update_label_position(self):
+        if len(self.points) < 1:
+            return
+        # Position label at the midpoint of the path
+        mid_idx = len(self.points) // 2
+        mx, my = self.points[mid_idx]
+        self.label_visual.pos = (mx, my - 5, 0)
+
+    def _update_handles(self):
+        """Show handles at each point when selected."""
+        if len(self.points) < 1:
+            return
+
+        # Create handle for each point
+        self.handle_points = {i: self.points[i] for i in range(len(self.points))}
+
+        pts = list(self.handle_points.values())
+        self.handle_visual.set_data(
+            pos=np.array(pts), face_color="white", size=10
+        )
+
+    def hit_test(self, point):
+        """
+        Test if point hits the freehand line or its handles.
+
+        Returns:
+            - handle index if handle hit
+            - 'center' if line body hit
+            - None if no hit
+        """
+        # 1. Check handles first (if selected)
+        hid = super().hit_test(point)
+        if hid is not None:
+            return hid
+
+        # 2. Check proximity to any line segment
+        if len(self.points) < 2:
+            return None
+
+        p = np.array(point)
+        for i in range(len(self.points) - 1):
+            p1 = np.array(self.points[i])
+            p2 = np.array(self.points[i + 1])
+
+            # Point-to-segment distance
+            l2 = np.sum((p1 - p2) ** 2)
+            if l2 == 0:
+                continue
+            t = np.dot(p - p1, p2 - p1) / l2
+            t = max(0, min(1, t))
+            projection = p1 + t * (p2 - p1)
+            dist = np.linalg.norm(p - projection)
+
+            if dist < 5:  # 5 pixel tolerance
+                return "center"
+
+        return None
+
+    def move(self, delta):
+        """Move the entire freehand line by delta (dx, dy)."""
+        if len(self.points) < 1:
+            return
+
+        dx, dy = delta
+        new_points = [(x + dx, y + dy) for x, y in self.points]
+        self.update(new_points)
+
+    def adjust(self, handle_id, new_pos):
+        """Move a specific point to new_pos."""
+        if isinstance(handle_id, int) and 0 <= handle_id < len(self.points):
+            self.points[handle_id] = tuple(new_pos)
+            self.data = {"points": self.points}
+            self._update_line_visual()
+            self._update_label_position()
+            if self.selected:
+                self._update_handles()
+
+    def _update_visuals_from_data(self):
+        """Rebuild visuals from serialized data."""
+        if "points" in self.data:
+            self.update(self.data["points"])

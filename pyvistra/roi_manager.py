@@ -7,7 +7,7 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt
 from .manager import manager
-from .rois import CoordinateROI, RectangleROI, CircleROI, LineROI, LaneROI
+from .rois import CoordinateROI, RectangleROI, CircleROI, LineROI, LaneROI, FreehandROI
 from .analysis import plot_profile, crop_image, measure_intensity, align_lanes
 from .gel_analyzer import show_gel_analyzer
 
@@ -425,6 +425,8 @@ class ROIManager(QWidget):
                 roi = LineROI(self.active_window.view, name=item["name"])
             elif cls_name == "LaneROI":
                 roi = LaneROI(self.active_window.view, name=item["name"])
+            elif cls_name == "FreehandROI":
+                roi = FreehandROI(self.active_window.view, name=item["name"])
             else:
                 continue
                 
