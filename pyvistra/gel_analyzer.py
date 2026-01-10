@@ -188,7 +188,7 @@ class GelAnalyzerWidget(QWidget):
         display_layout.addWidget(self.show_borders_check)
 
         tip_label = QLabel(
-            "Tip: Shift+Click to add band, Ctrl+Click to remove\n"
+            "Tip: Shift+Click to add band, Ctrl/Cmd+Click to remove\n"
             "     Drag lines to adjust positions"
         )
         tip_label.setStyleSheet("color: gray; font-size: 10px;")

@@ -557,8 +557,9 @@ class ImageWindow(QMainWindow):
 
             # Handle modifier clicks on LaneROIs
             if isinstance(hit_roi, LaneROI):
-                # Ctrl+Click on a marker: remove it
-                if "Control" in event.modifiers:
+                # Ctrl+Click (or Cmd+Click on Mac) on a marker: remove it
+                has_ctrl_or_cmd = "Control" in event.modifiers or "Meta" in event.modifiers
+                if has_ctrl_or_cmd:
                     if isinstance(hit_handle, tuple) and hit_handle[0] == "marker":
                         marker_idx = hit_handle[1]
                         hit_roi.remove_marker(marker_idx)

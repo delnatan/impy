@@ -882,23 +882,29 @@ class LaneROI(RectangleROI):
         """Get list of marker y_local positions (sorted)."""
         return sorted(m["y_local"] for m in self._markers)
 
+    def _get_sorted_marker_indices(self):
+        """Get marker indices sorted by y_local position."""
+        return sorted(range(len(self._markers)), key=lambda i: self._markers[i]["y_local"])
+
     def update_marker_labels(self, labels):
         """
-        Update marker labels.
+        Update marker labels in sorted y_local order.
 
         Args:
-            labels: List of label strings, one per marker (in order)
+            labels: List of label strings, one per marker (in sorted y position order)
         """
-        for i, label in enumerate(labels):
-            if i < len(self._markers):
-                self._markers[i]["label"] = label
-                if i < len(self._marker_visuals):
-                    _, text_visual = self._marker_visuals[i]
-                    text_visual.text = label
-                    # Also update visibility based on whether label is non-empty
-                    text_visual.visible = self.show_marker_labels and bool(
-                        label
-                    )
+        # Get indices sorted by y_local to match how positions are returned
+        sorted_indices = self._get_sorted_marker_indices()
+
+        for label_idx, marker_idx in enumerate(sorted_indices):
+            if label_idx >= len(labels):
+                break
+            label = labels[label_idx]
+            self._markers[marker_idx]["label"] = label
+            if marker_idx < len(self._marker_visuals):
+                _, text_visual = self._marker_visuals[marker_idx]
+                text_visual.text = label
+                text_visual.visible = self.show_marker_labels and bool(label)
 
     def _get_bounds(self):
         """Get lane bounds (x_min, x_max, y_min, y_max)."""
