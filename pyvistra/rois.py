@@ -993,7 +993,8 @@ class LaneROI(RectangleROI):
         Returns:
             - ('marker', idx) if marker hit
             - handle_id if handle hit
-            - 'center' if body hit (and not locked)
+            - 'center' if body hit (and not locked, allows dragging)
+            - 'body' if body hit (and locked, no dragging but in bounds)
             - None if no hit
         """
         px, py = point
@@ -1013,10 +1014,12 @@ class LaneROI(RectangleROI):
         if hid:
             return hid
 
-        # 3. Check body (only if not locked)
-        if not self.locked:
-            if x_min <= px <= x_max and y_min <= py <= y_max:
-                return "center"
+        # 3. Check body
+        if x_min <= px <= x_max and y_min <= py <= y_max:
+            if self.locked:
+                return "body"  # In bounds but can't move
+            else:
+                return "center"  # In bounds and can move
 
         return None
 

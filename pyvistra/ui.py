@@ -568,10 +568,13 @@ class ImageWindow(QMainWindow):
                         self.canvas.update()
                         return
 
-                # Shift+Click on lane body: add a marker
+                # Shift+Click anywhere in lane: add a marker
+                # Works on body, center, or even on existing marker position
                 if "Shift" in event.modifiers:
-                    x_min, x_max, y_min, y_max = hit_roi._get_bounds()
-                    if x_min <= x <= x_max and y_min <= y <= y_max:
+                    if hit_handle in ("body", "center") or isinstance(
+                        hit_handle, tuple
+                    ):
+                        x_min, x_max, y_min, y_max = hit_roi._get_bounds()
                         y_local = y - y_min
                         hit_roi.add_marker(y_local)
                         # Trigger callback for live MW update
