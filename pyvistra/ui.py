@@ -187,7 +187,13 @@ class ImageWindow(QMainWindow):
         self.window_closing.emit(self)
 
         # Cleanup data buffers/proxies (ImageBuffer, Imaris5DProxy)
-        if hasattr(self.img_data, "close"):
+        # Use release() for ref-counted proxies, fall back to close()
+        if hasattr(self.img_data, "release"):
+            try:
+                self.img_data.release()
+            except Exception:
+                pass
+        elif hasattr(self.img_data, "close"):
             try:
                 self.img_data.close()
             except Exception:
@@ -339,8 +345,13 @@ class ImageWindow(QMainWindow):
         for c in range(self.renderer.num_channels):
             colormaps[c] = self.renderer.get_colormap_name(c)
 
+        # Acquire reference if proxy supports ref counting (for shared HDF5 files)
+        data = self.img_data
+        if hasattr(data, "acquire"):
+            data = data.acquire()
+
         self.ortho_viewer = OrthoViewer(
-            self.img_data,
+            data,
             self.meta,
             title=f"Ortho View - {self.windowTitle()}",
             channel_colormaps=colormaps,

@@ -54,6 +54,9 @@ class Imaris5DProxy:
     """
     Wraps ImarisReader to behave like a 5D numpy array (Time, Z, Channel, Y, X).
     This allows Vispy to 'slice' it without loading the whole file.
+
+    Uses reference counting for safe sharing between multiple viewers.
+    Call acquire() when sharing, release() when done.
     """
 
     def __init__(self, reader):
@@ -64,9 +67,26 @@ class Imaris5DProxy:
         self.shape = (t, z, c, y, x)
         self.dtype = reader.dtype
         self.ndim = 5
+        self._ref_count = 1  # Creator holds first reference
+
+    def acquire(self):
+        """Increment reference count. Call when sharing this proxy."""
+        self._ref_count += 1
+        return self
+
+    def release(self):
+        """
+        Decrement reference count and close if no more references.
+        Returns True if the resource was actually closed.
+        """
+        self._ref_count -= 1
+        if self._ref_count <= 0:
+            self.close()
+            return True
+        return False
 
     def close(self):
-        """Close the underlying HDF5 file handle."""
+        """Force close the underlying HDF5 file handle (ignores ref count)."""
         if self.reader is not None:
             self.reader.close()
             self.reader = None
