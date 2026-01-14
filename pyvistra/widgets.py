@@ -55,14 +55,44 @@ class HistogramWidget(QWidget):
     def set_data(self, data_slice, color_name):
         # 1. Compute Histogram
         # We use a fixed number of bins for display
-        self.data_min = float(np.nanmin(data_slice))
-        self.data_max = float(np.nanmax(data_slice))
+
+        # Handle edge cases: empty, all-NaN, or flat data
+        if data_slice.size == 0:
+            self.data_min = 0.0
+            self.data_max = 1.0
+            self.hist_data = np.zeros(100)
+            self.color = QColor(color_name)
+            self.update()
+            return
+
+        # Get finite values only for min/max calculation
+        finite_data = data_slice[np.isfinite(data_slice)]
+        if finite_data.size == 0:
+            # All NaN/inf data
+            self.data_min = 0.0
+            self.data_max = 1.0
+            self.hist_data = np.zeros(100)
+            self.color = QColor(color_name)
+            self.update()
+            return
+
+        self.data_min = float(np.min(finite_data))
+        self.data_max = float(np.max(finite_data))
+
+        # Ensure valid range for histogram
+        if not np.isfinite(self.data_min):
+            self.data_min = 0.0
+        if not np.isfinite(self.data_max):
+            self.data_max = 1.0
 
         if self.data_max <= self.data_min:
-            self.data_max = self.data_min + 1e-5
+            # Flat image: create artificial span around the value
+            center = self.data_min
+            self.data_min = center - 0.5 if center != 0 else -0.5
+            self.data_max = center + 0.5 if center != 0 else 0.5
 
         y, x = np.histogram(
-            data_slice, bins=100, range=(self.data_min, self.data_max)
+            finite_data, bins=100, range=(self.data_min, self.data_max)
         )
         self.hist_data = np.log1p(y)
 
@@ -86,7 +116,11 @@ class HistogramWidget(QWidget):
 
     def _x_to_val(self, x):
         w = self.width()
+        if w <= 0:
+            return self.data_min
         span = self.data_max - self.data_min
+        if span <= 0:
+            return self.data_min
         ratio = x / w
         val = self.data_min + (ratio * span)
         return max(self.data_min, min(val, self.data_max))
@@ -511,6 +545,36 @@ class ContrastDialog(QDialog):
 
         self.apply_auto_contrast()
 
+    def _safe_percentile_clim(self, data, pct_low, pct_high):
+        """Calculate percentile-based clim with edge case handling."""
+        # Filter to finite values
+        finite_data = data[np.isfinite(data)]
+        if finite_data.size == 0:
+            return 0.0, 1.0
+
+        # Ignore zeros (background) if possible
+        valid_data = finite_data[finite_data > 0]
+        if valid_data.size == 0:
+            valid_data = finite_data
+
+        mn, mx = np.nanpercentile(valid_data, (pct_low, pct_high))
+
+        # Handle NaN results
+        if not np.isfinite(mn):
+            mn = float(np.min(valid_data))
+        if not np.isfinite(mx):
+            mx = float(np.max(valid_data))
+
+        mn, mx = float(mn), float(mx)
+
+        # Ensure valid range (flat/binary image case)
+        if mx <= mn:
+            center = mn
+            mn = center - 0.5 if center != 0 else -0.5
+            mx = center + 0.5 if center != 0 else 0.5
+
+        return mn, mx
+
     def apply_auto_contrast(self):
         c_idx = self.combo.currentIndex()
         cache = self.viewer.renderer.current_slice_cache
@@ -519,16 +583,8 @@ class ContrastDialog(QDialog):
             # Apply to all channels
             for ch_idx in range(self.combo.count()):
                 plane = cache[ch_idx]
-                # Ignore zeros (background)
-                valid_data = plane[plane > 0]
-                if valid_data.size == 0:
-                    valid_data = plane  # Fallback if all zeros
-
-                mn, mx = map(
-                    float,
-                    np.nanpercentile(
-                        valid_data, (self.pct_low, self.pct_high)
-                    ),
+                mn, mx = self._safe_percentile_clim(
+                    plane, self.pct_low, self.pct_high
                 )
 
                 # Update Renderer
@@ -546,14 +602,8 @@ class ContrastDialog(QDialog):
 
         if cache is not None:
             plane = cache[c_idx]
-            # Ignore zeros (background)
-            valid_data = plane[plane > 0]
-            if valid_data.size == 0:
-                valid_data = plane  # Fallback if all zeros
-
-            mn, mx = map(
-                float,
-                np.nanpercentile(valid_data, (self.pct_low, self.pct_high)),
+            mn, mx = self._safe_percentile_clim(
+                plane, self.pct_low, self.pct_high
             )
 
             # Update Renderer
@@ -607,14 +657,43 @@ class CompactHistogramWidget(QWidget):
         self._last_mouse_x = 0
 
     def set_data(self, data_slice, color_name):
-        self.data_min = float(np.nanmin(data_slice))
-        self.data_max = float(np.nanmax(data_slice))
+        # Handle edge cases: empty, all-NaN, or flat data
+        if data_slice.size == 0:
+            self.data_min = 0.0
+            self.data_max = 1.0
+            self.hist_data = np.zeros(100)
+            self.color = QColor(color_name)
+            self.update()
+            return
+
+        # Get finite values only for min/max calculation
+        finite_data = data_slice[np.isfinite(data_slice)]
+        if finite_data.size == 0:
+            # All NaN/inf data
+            self.data_min = 0.0
+            self.data_max = 1.0
+            self.hist_data = np.zeros(100)
+            self.color = QColor(color_name)
+            self.update()
+            return
+
+        self.data_min = float(np.min(finite_data))
+        self.data_max = float(np.max(finite_data))
+
+        # Ensure valid range for histogram
+        if not np.isfinite(self.data_min):
+            self.data_min = 0.0
+        if not np.isfinite(self.data_max):
+            self.data_max = 1.0
 
         if self.data_max <= self.data_min:
-            self.data_max = self.data_min + 1e-5
+            # Flat image: create artificial span around the value
+            center = self.data_min
+            self.data_min = center - 0.5 if center != 0 else -0.5
+            self.data_max = center + 0.5 if center != 0 else 0.5
 
         y, x = np.histogram(
-            data_slice, bins=100, range=(self.data_min, self.data_max)
+            finite_data, bins=100, range=(self.data_min, self.data_max)
         )
         self.hist_data = np.log1p(y)
 
@@ -637,7 +716,11 @@ class CompactHistogramWidget(QWidget):
 
     def _x_to_val(self, x):
         w = self.width()
+        if w <= 0:
+            return self.data_min
         span = self.data_max - self.data_min
+        if span <= 0:
+            return self.data_min
         ratio = x / w
         val = self.data_min + (ratio * span)
         return max(self.data_min, min(val, self.data_max))
@@ -1054,6 +1137,36 @@ class ChannelPanel(QDialog):
         self.viewer.renderer.set_gamma(channel_idx, gamma)
         self.viewer.canvas.update()
 
+    def _safe_percentile_clim(self, data, pct_low, pct_high):
+        """Calculate percentile-based clim with edge case handling."""
+        # Filter to finite values
+        finite_data = data[np.isfinite(data)]
+        if finite_data.size == 0:
+            return 0.0, 1.0
+
+        # Ignore zeros (background) if possible
+        valid_data = finite_data[finite_data > 0]
+        if valid_data.size == 0:
+            valid_data = finite_data
+
+        mn, mx = np.nanpercentile(valid_data, (pct_low, pct_high))
+
+        # Handle NaN results
+        if not np.isfinite(mn):
+            mn = float(np.min(valid_data))
+        if not np.isfinite(mx):
+            mx = float(np.max(valid_data))
+
+        mn, mx = float(mn), float(mx)
+
+        # Ensure valid range (flat/binary image case)
+        if mx <= mn:
+            center = mn
+            mn = center - 0.5 if center != 0 else -0.5
+            mx = center + 0.5 if center != 0 else 0.5
+
+        return mn, mx
+
     def _auto_contrast_all(self):
         """Apply auto contrast to all channels."""
         cache = self.viewer.renderer.current_slice_cache
@@ -1063,11 +1176,7 @@ class ChannelPanel(QDialog):
         for c in range(len(self.channel_rows)):
             if c < cache.shape[0]:
                 plane = cache[c]
-                valid_data = plane[plane > 0]
-                if valid_data.size == 0:
-                    valid_data = plane
-
-                mn, mx = map(float, np.nanpercentile(valid_data, (0.5, 99.98)))
+                mn, mx = self._safe_percentile_clim(plane, 0.5, 99.98)
                 self.viewer.renderer.set_clim(c, mn, mx)
                 self.channel_rows[c].set_clim(mn, mx)
 
