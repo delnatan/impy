@@ -293,6 +293,10 @@ class ImageWindow(QMainWindow):
         ortho_action.triggered.connect(self.show_ortho_view)
         image_menu.addAction(ortho_action)
 
+        volume_action = QAction("3D Volume View", self)
+        volume_action.triggered.connect(self.show_volume_view)
+        image_menu.addAction(volume_action)
+
         image_menu.addSeparator()
 
         transform_action = QAction("Transform...", self)
@@ -346,6 +350,24 @@ class ImageWindow(QMainWindow):
             channel_colormaps=colormaps,
         )
         self.ortho_viewer.show()
+
+    def show_volume_view(self):
+        """Open 3D volume rendering view."""
+        from .volume import VolumeViewer
+
+        # Acquire reference if proxy supports ref counting (for shared HDF5 files)
+        data = self.img_data
+        if hasattr(data, "acquire"):
+            data = data.acquire()
+
+        self.volume_viewer = VolumeViewer(
+            data,
+            self.meta,
+            title=f"3D Volume - {self.windowTitle()}",
+            channel=self.c_idx if hasattr(self, "c_idx") else 0,
+            time=self.t_idx if hasattr(self, "t_idx") else 0,
+        )
+        self.volume_viewer.show()
 
     def update_cursor(self):
         tool = manager.active_tool
@@ -884,7 +906,7 @@ class Toolbar(QMainWindow):
             print(f"Error opening {filepath}: {e}")
 
 
-def imshow(data, meta_or_title=None, dims=None, *, title=None):
+def imshow(data, meta_or_title=None, dims=None, *, title=None, scale=None):
     """
     Convenience function to show an image.
 
@@ -895,6 +917,9 @@ def imshow(data, meta_or_title=None, dims=None, *, title=None):
                     Only used for numpy arrays. If None, heuristics are used.
         title (str): Window title (keyword-only, for backward compatibility).
                      Ignored if meta_or_title is provided.
+        scale (tuple): Pixel spacing as (z, y, x) in physical units (e.g. microns).
+                       Used for proper aspect ratio in OrthoViewer and VolumeViewer.
+                       Overrides scale from metadata if both are provided.
 
     Examples:
         # From load_image (recommended)
@@ -905,6 +930,12 @@ def imshow(data, meta_or_title=None, dims=None, *, title=None):
         imshow(my_array, "My Title")
         imshow(my_array, title="My Title")
         imshow(my_array, dims="zcyx")
+
+        # With explicit pixel spacing (z=0.5um, y/x=0.1um)
+        imshow(my_array, dims="zyx", scale=(0.5, 0.1, 0.1))
+
+        # With title and scale
+        imshow(my_array, "My Title", dims="zcyx", scale=(0.5, 0.1, 0.1))
     """
     # Ensure QApplication exists
     app = QApplication.instance()
@@ -929,6 +960,14 @@ def imshow(data, meta_or_title=None, dims=None, *, title=None):
         title_str = meta.get("filename", "Image")
     elif isinstance(meta_or_title, str):
         title_str = meta_or_title
+
+    # If scale is provided, merge it into metadata
+    if scale is not None:
+        if meta is None:
+            meta = {}
+        else:
+            meta = meta.copy()  # Don't mutate original
+        meta["scale"] = scale
 
     # Handle different data types
     if isinstance(data, (Imaris5DProxy, Numpy5DProxy)):
