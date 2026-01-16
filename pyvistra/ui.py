@@ -906,7 +906,7 @@ class Toolbar(QMainWindow):
             print(f"Error opening {filepath}: {e}")
 
 
-def imshow(data, meta_or_title=None, dims=None, *, title=None, scale=None):
+def imshow(data, meta_or_title=None, dims=None, *, title=None, scale=None, colormap=None):
     """
     Convenience function to show an image.
 
@@ -920,6 +920,11 @@ def imshow(data, meta_or_title=None, dims=None, *, title=None, scale=None):
         scale (tuple): Pixel spacing as (z, y, x) in physical units (e.g. microns).
                        Used for proper aspect ratio in OrthoViewer and VolumeViewer.
                        Overrides scale from metadata if both are provided.
+        colormap (str or dict): Colormap name or dict mapping channel indices to names.
+                                Available colormaps: "viridis", "plasma", "magma", "inferno",
+                                "cividis", "hot", "cool", "coolwarm", "turbo", "gray",
+                                "Orange", "Green", "Cyan", "Magenta", "Yellow", "White",
+                                "Red", "Pure Green", "Blue".
 
     Examples:
         # From load_image (recommended)
@@ -936,6 +941,12 @@ def imshow(data, meta_or_title=None, dims=None, *, title=None, scale=None):
 
         # With title and scale
         imshow(my_array, "My Title", dims="zcyx", scale=(0.5, 0.1, 0.1))
+
+        # With colormap (single colormap for all channels)
+        imshow(my_array, colormap="viridis")
+
+        # With per-channel colormaps
+        imshow(my_array, colormap={0: "Green", 1: "Magenta"})
     """
     # Ensure QApplication exists
     app = QApplication.instance()
@@ -985,6 +996,19 @@ def imshow(data, meta_or_title=None, dims=None, *, title=None, scale=None):
         )
 
     viewer = ImageWindow(data, title=title_str, meta=meta)
+
+    # Apply colormap(s) if specified
+    if colormap is not None:
+        if isinstance(colormap, str):
+            # Apply same colormap to all channels
+            for c in range(viewer.renderer.num_channels):
+                viewer.renderer.set_colormap(c, colormap)
+        elif isinstance(colormap, dict):
+            # Apply per-channel colormaps
+            for c, cmap_name in colormap.items():
+                viewer.renderer.set_colormap(c, cmap_name)
+        viewer.canvas.update()
+
     viewer.show()
 
     return viewer
