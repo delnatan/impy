@@ -16,6 +16,7 @@ from .io import (
 )
 from .manager import WindowManager, manager
 from .ortho import OrthoViewer
+from .volume import VolumeViewer
 from .roi_manager import ROIManager, get_roi_manager
 from .gel_analyzer import GelAnalyzerWidget, get_gel_analyzer, show_gel_analyzer
 from .rois import ROI, CircleROI, CoordinateROI, LineROI, RectangleROI, LaneROI
@@ -52,6 +53,7 @@ __all__ = [
     "show_gel_analyzer",
     # viewers
     "OrthoViewer",
+    "VolumeViewer",
     # readers
     "ImarisReader",
 ]
