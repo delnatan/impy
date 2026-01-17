@@ -24,6 +24,99 @@ HANDLE_COLOR = QColor(255, 255, 255)
 HANDLE_WIDTH = 6
 
 
+def compute_spinbox_params(data_min, data_max):
+    """
+    Compute adaptive spinbox parameters based on data range.
+    Returns (decimals, step_size) appropriate for the data's dynamic range.
+
+    For normalized images (0-1 range with small values), this provides
+    sufficient precision. For 16-bit images (0-65535), it avoids
+    excessive decimals.
+    """
+    import math
+
+    span = data_max - data_min
+    if span <= 0:
+        span = 1.0
+
+    # Calculate order of magnitude of the span
+    # For span=1, order=0; span=0.001, order=-3; span=65535, order=4.8
+    try:
+        order = math.floor(math.log10(abs(span)))
+    except ValueError:
+        order = 0
+
+    # Decimals: provide ~3-4 significant figures within the span
+    # For span=1 (order=0): decimals=4 (can represent 0.0001)
+    # For span=0.001 (order=-3): decimals=7 (can represent 0.0000001)
+    # For span=65535 (order=4): decimals=0
+    decimals = max(0, min(4 - order, 10))  # Cap at 10 decimals
+
+    # Step size: ~1% of span, rounded to a clean number
+    step = span * 0.01
+    if step > 0:
+        try:
+            step_order = math.floor(math.log10(abs(step)))
+            # Round to 1 significant figure
+            step = round(step, -step_order) if step_order >= 0 else round(
+                step, abs(step_order)
+            )
+        except (ValueError, OverflowError):
+            step = span * 0.01
+
+    return decimals, step
+
+
+def format_value_adaptive(value, data_min, data_max):
+    """
+    Format a value with adaptive precision based on data range.
+    Returns a string representation appropriate for the dynamic range.
+    """
+    import math
+
+    span = data_max - data_min
+    if span <= 0:
+        span = 1.0
+
+    try:
+        order = math.floor(math.log10(abs(span)))
+    except ValueError:
+        order = 0
+
+    # Use similar logic to spinbox decimals
+    decimals = max(0, min(4 - order, 8))
+
+    # For very small or very large values, use scientific notation
+    abs_val = abs(value) if value != 0 else abs(span)
+    if abs_val > 0:
+        try:
+            val_order = math.floor(math.log10(abs_val))
+            if val_order < -4 or val_order > 6:
+                return f"{value:.2e}"
+        except ValueError:
+            pass
+
+    return f"{value:.{decimals}f}"
+
+
+def configure_spinbox_for_range(spinbox, data_min, data_max):
+    """
+    Configure a QDoubleSpinBox with appropriate decimals, step, and range
+    based on the data's dynamic range.
+    """
+    decimals, step = compute_spinbox_params(data_min, data_max)
+
+    # Add some margin to the range
+    span = data_max - data_min
+    margin = span * 0.1 if span > 0 else 1.0
+
+    spinbox.blockSignals(True)
+    spinbox.setDecimals(decimals)
+    spinbox.setSingleStep(step)
+    spinbox.setRange(data_min - margin, data_max + margin)
+    spinbox.blockSignals(False)
+
+
 class HistogramWidget(QWidget):
     """
     Interactive Histogram Widget.
@@ -142,9 +235,9 @@ class HistogramWidget(QWidget):
         font = QFont()
         painter.setFont(font)
 
-        # Draw min/max values at handles
-        min_str = f"{self.clim_min:.1f}"
-        max_str = f"{self.clim_max:.1f}"
+        # Draw min/max values at handles (adaptive formatting)
+        min_str = format_value_adaptive(self.clim_min, self.data_min, self.data_max)
+        max_str = format_value_adaptive(self.clim_max, self.data_min, self.data_max)
 
         # Adjust text position to stay on screen
         fm = painter.fontMetrics()
@@ -388,6 +481,12 @@ class ContrastDialog(QDialog):
             # Update Histogram Data
             color = self.viewer.renderer.channel_colors[c_idx % 6]
             self.hist_widget.set_data(plane, color)
+
+            # Configure spinboxes for the data range (adaptive precision)
+            data_min = self.hist_widget.data_min
+            data_max = self.hist_widget.data_max
+            configure_spinbox_for_range(self.min_spin, data_min, data_max)
+            configure_spinbox_for_range(self.max_spin, data_min, data_max)
 
             # Get current clim from renderer
             curr_min, curr_max = self.viewer.renderer.get_clim(c_idx)
@@ -916,6 +1015,12 @@ class ChannelRow(QWidget):
         """Update histogram data and color."""
         self._update_color_swatch(color)
         self.histogram.set_data(data_slice, color)
+
+        # Configure spinboxes for the data range (adaptive precision)
+        data_min = self.histogram.data_min
+        data_max = self.histogram.data_max
+        configure_spinbox_for_range(self.min_spin, data_min, data_max)
+        configure_spinbox_for_range(self.max_spin, data_min, data_max)
 
     def set_clim(self, vmin, vmax):
         """Update contrast limits display (histogram and spinboxes)."""
