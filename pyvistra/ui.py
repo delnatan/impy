@@ -255,8 +255,14 @@ class ImageWindow(QMainWindow):
         """Return the current image data."""
         return self.img_data
 
-    def set_data(self, new_data):
-        """Update the image data in place."""
+    def set_data(self, new_data, metadata=None):
+        """Update the image data in place.
+
+        Args:
+            new_data: 5D array-like (T, Z, C, Y, X)
+            metadata: Optional dict to replace window's metadata entirely.
+                      If provided, replaces self.meta.
+        """
         if new_data.ndim != 5:
             # Try to reshape or warn? For now assume 5D or compatible
             pass
@@ -264,6 +270,11 @@ class ImageWindow(QMainWindow):
         self.img_data = new_data
         # Update renderer data
         self.renderer.data = new_data
+
+        # Update metadata if provided
+        if metadata is not None:
+            self.meta = metadata
+
         self.renderer.update_slice(self.t_idx, self.z_idx)
         self.canvas.update()
 
@@ -729,6 +740,7 @@ class Toolbar(QMainWindow):
         self.setGeometry(100, 100, 600, 100)  # Wider
         self.setAcceptDrops(True)
         self.open_windows = []
+        self._psf_dialog = None  # Lazy singleton for PSF dialog
 
         # Central Widget with Layout
         central = QWidget()
@@ -800,6 +812,14 @@ class Toolbar(QMainWindow):
         open_action.triggered.connect(self.open_file_dialog)
         file_menu.addAction(open_action)
 
+        file_menu.addSeparator()
+
+        compute_psf_action = QAction("Compute PSF...", self)
+        compute_psf_action.triggered.connect(self._show_psf_dialog)
+        file_menu.addAction(compute_psf_action)
+
+        file_menu.addSeparator()
+
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
@@ -823,6 +843,15 @@ class Toolbar(QMainWindow):
         console.show()
         console.raise_()
 
+    def _show_psf_dialog(self):
+        """Show the PSF computation dialog."""
+        from .widgets import PSFComputeDialog
+
+        if self._psf_dialog is None:
+            self._psf_dialog = PSFComputeDialog(parent=self)
+        self._psf_dialog.show()
+        self._psf_dialog.raise_()
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.accept()
@@ -837,9 +866,16 @@ class Toolbar(QMainWindow):
         image_files = []
 
         for f in files:
-            if os.path.isdir(f):
+            # Check for .psf.zarr directory (PSF files)
+            if f.endswith('.psf.zarr') and os.path.isdir(f):
+                image_files.append(f)
+            elif os.path.isdir(f):
                 # Folder: collect all images recursively
-                for root, _, names in os.walk(f):
+                for root, dirs, names in os.walk(f):
+                    # Check for .psf.zarr directories
+                    for d in dirs:
+                        if d.endswith('.psf.zarr'):
+                            image_files.append(os.path.join(root, d))
                     for name in names:
                         if os.path.splitext(name)[1].lower() in supported_ext:
                             image_files.append(os.path.join(root, name))

@@ -446,9 +446,14 @@ def load_image(filepath, use_memmap=True):
         - .ims (Imaris)
         - .tif, .tiff (TIFF)
         - .png, .jpg, .jpeg (standard images via matplotlib)
+        - .psf.zarr (PSF files)
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
+
+    # Handle PSF zarr files
+    if filepath.endswith('.psf.zarr') or filepath.endswith('.psf'):
+        return load_psf(filepath)
 
     ext = os.path.splitext(filepath)[1].lower()
 
@@ -612,3 +617,93 @@ def save_tiff(filepath, data, scale=(1.0, 1.0, 1.0), axes="TZCYX", input_axes=No
     tifffile.imwrite(
         filepath, image, imagej=True, resolution=(rx, ry), metadata=metadata
     )
+
+
+def save_psf(filepath, psf_data, metadata):
+    """
+    Save PSF to .psf.zarr format.
+
+    Args:
+        filepath: Path ending in .psf.zarr
+        psf_data: 3D array (Nz, Ny, Nx) or 5D ImageBuffer/array
+        metadata: dict with PSF parameters
+    """
+    import json
+    from datetime import datetime
+
+    # Ensure .psf.zarr extension
+    filepath = str(filepath)
+    if not filepath.endswith('.psf.zarr'):
+        filepath += '.psf.zarr'
+
+    # Get data as numpy array
+    if hasattr(psf_data, '__getitem__'):
+        data = np.asarray(psf_data[:])
+    else:
+        data = np.asarray(psf_data)
+
+    # Normalize to 5D if needed (3D -> 5D)
+    if data.ndim == 3:
+        # (Nz, Ny, Nx) -> (1, Nz, 1, Ny, Nx)
+        data = data[np.newaxis, :, np.newaxis, :, :]
+    elif data.ndim != 5:
+        raise ValueError(f"PSF data must be 3D or 5D, got {data.ndim}D")
+
+    # Remove existing directory if it exists
+    filepath_path = Path(filepath)
+    if filepath_path.exists():
+        shutil.rmtree(filepath_path)
+
+    # Create zarr array
+    store = zarr.open(
+        filepath,
+        mode='w',
+        shape=data.shape,
+        dtype=data.dtype,
+        chunks=(1, min(16, data.shape[1]), data.shape[2], min(512, data.shape[3]), min(512, data.shape[4])),
+    )
+
+    # Write data
+    store[:] = data
+
+    # Write metadata to .zattrs
+    # Zarr stores attrs in a separate file
+    store.attrs.update(metadata)
+
+
+def load_psf(filepath):
+    """
+    Load PSF from .psf.zarr format.
+
+    Args:
+        filepath: Path to .psf.zarr directory
+
+    Returns:
+        tuple: (Numpy5DProxy, metadata_dict)
+    """
+    filepath = str(filepath)
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"PSF file not found: {filepath}")
+
+    # Open zarr store
+    store = zarr.open(filepath, mode='r')
+
+    # Read data into memory and wrap in proxy
+    data = np.asarray(store[:])
+    proxy = Numpy5DProxy(data)
+
+    # Read metadata from .zattrs
+    metadata = dict(store.attrs)
+
+    # Add filename to metadata
+    metadata['filename'] = os.path.basename(filepath)
+    metadata['shape'] = data.shape
+    metadata['is_rgb'] = False
+
+    # Extract scale from spacing if available
+    if 'spacing' in metadata:
+        spacing = metadata['spacing']
+        metadata['scale'] = tuple(spacing)
+
+    return proxy, metadata

@@ -7,7 +7,7 @@ name = "pyvistra"
 version = "0.1.2"
 description = "Image analysis and ROI management tool"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -26,6 +26,7 @@ dependencies = [
     "matplotlib",
     "zarr>=3.0",
     "scipy",
+    "pyopengl>=3.1.10",
 ]
 
 [project.scripts]

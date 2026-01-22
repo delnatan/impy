@@ -1,0 +1,17 @@
+{
+  "BinningX": "1",
+  "BinningY": "1",
+  "Bottom": "509",
+  "ContrastLevel": "50",
+  "DateAndTime": "2025-08-26 12:47:25",
+  "FieldStorageStrategyKey": "FilePerFieldStrategy",
+  "FusionVersion": "2.5.0.219",
+  "Height": "1024",
+  "Left": "509",
+  "NumberOfChannels": "1",
+  "NumberOfTimePoints": "120",
+  "NumberOfZPoints": "33",
+  "PSF Settings Configuration V2": "{\r\n  \"ImmersionMedium\": 1,\r\n  \"ImagingModality\": 0,\r\n  \"SpinningDiskPinholeRadius\": 2,\r\n  \"CondenserNA\": 1.42,\r\n  \"BackProjectedPinholeRadius\": 0.0,\r\n  \"ObjectiveLensNA\": 1.42,\r\n  \"ObjectiveLensMagnification\": 60.0,\r\n  \"ResolutionX\": 0.1043373349574579204197347803,\r\n  \"ResolutionY\": 0.1043373349574579204197347803,\r\n  \"ResolutionZ\": 1.0,\r\n  \"SpecimenRefractiveIndex\": 1.365,\r\n  \"AcquisitionDistanceFromCoverslip\": 16.0,\r\n  \"ClearViewChannelDetailsList\": [\r\n    {\r\n      \"Index\": 1,\r\n      \"Name\": \"Confocal - 488\",\r\n      \"ExcitationWavelength\": \"488 nm\",\r\n      \"EmissionWavelength\": \"569 nm\",\r\n      \"IsEmissionWavelengthValid\": true,\r\n      \"IsExcitationWavelengthValid\": true\r\n    }\r\n  ],\r\n  \"CustomImmersionMediumRefractiveIndex\": 0.0\r\n}",
+  "Width": "1024",
+  "ZStorageStrategyKey": "AllZInSingleFileStrategy"
+}
