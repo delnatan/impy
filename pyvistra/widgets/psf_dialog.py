@@ -6,12 +6,15 @@ from qtpy.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from .output_selector import ImageOutputSelector
@@ -34,8 +37,17 @@ class PSFComputeDialog(QDialog):
         self._buffer = None  # Holds computed PSF as ImageBuffer
         self._metadata = None  # PSF parameters for saving
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(10)
+
+        # Scroll area for form content
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
         # Modality Selector
@@ -257,26 +269,29 @@ class PSFComputeDialog(QDialog):
         )
         layout.addWidget(self.output_selector)
 
-        # Compute Button
+        # Finalize scroll area
+        layout.addStretch()
+        scroll_area.setWidget(scroll_content)
+        main_layout.addWidget(scroll_area, stretch=1)
+
+        # Compute Button (pinned at bottom, outside scroll area)
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         self.compute_btn = QPushButton("Compute")
         self.compute_btn.clicked.connect(self._compute_psf)
         btn_layout.addWidget(self.compute_btn)
         btn_layout.addStretch()
-        layout.addLayout(btn_layout)
+        main_layout.addLayout(btn_layout)
 
-        # Status Label
+        # Status Label (pinned at bottom, outside scroll area)
         self.status_label = QLabel("Ready")
         self.status_label.setStyleSheet("color: #888;")
-        layout.addWidget(self.status_label)
+        main_layout.addWidget(self.status_label)
 
     def _on_modality_changed(self, index):
         """Show/hide spinning disk parameters based on selection."""
         is_spinning_disk = index == 1
         self.sd_group.setVisible(is_spinning_disk)
-        # Adjust dialog size
-        self.adjustSize()
 
     def _validate_parameters(self):
         """Validate parameters before computation."""

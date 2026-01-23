@@ -866,16 +866,17 @@ class Toolbar(QMainWindow):
         image_files = []
 
         for f in files:
-            # Check for .psf.zarr directory (PSF files)
-            if f.endswith('.psf.zarr') and os.path.isdir(f):
+            # Check for .zarr directories (including .psf.zarr)
+            if f.endswith('.zarr') and os.path.isdir(f):
                 image_files.append(f)
             elif os.path.isdir(f):
                 # Folder: collect all images recursively
                 for root, dirs, names in os.walk(f):
-                    # Check for .psf.zarr directories
-                    for d in dirs:
-                        if d.endswith('.psf.zarr'):
-                            image_files.append(os.path.join(root, d))
+                    # Check for .zarr directories (skip descending into them)
+                    zarr_dirs = [d for d in dirs if d.endswith('.zarr')]
+                    for d in zarr_dirs:
+                        image_files.append(os.path.join(root, d))
+                        dirs.remove(d)  # Don't descend into zarr directories
                     for name in names:
                         if os.path.splitext(name)[1].lower() in supported_ext:
                             image_files.append(os.path.join(root, name))

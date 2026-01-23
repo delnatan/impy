@@ -228,6 +228,92 @@ class Numpy5DProxy:
         return self.array[key]
 
 
+class Zarr5DProxy:
+    """
+    Wraps a zarr array to behave like a 5D numpy array (T, Z, C, Y, X).
+    Data is loaded lazily - only requested slices are read from disk.
+    """
+
+    def __init__(self, zarr_array, source_ndim):
+        """
+        Args:
+            zarr_array: The zarr.Array to wrap
+            source_ndim: Original dimensionality of the data (for reshaping)
+        """
+        self._store = zarr_array
+        self._source_ndim = source_ndim
+        self.dtype = zarr_array.dtype
+        self.ndim = 5
+
+        # Calculate 5D shape based on source dimensions
+        src_shape = zarr_array.shape
+        if source_ndim == 2:  # (Y, X) -> (1, 1, 1, Y, X)
+            self.shape = (1, 1, 1, src_shape[0], src_shape[1])
+        elif source_ndim == 3:  # (Z, Y, X) -> (1, Z, 1, Y, X)
+            self.shape = (1, src_shape[0], 1, src_shape[1], src_shape[2])
+        elif source_ndim == 4:  # (Z, C, Y, X) -> (1, Z, C, Y, X)
+            self.shape = (1, src_shape[0], src_shape[1], src_shape[2], src_shape[3])
+        elif source_ndim == 5:  # Already 5D
+            self.shape = src_shape
+        else:
+            raise ValueError(f"Unsupported zarr array dimensionality: {source_ndim}")
+
+    def _normalize_key(self, key):
+        """Normalize slicing key to 5D tuple."""
+        if not isinstance(key, tuple):
+            key = (key,)
+
+        # Expand Ellipsis
+        if Ellipsis in key:
+            ellipsis_idx = key.index(Ellipsis)
+            n_non_ellipsis = len(key) - 1
+            n_expand = 5 - n_non_ellipsis
+            key = (
+                key[:ellipsis_idx]
+                + (slice(None),) * n_expand
+                + key[ellipsis_idx + 1 :]
+            )
+
+        # Fill missing dimensions
+        if len(key) < 5:
+            key = key + (slice(None),) * (5 - len(key))
+
+        return key
+
+    def _map_key_to_source(self, key_5d):
+        """Map 5D key back to source array dimensions."""
+        t, z, c, y, x = key_5d
+
+        if self._source_ndim == 2:
+            # Source is (Y, X), ignore T, Z, C
+            return (y, x)
+        elif self._source_ndim == 3:
+            # Source is (Z, Y, X), ignore T, C
+            return (z, y, x)
+        elif self._source_ndim == 4:
+            # Source is (Z, C, Y, X), ignore T
+            return (z, c, y, x)
+        else:
+            # Source is 5D
+            return key_5d
+
+    def __getitem__(self, key):
+        key_5d = self._normalize_key(key)
+        source_key = self._map_key_to_source(key_5d)
+
+        # Load data from zarr (lazy - only loads requested slice)
+        data = np.asarray(self._store[source_key])
+
+        # Reshape result to match expected 5D output shape
+        # This handles singleton dimensions that were indexed with integers
+        return data
+
+    def close(self):
+        """Close the zarr store if it has a close method."""
+        if hasattr(self._store, 'store') and hasattr(self._store.store, 'close'):
+            self._store.store.close()
+
+
 class ImageBuffer:
     """
     Zarr-backed 5D array buffer for streaming image operations.
@@ -437,6 +523,86 @@ def normalize_to_5d(data, dims=None, rgb=None):
     return Numpy5DProxy(final_img)
 
 
+def load_zarr(filepath):
+    """
+    Load a zarr array from a .zarr directory with lazy loading.
+
+    Supports:
+        - Standard zarr arrays (any dimensionality, normalized to 5D)
+        - OME-Zarr (multiscale, uses highest resolution from '0/')
+
+    Args:
+        filepath: Path to .zarr directory
+
+    Returns:
+        tuple: (Zarr5DProxy, metadata_dict)
+    """
+    filepath = str(filepath)
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Zarr file not found: {filepath}")
+
+    # Open zarr store
+    store = zarr.open(filepath, mode='r')
+
+    # Check if it's a Group or Array
+    is_group = isinstance(store, zarr.Group)
+
+    # Find the zarr array to wrap (don't load data yet)
+    zarr_array = None
+    attrs = {}
+
+    if is_group and '0' in store:
+        # OME-Zarr: use highest resolution level
+        zarr_array = store['0']
+        attrs = dict(store.attrs) if hasattr(store, 'attrs') else {}
+    elif is_group:
+        # Group without '0' - look for a data array
+        for key in ['data', 'array']:
+            if key in store and isinstance(store[key], zarr.Array):
+                zarr_array = store[key]
+                break
+        if zarr_array is None:
+            # Find first array in group
+            for key in store.keys():
+                if isinstance(store[key], zarr.Array):
+                    zarr_array = store[key]
+                    break
+        if zarr_array is None:
+            raise ValueError(f"No array found in zarr group: {filepath}")
+        attrs = dict(store.attrs) if hasattr(store, 'attrs') else {}
+    else:
+        # Direct zarr array
+        zarr_array = store
+        attrs = dict(store.attrs) if hasattr(store, 'attrs') else {}
+
+    # Wrap in lazy proxy
+    source_ndim = len(zarr_array.shape)
+    proxy = Zarr5DProxy(zarr_array, source_ndim)
+
+    # Build metadata
+    metadata = {
+        'filename': os.path.basename(filepath),
+        'shape': proxy.shape,
+        'is_rgb': False,
+    }
+
+    # Extract scale from attrs if available
+    if 'scale' in attrs:
+        metadata['scale'] = tuple(attrs['scale'])
+    elif 'spacing' in attrs:
+        metadata['scale'] = tuple(attrs['spacing'])
+    else:
+        metadata['scale'] = (1.0, 1.0, 1.0)
+
+    # Copy other attrs to metadata
+    for key, value in attrs.items():
+        if key not in metadata:
+            metadata[key] = value
+
+    return proxy, metadata
+
+
 def load_image(filepath, use_memmap=True):
     """
     Loads an image and normalizes it to (T, Z, C, Y, X).
@@ -446,14 +612,19 @@ def load_image(filepath, use_memmap=True):
         - .ims (Imaris)
         - .tif, .tiff (TIFF)
         - .png, .jpg, .jpeg (standard images via matplotlib)
+        - .zarr (Zarr arrays, including OME-Zarr)
         - .psf.zarr (PSF files)
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    # Handle PSF zarr files
+    # Handle PSF zarr files (check before general .zarr)
     if filepath.endswith('.psf.zarr') or filepath.endswith('.psf'):
         return load_psf(filepath)
+
+    # Handle general zarr directories
+    if filepath.endswith('.zarr') and os.path.isdir(filepath):
+        return load_zarr(filepath)
 
     ext = os.path.splitext(filepath)[1].lower()
 
