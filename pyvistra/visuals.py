@@ -38,6 +38,7 @@ COLORMAPS = {
     "coolwarm": "mpl:coolwarm",
     "turbo": "mpl:turbo",
     "gray": "mpl:gray",
+    "gray_r": "mpl:gray_r",
 }
 
 # Default channel colormaps (original microscope colors)
