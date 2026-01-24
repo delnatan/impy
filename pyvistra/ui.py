@@ -463,10 +463,16 @@ class ImageWindow(QMainWindow):
         self.z_idx = 0
         self.c_idx = 0
 
-        # Update renderer
-        self.renderer.data = new_data
-        self.renderer.num_channels = self.C
-        self.renderer._init_colormaps()
+        # Remove old renderer layers
+        for layer in self.renderer.layers:
+            layer.parent = None
+
+        # Create new renderer with updated data
+        is_rgb = self.meta.get("is_rgb", False)
+        self.renderer = CompositeImageVisual(
+            self.view, self.img_data, is_rgb=is_rgb
+        )
+        self.renderer.reset_camera(self.img_data.shape)
 
         # Rebuild controls
         self._rebuild_controls()
