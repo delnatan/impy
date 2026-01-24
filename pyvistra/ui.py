@@ -26,6 +26,9 @@ from vispy import app, scene
 
 from .console import console_exists, get_console
 from .io import Imaris5DProxy, Numpy5DProxy, load_image, normalize_to_5d
+from .label_manager import get_label_manager, label_manager_exists
+from .label_visual import LabelOverlayVisual
+from .labels import SparseLabels
 from .manager import manager
 from .ortho import OrthoViewer
 from .roi_manager import get_roi_manager, roi_manager_exists
@@ -56,6 +59,7 @@ class ImageWindow(QMainWindow):
     roi_added = Signal(object)  # Emits the ROI that was added
     roi_removed = Signal(object)  # Emits the ROI that was removed
     roi_selection_changed = Signal(object)  # Emits the selected ROI (or None)
+    label_changed = Signal(object)  # Emits SparseLabels when labels change
 
     def __init__(self, data_or_path, title="Image", meta=None):
         super().__init__()
@@ -167,7 +171,19 @@ class ImageWindow(QMainWindow):
         self._space_held_previous_tool = None
         # Toolbar is now external
 
-        # 9. Events
+        # 9. Label/Mask State
+        self.labels = None  # SparseLabels instance
+        self.label_overlay = None  # LabelOverlayVisual
+        self._active_label = 1
+        self._brush_size = 5
+        self._preserve_labels = True  # Protect existing labels by default
+        self._painting = False
+        self._contour_mode = False  # Right-click contour fill mode
+        self._contour_start = None  # (x, y) of contour start
+        self._contour_marker = None  # Visual marker for start point
+        self._stroke_points = []  # Accumulated path for contour
+
+        # 10. Events
         self.canvas.events.mouse_move.connect(self.on_mouse_move)
         self.canvas.events.mouse_press.connect(self.on_mouse_press)
         self.canvas.events.mouse_release.connect(self.on_mouse_release)
@@ -228,6 +244,10 @@ class ImageWindow(QMainWindow):
                     roi.label_visual.visible = show
                 w.canvas.update()
         elif event.key() == Qt.Key_Escape:
+            # Cancel contour mode if active
+            if self._contour_mode:
+                self._cancel_contour()
+                return
             # Deselect all ROIs
             for roi in self.rois:
                 roi.select(False)
@@ -239,6 +259,51 @@ class ImageWindow(QMainWindow):
                 self._space_held_previous_tool = manager.active_tool
                 manager.active_tool = "pointer"
                 self.update_cursor()
+        # Label/Mask shortcuts
+        elif event.key() == Qt.Key_B:
+            # Brush tool
+            manager.active_tool = "brush"
+            self.update_cursor()
+        elif event.key() == Qt.Key_E:
+            # Eraser tool
+            manager.active_tool = "eraser"
+            self.update_cursor()
+        elif event.key() == Qt.Key_N:
+            # New label (next available ID)
+            if self.labels is not None:
+                existing = set(self.labels.labels)
+                new_id = 1
+                while new_id in existing:
+                    new_id += 1
+                self._active_label = new_id
+        elif event.key() == Qt.Key_P:
+            # Toggle preserve labels
+            self._preserve_labels = not self._preserve_labels
+        elif event.key() == Qt.Key_V:
+            # Toggle label overlay visibility
+            if self.label_overlay is not None:
+                self.label_overlay.visible = not self.label_overlay.visible
+                self.canvas.update()
+        elif event.key() == Qt.Key_BracketLeft:
+            # Decrease brush size
+            self._brush_size = max(1, self._brush_size - 1)
+        elif event.key() == Qt.Key_BracketRight:
+            # Increase brush size
+            self._brush_size = min(100, self._brush_size + 1)
+        elif event.key() in (
+            Qt.Key_1,
+            Qt.Key_2,
+            Qt.Key_3,
+            Qt.Key_4,
+            Qt.Key_5,
+            Qt.Key_6,
+            Qt.Key_7,
+            Qt.Key_8,
+            Qt.Key_9,
+        ):
+            # Quick label selection 1-9
+            label_num = event.key() - Qt.Key_0
+            self._active_label = label_num
         else:
             super().keyPressEvent(event)
 
@@ -350,6 +415,252 @@ class ImageWindow(QMainWindow):
             roi.remove()
             self.rois.remove(roi)
             self.roi_removed.emit(roi)
+
+    # ---- Label/Mask Methods ----
+
+    def set_labels(self, labels):
+        """
+        Set SparseLabels for this window.
+
+        Args:
+            labels: SparseLabels instance or None to clear
+        """
+        self.labels = labels
+        self._ensure_label_overlay()
+        if self.label_overlay:
+            self.label_overlay.set_labels(labels)
+        self.label_changed.emit(labels)
+        self.canvas.update()
+
+    def get_labels(self):
+        """Return the current SparseLabels instance."""
+        return self.labels
+
+    def _ensure_label_overlay(self):
+        """Create label overlay if it doesn't exist."""
+        if self.label_overlay is None:
+            self.label_overlay = LabelOverlayVisual(
+                self.view,
+                shape_yx=(self.Y, self.X),
+                scale=self.renderer.scale,
+            )
+        if self.labels is not None:
+            self.label_overlay.set_labels(self.labels)
+
+    def _get_brush_coords(self, cx, cy):
+        """
+        Generate circular brush mask centered at (cx, cy).
+
+        Returns:
+            Tuple of (y_coords, x_coords) arrays
+        """
+        radius = self._brush_size
+        yy, xx = np.ogrid[-radius : radius + 1, -radius : radius + 1]
+        mask = xx**2 + yy**2 <= radius**2
+        ys, xs = np.where(mask)
+
+        # Offset to image coordinates
+        y_coords = ys + int(cy) - radius
+        x_coords = xs + int(cx) - radius
+
+        # Bounds check
+        valid = (
+            (y_coords >= 0)
+            & (y_coords < self.Y)
+            & (x_coords >= 0)
+            & (x_coords < self.X)
+        )
+
+        return y_coords[valid], x_coords[valid]
+
+    def _filter_existing_labels(self, coords):
+        """
+        Remove coordinates that belong to any existing label.
+
+        Args:
+            coords: Tuple of (y, x) or (z, y, x) coordinate arrays
+
+        Returns:
+            Filtered coordinate tuple with occupied pixels removed
+        """
+        if self.labels is None or self.labels.n_objects == 0:
+            return coords
+
+        # Build occupancy mask for current slice
+        occupied = np.zeros((self.Y, self.X), dtype=bool)
+
+        for label in self.labels:
+            label_coords = self.labels.coords(label)
+            if self.labels.ndim == 3:
+                # Filter to current Z slice
+                z_coords, y_coords, x_coords = label_coords
+                z_mask = z_coords == self.z_idx
+                y_slice = y_coords[z_mask]
+                x_slice = x_coords[z_mask]
+            else:
+                y_slice, x_slice = label_coords
+
+            # Bounds check before setting
+            valid = (
+                (y_slice >= 0)
+                & (y_slice < self.Y)
+                & (x_slice >= 0)
+                & (x_slice < self.X)
+            )
+            occupied[y_slice[valid], x_slice[valid]] = True
+
+        # Filter out occupied pixels
+        if len(coords) == 3:
+            # 3D coords
+            zs, ys, xs = coords
+            free = ~occupied[ys, xs]
+            return (zs[free], ys[free], xs[free])
+        else:
+            # 2D coords
+            ys, xs = coords
+            free = ~occupied[ys, xs]
+            return (ys[free], xs[free])
+
+    def _paint_stroke(self, x, y, erase=False):
+        """
+        Paint or erase at the given position.
+
+        Args:
+            x, y: Image coordinates
+            erase: If True, erase pixels instead of adding
+        """
+        if self.labels is None:
+            return
+
+        brush_coords = self._get_brush_coords(x, y)
+        if len(brush_coords[0]) == 0:
+            return
+
+        # Convert to proper dimensionality
+        if self.labels.ndim == 3:
+            z_coords = np.full(len(brush_coords[0]), self.z_idx, dtype=np.int32)
+            coords = (z_coords, brush_coords[0], brush_coords[1])
+        else:
+            coords = brush_coords
+
+        if erase:
+            # Remove from active label
+            if self._active_label in self.labels:
+                try:
+                    self.labels.remove_pixels(self._active_label, coords)
+                except KeyError:
+                    pass  # Label was completely erased
+        else:
+            # Add to active label
+            if self._preserve_labels:
+                coords = self._filter_existing_labels(coords)
+                if len(coords[0]) == 0:
+                    return
+
+            self.labels.add_pixels(self._active_label, coords)
+
+        # Update overlay
+        if self.label_overlay:
+            self.label_overlay.refresh()
+        self.canvas.update()
+
+    def _show_contour_marker(self, x, y):
+        """Show visual marker at contour start point."""
+        if self._contour_marker is None:
+            self._contour_marker = scene.visuals.Markers(parent=self.view.scene)
+
+        # Green circle marker at start point
+        self._contour_marker.set_data(
+            pos=np.array([[x, y]]),
+            face_color=(0.2, 1.0, 0.2, 0.8),
+            edge_color=(1.0, 1.0, 1.0, 1.0),
+            edge_width=2,
+            size=max(15, self._brush_size * 2),
+            symbol="o",
+        )
+        self._contour_marker.visible = True
+        self.canvas.update()
+
+    def _hide_contour_marker(self):
+        """Hide the contour start marker."""
+        if self._contour_marker is not None:
+            self._contour_marker.visible = False
+            self.canvas.update()
+
+    def _finish_contour(self):
+        """Finalize contour mode; fill if closed near start."""
+        if not self._contour_mode or self._contour_start is None:
+            self._cancel_contour()
+            return
+
+        if len(self._stroke_points) < 10:
+            self._cancel_contour()
+            return
+
+        # Check if we closed near the start
+        end = np.array(self._stroke_points[-1])
+        start = np.array(self._contour_start)
+        distance = np.linalg.norm(end - start)
+
+        # Threshold: close if within 3x brush radius or 15 pixels
+        threshold = max(self._brush_size * 3, 15)
+        if distance < threshold:
+            self._fill_closed_contour()
+
+        self._cancel_contour()
+        if self.labels:
+            self.label_changed.emit(self.labels)
+
+    def _cancel_contour(self):
+        """Cancel contour mode without filling."""
+        self._contour_mode = False
+        self._contour_start = None
+        self._stroke_points = []
+        self._hide_contour_marker()
+
+    def _finish_stroke(self):
+        """Finalize a regular brush stroke (no auto-fill)."""
+        self._stroke_points = []
+        if self.labels:
+            self.label_changed.emit(self.labels)
+
+    def _fill_closed_contour(self):
+        """Fill interior of closed stroke path."""
+        if self.labels is None:
+            return
+
+        try:
+            from skimage.draw import polygon
+        except ImportError:
+            return
+
+        # Extract contour coordinates
+        ys = np.array([p[1] for p in self._stroke_points])
+        xs = np.array([p[0] for p in self._stroke_points])
+
+        # Get all interior pixels
+        rr, cc = polygon(ys, xs, shape=(self.Y, self.X))
+
+        if len(rr) == 0:
+            return
+
+        # Convert to proper dimensionality
+        if self.labels.ndim == 3:
+            z_coords = np.full(len(rr), self.z_idx, dtype=np.int32)
+            fill_coords = (z_coords, rr, cc)
+        else:
+            fill_coords = (rr, cc)
+
+        if self._preserve_labels:
+            fill_coords = self._filter_existing_labels(fill_coords)
+            if len(fill_coords[0]) == 0:
+                return
+
+        self.labels.add_pixels(self._active_label, fill_coords)
+
+        if self.label_overlay:
+            self.label_overlay.refresh()
+        self.canvas.update()
 
     def show_metadata_dialog(self):
         dlg = MetadataDialog(self.meta, parent=self)
@@ -653,6 +964,10 @@ class ImageWindow(QMainWindow):
         else:
             self.renderer.update_slice(self.t_idx, self.z_idx)
 
+        # Update label overlay for 3D data
+        if self.label_overlay and self.labels and self.labels.ndim == 3:
+            self.label_overlay.update_slice(self.z_idx)
+
         self.canvas.update()
         if self.contrast_dialog and self.contrast_dialog.isVisible():
             self.contrast_dialog.refresh_ui()
@@ -735,6 +1050,42 @@ class ImageWindow(QMainWindow):
                 self.canvas.update()
             return
 
+        # Handle brush/eraser tools
+        if tool in ("brush", "eraser"):
+            # Ensure labels exist
+            if self.labels is None:
+                if self.Z > 1:
+                    shape = (self.Z, self.Y, self.X)
+                else:
+                    shape = (self.Y, self.X)
+                self.labels = SparseLabels(shape)
+                self._ensure_label_overlay()
+
+            # Right-click: toggle contour fill mode (brush only)
+            if event.button == 2 and tool == "brush":
+                if self._contour_mode:
+                    # Already in contour mode - cancel it
+                    self._cancel_contour()
+                else:
+                    # Start contour mode
+                    self._contour_mode = True
+                    self._contour_start = (x, y)
+                    self._stroke_points = [(x, y)]
+                    self._show_contour_marker(x, y)
+                    self.view.camera.interactive = False
+                    # Initial paint at start
+                    self._paint_stroke(x, y, erase=False)
+                return
+
+            # Left-click: normal painting (only if not in contour mode)
+            if event.button == 1 and not self._contour_mode:
+                self._painting = True
+                self._stroke_points = [(x, y)]
+                self.view.camera.interactive = False
+                # Initial paint
+                self._paint_stroke(x, y, erase=(tool == "eraser"))
+            return
+
         self.start_pos = (x, y)
 
         # Get unique ROI ID (reuses freed IDs via heapq)
@@ -778,7 +1129,31 @@ class ImageWindow(QMainWindow):
             else:
                 self.info_label.setText("")
 
-        # 2. ROI Editing
+        # 2. Contour Fill Mode (no button held - just mouse movement)
+        if self._contour_mode:
+            x, y = self._map_event_to_image(event)
+            self._stroke_points.append((x, y))
+            self._paint_stroke(x, y, erase=False)
+
+            # Check if we've returned close to start (auto-close)
+            if len(self._stroke_points) > 20:  # Minimum points before checking
+                start = np.array(self._contour_start)
+                current = np.array([x, y])
+                distance = np.linalg.norm(current - start)
+                threshold = max(self._brush_size * 3, 15)
+                if distance < threshold:
+                    self._finish_contour()
+            return
+
+        # 3. Brush/Eraser Painting (left-click drag)
+        if self._painting:
+            tool = manager.active_tool
+            x, y = self._map_event_to_image(event)
+            self._stroke_points.append((x, y))
+            self._paint_stroke(x, y, erase=(tool == "eraser"))
+            return
+
+        # 3. ROI Editing
         if self.dragging_roi and event.button == 1:
             x, y = self._map_event_to_image(event)
             dx = x - self.last_pos[0]
@@ -817,6 +1192,19 @@ class ImageWindow(QMainWindow):
             self.canvas.update()
 
     def on_mouse_release(self, event):
+        # Contour mode is handled by mouse movement, not release
+        # (auto-closes when returning to start marker)
+
+        # Handle brush/eraser release (left-click)
+        if self._painting:
+            self._painting = False
+            self._finish_stroke()
+            # Re-enable camera panning
+            tool = manager.active_tool
+            if tool in ("brush", "eraser"):
+                self.view.camera.interactive = False  # Keep disabled for paint tools
+            return
+
         if self.dragging_roi:
             # Notify ROI that drag ended (for LaneROI marker callbacks)
             if hasattr(self.dragging_roi, "end_marker_drag"):
@@ -878,24 +1266,42 @@ class Toolbar(QMainWindow):
         self.act_line.setCheckable(True)
         self.act_line.triggered.connect(lambda: self.set_tool("line"))
 
+        # Painting tools
+        self.act_brush = QAction("Brush", self)
+        self.act_brush.setCheckable(True)
+        self.act_brush.triggered.connect(lambda: self.set_tool("brush"))
+
+        self.act_eraser = QAction("Eraser", self)
+        self.act_eraser.setCheckable(True)
+        self.act_eraser.triggered.connect(lambda: self.set_tool("eraser"))
+
         self.tools.addAction(self.act_pointer)
         self.tools.addAction(self.act_coord)
         self.tools.addAction(self.act_rect)
         self.tools.addAction(self.act_circle)
         self.tools.addAction(self.act_line)
 
-        # ROI Manager Button
+        # Separator before painting tools
+        self.tools.addSeparator()
+        self.tools.addAction(self.act_brush)
+        self.tools.addAction(self.act_eraser)
+
+        # Manager Buttons
         self.tools.addSeparator()
         self.act_roi_mgr = QAction("ROI Manager", self)
         self.act_roi_mgr.triggered.connect(self.show_roi_manager)
         self.tools.addAction(self.act_roi_mgr)
+
+        self.act_label_mgr = QAction("Label Manager", self)
+        self.act_label_mgr.triggered.connect(self.show_label_manager)
+        self.tools.addAction(self.act_label_mgr)
 
         # Python Console Button
         self.act_console = QAction("Console", self)
         self.act_console.triggered.connect(self.show_console)
         self.tools.addAction(self.act_console)
 
-        # Group
+        # Group for exclusive tool selection
         from qtpy.QtWidgets import QActionGroup
 
         group = QActionGroup(self)
@@ -904,6 +1310,8 @@ class Toolbar(QMainWindow):
         group.addAction(self.act_rect)
         group.addAction(self.act_circle)
         group.addAction(self.act_line)
+        group.addAction(self.act_brush)
+        group.addAction(self.act_eraser)
 
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -935,6 +1343,11 @@ class Toolbar(QMainWindow):
 
     def show_roi_manager(self):
         mgr = get_roi_manager()
+        mgr.show()
+        mgr.raise_()
+
+    def show_label_manager(self):
+        mgr = get_label_manager()
         mgr.show()
         mgr.raise_()
 
@@ -1018,6 +1431,14 @@ class Toolbar(QMainWindow):
             try:
                 mgr = get_roi_manager()
                 mgr.cleanup()  # Disconnects signals, sets shutdown flag
+            except Exception:
+                pass
+
+        # Signal Label Manager to stop processing updates
+        if label_manager_exists():
+            try:
+                mgr = get_label_manager()
+                mgr.cleanup()
             except Exception:
                 pass
 

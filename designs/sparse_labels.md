@@ -335,6 +335,278 @@ For a 10,000-voxel 3D object: ~120 KB
 
 Dense equivalent for 1000 pixels in 2048×2048 uint16 image: 8 MB
 
+## pyvistra Integration
+
+### Architecture
+
+SparseLabels integrates into pyvistra as a separate visualization layer, distinct from ROIs:
+
+```
+New Files:
+  pyvistra/labels.py         # SparseLabels data structure (this spec)
+  pyvistra/label_visual.py   # LabelOverlayVisual for GPU rendering
+  pyvistra/label_manager.py  # LabelManager Qt widget
+
+Modified Files:
+  pyvistra/ui.py             # Painting tools, mouse handlers, toolbar
+  pyvistra/io.py             # Sparse label I/O functions
+```
+
+**Why separate from ROIs?**
+- ROIs: click-drag to define control points (corners, endpoints)
+- Masks: paint strokes to accumulate pixels
+- Different interaction models warrant dedicated systems
+
+### LabelOverlayVisual
+
+Renders SparseLabels as a semi-transparent RGBA overlay:
+
+```python
+class LabelOverlayVisual:
+    def __init__(self, view, shape_yx: tuple[int, int])
+
+    def set_labels(labels: SparseLabels)
+    def update_slice(z_idx: int)  # For 3D: render current Z slice
+    def refresh()
+
+    def set_label_color(label: int, rgba: tuple)
+    def set_label_visible(label: int, visible: bool)
+    def set_opacity(alpha: float)  # Global overlay opacity
+```
+
+Rendering details:
+- RGBA texture updated when labels change
+- Alpha blending: `(src_alpha, one_minus_src_alpha)`
+- Render order: above image channels, below ROIs
+- Per-label color assignment with automatic palette
+
+### Drawing Tools
+
+#### Brush Tool
+
+Standard brush for freehand painting:
+
+```python
+# State in ImageWindow
+self._active_label: int = 1      # Label being painted
+self._brush_size: int = 5        # Brush radius in pixels
+self._preserve_labels: bool = True  # Protect existing labels (default: on)
+
+# Mouse handling
+on_mouse_press:  Start stroke, record start position
+on_mouse_move:   Accumulate brush disk coordinates
+on_mouse_release: Finalize stroke, check for closed contour
+```
+
+Brush disk generation:
+```python
+def _get_brush_coords(cx: int, cy: int, radius: int) -> tuple[ndarray, ndarray]:
+    """Generate circular brush mask centered at (cx, cy)."""
+    yy, xx = np.ogrid[-radius:radius+1, -radius:radius+1]
+    mask = xx**2 + yy**2 <= radius**2
+    ys, xs = np.where(mask)
+    return (ys + cy - radius, xs + cx - radius)
+```
+
+#### Eraser Tool
+
+Removes pixels from the active label. Same interaction as brush, but calls `remove_pixels()` instead of `add_pixels()`.
+
+#### Closed Contour Auto-Fill
+
+**Problem**: Drawing many objects with brush is tedious—user must carefully fill interiors.
+
+**Solution**: When a brush stroke forms a closed contour (end point near start point), automatically fill the enclosed region.
+
+Detection and filling:
+```python
+def _finish_stroke(self):
+    """Finalize stroke; auto-fill if contour is closed."""
+    if len(self._stroke_points) < 10:
+        return  # Too short to be a contour
+
+    start = self._stroke_points[0]
+    end = self._stroke_points[-1]
+    distance = np.linalg.norm(np.array(end) - np.array(start))
+
+    # Threshold: close if within 2x brush radius
+    if distance < self._brush_size * 2:
+        self._fill_closed_contour()
+
+def _fill_closed_contour(self):
+    """Fill interior of closed stroke path."""
+    from skimage.draw import polygon_fill
+
+    # Extract contour coordinates
+    ys = [p[0] for p in self._stroke_points]
+    xs = [p[1] for p in self._stroke_points]
+
+    # Get all interior pixels
+    rr, cc = polygon(ys, xs, shape=self.labels.shape[-2:])
+    fill_coords = (rr, cc)  # 2D case
+
+    if self._preserve_labels:
+        fill_coords = self._filter_existing_labels(fill_coords)
+
+    self.labels.add_pixels(self._active_label, fill_coords)
+```
+
+Visual feedback:
+- Stroke path shown as thin line while drawing
+- When stroke closes (end near start), path changes color to indicate fill will occur
+- On release, filled region appears immediately
+
+#### Label Preservation Mode
+
+**Problem**: Accidentally overwriting existing labels when painting near boundaries.
+
+**Solution**: By default, painting only affects background pixels (label 0). Existing labels are protected.
+
+```python
+def _filter_existing_labels(self, coords: tuple[ndarray, ...]) -> tuple[ndarray, ...]:
+    """Remove coordinates that belong to any existing label."""
+    # Create occupancy mask from all existing labels
+    occupied = np.zeros(self.labels.shape[-2:], dtype=bool)
+    for label in self.labels:
+        label_coords = self.labels.coords(label)
+        if self.labels.ndim == 3:
+            # Filter to current Z slice
+            z_mask = label_coords[0] == self.z_idx
+            occupied[label_coords[1][z_mask], label_coords[2][z_mask]] = True
+        else:
+            occupied[label_coords[0], label_coords[1]] = True
+
+    # Filter out occupied pixels
+    if self.labels.ndim == 3:
+        zs, ys, xs = coords
+        free = ~occupied[ys, xs]
+        return (zs[free], ys[free], xs[free])
+    else:
+        ys, xs = coords
+        free = ~occupied[ys, xs]
+        return (ys[free], xs[free])
+```
+
+Toggle in UI:
+- Checkbox in Label Manager: "Preserve existing labels" (default: checked)
+- Keyboard shortcut: `P` to toggle
+- When disabled, painting can overwrite other labels (useful for corrections)
+
+### LabelManager Widget
+
+Qt widget for label management, following ROI Manager pattern:
+
+```
++----------------------------------+
+| Window: [dropdown v]             |
++----------------------------------+
+| Labels:                          |
+| [*] 1 Cell A         [color] [x] |
+| [ ] 2 Cell B         [color] [x] |
+| [*] 3 Nucleus        [color] [x] |
++----------------------------------+
+| Active: [1 v]   Brush: [10] px   |
+| [x] Preserve existing labels     |
++----------------------------------+
+| [New] [Merge] [Delete] [Rename]  |
+| [Save] [Load]                    |
++----------------------------------+
+```
+
+Features:
+- Window selector (same pattern as ROI Manager)
+- Label list with visibility checkboxes and color swatches
+- Active label selector for painting
+- Brush size spinner
+- Label preservation toggle
+- Action buttons: New, Merge selected, Delete, Rename
+- Save/Load with file dialog
+
+### Toolbar Integration
+
+Add to existing toolbar (after ROI tools):
+
+```
+[Pointer] [Coord] [Rect] [Circle] [Line] | [Brush] [Eraser] | [ROI Mgr] [Label Mgr]
+```
+
+Keyboard shortcuts:
+- `B`: Brush tool
+- `E`: Eraser tool
+- `1-9`: Select label 1-9
+- `N`: New label (next available ID)
+- `P`: Toggle preserve labels
+- `[` / `]`: Decrease/increase brush size
+
+### 3D Annotation Workflow
+
+For 3D data (Z, Y, X):
+- Paint on current Z slice only (consistent with Z slider)
+- Label Manager shows combined label list across all Z
+- Navigation: Z slider or scroll wheel to move between slices
+- Each label can span multiple Z slices
+
+```python
+# Painting in 3D
+def _paint_stroke_3d(self, x: int, y: int):
+    brush_yx = self._get_brush_coords(x, y, self._brush_size)
+    z_coords = np.full(len(brush_yx[0]), self.z_idx, dtype=np.int32)
+    coords_3d = (z_coords, brush_yx[0], brush_yx[1])
+
+    if self._preserve_labels:
+        coords_3d = self._filter_existing_labels(coords_3d)
+
+    self.labels.add_pixels(self._active_label, coords_3d)
+```
+
+### Scriptable API
+
+```python
+from pyvistra import imshow, load_image
+from pyvistra.labels import SparseLabels
+
+# Display image
+data, meta = load_image("cells.tif")
+viewer = imshow(data, meta)
+
+# Create or load labels
+labels = SparseLabels(shape=(512, 512))
+# or: labels = SparseLabels.from_file("cells.sparse.zarr")
+# or: labels = SparseLabels.from_dense(segmentation_result)
+
+viewer.set_labels(labels)
+
+# Programmatic analysis
+for label in labels:
+    coords = labels.coords(label)
+    intensities = data[0, 0, 0][coords]  # T=0, Z=0, C=0
+    print(f"Label {label}: area={labels.area(label)}, mean={intensities.mean():.1f}")
+
+# Save progress
+labels.save("annotated.sparse.zarr")
+```
+
+### Neural Network Integration
+
+SparseLabels designed for easy integration with segmentation algorithms:
+
+```python
+# From any segmentation that produces dense label array
+from cellpose import models
+
+model = models.Cellpose(model_type='cyto2')
+masks, flows, styles, diams = model.eval(image)
+
+# Convert to SparseLabels
+labels = SparseLabels.from_dense(masks)
+viewer.set_labels(labels)
+
+# User can now refine with brush/eraser
+# Save when done
+labels.save("refined_segmentation.sparse.zarr")
+```
+
 ## Version History
 
 - **1.0**: Initial specification
+- **1.1**: Added pyvistra integration with drawing tools, closed contour auto-fill, and label preservation mode

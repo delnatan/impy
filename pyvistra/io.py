@@ -910,3 +910,32 @@ def load_psf(filepath):
         metadata["scale"] = tuple(spacing)
 
     return proxy, metadata
+
+
+# ---- Sparse Labels I/O ----
+
+
+def load_sparse_labels(path):
+    """
+    Load SparseLabels from file.
+
+    Args:
+        path: Path to .sparse.zarr or .sparse.npz file
+
+    Returns:
+        SparseLabels instance
+    """
+    from .labels import SparseLabels
+
+    return SparseLabels.from_file(path)
+
+
+def save_sparse_labels(path, labels):
+    """
+    Save SparseLabels to file.
+
+    Args:
+        path: Output path (.sparse.zarr or .sparse.npz)
+        labels: SparseLabels instance
+    """
+    labels.save(path)

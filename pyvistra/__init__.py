@@ -13,10 +13,15 @@ from .io import (
     Numpy5DProxy,
     load_image,
     load_psf,
+    load_sparse_labels,
     normalize_to_5d,
     save_psf,
+    save_sparse_labels,
     save_tiff,
 )
+from .label_manager import LabelManager, get_label_manager
+from .label_visual import LabelOverlayVisual
+from .labels import SparseLabels
 from .manager import WindowManager, manager
 from .ortho import OrthoViewer
 from .volume import VolumeViewer
@@ -31,8 +36,10 @@ __all__ = [
     # io
     "load_image",
     "load_psf",
+    "load_sparse_labels",
     "save_tiff",
     "save_psf",
+    "save_sparse_labels",
     "normalize_to_5d",
     "Imaris5DProxy",
     "Numpy5DProxy",
@@ -52,6 +59,11 @@ __all__ = [
     "LineROI",
     "CoordinateROI",
     "LaneROI",
+    # labels/masks
+    "SparseLabels",
+    "LabelOverlayVisual",
+    "LabelManager",
+    "get_label_manager",
     # managers
     "ROIManager",
     "get_roi_manager",
