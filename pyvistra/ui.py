@@ -591,9 +591,14 @@ class ImageWindow(QMainWindow):
             # Handle modifier clicks on LaneROIs
             if isinstance(hit_roi, LaneROI):
                 # Ctrl+Click (or Cmd+Click on Mac) on a marker: remove it
-                has_ctrl_or_cmd = "Control" in event.modifiers or "Meta" in event.modifiers
+                has_ctrl_or_cmd = (
+                    "Control" in event.modifiers or "Meta" in event.modifiers
+                )
                 if has_ctrl_or_cmd:
-                    if isinstance(hit_handle, tuple) and hit_handle[0] == "marker":
+                    if (
+                        isinstance(hit_handle, tuple)
+                        and hit_handle[0] == "marker"
+                    ):
                         marker_idx = hit_handle[1]
                         hit_roi.remove_marker(marker_idx)
                         # Trigger callback for live MW update
@@ -719,7 +724,7 @@ class ImageWindow(QMainWindow):
     def on_mouse_release(self, event):
         if self.dragging_roi:
             # Notify ROI that drag ended (for LaneROI marker callbacks)
-            if hasattr(self.dragging_roi, 'end_marker_drag'):
+            if hasattr(self.dragging_roi, "end_marker_drag"):
                 self.dragging_roi.end_marker_drag()
             self.dragging_roi = None
             self.drag_handle = None
@@ -862,18 +867,27 @@ class Toolbar(QMainWindow):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
 
         # Collect supported image files
-        supported_ext = {".ims", ".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+        supported_ext = {
+            ".ims",
+            ".tif",
+            ".tiff",
+            ".png",
+            ".jpg",
+            ".jpeg",
+        }
         image_files = []
 
         for f in files:
             # Check for .zarr directories (including .psf.zarr)
-            if f.endswith('.zarr') and os.path.isdir(f):
+            if (
+                f.endswith(".zarr/") or f.endswith(".psf.zarr/")
+            ) and os.path.isdir(f):
                 image_files.append(f)
             elif os.path.isdir(f):
                 # Folder: collect all images recursively
                 for root, dirs, names in os.walk(f):
                     # Check for .zarr directories (skip descending into them)
-                    zarr_dirs = [d for d in dirs if d.endswith('.zarr')]
+                    zarr_dirs = [d for d in dirs if d.endswith(".zarr/")]
                     for d in zarr_dirs:
                         image_files.append(os.path.join(root, d))
                         dirs.remove(d)  # Don't descend into zarr directories
@@ -943,7 +957,15 @@ class Toolbar(QMainWindow):
             print(f"Error opening {filepath}: {e}")
 
 
-def imshow(data, meta_or_title=None, dims=None, *, title=None, scale=None, colormap=None):
+def imshow(
+    data,
+    meta_or_title=None,
+    dims=None,
+    *,
+    title=None,
+    scale=None,
+    colormap=None,
+):
     """
     Convenience function to show an image.
 

@@ -10,7 +10,7 @@ import zarr
 from .imaris_reader import ImarisReader
 
 # Buffer directory for temporary Zarr files
-BUFFER_DIR = Path.home() / '.pyvistra' / 'buffers'
+BUFFER_DIR = Path.home() / ".pyvistra" / "buffers"
 
 
 def is_rgb_image(arr):
@@ -252,11 +252,19 @@ class Zarr5DProxy:
         elif source_ndim == 3:  # (Z, Y, X) -> (1, Z, 1, Y, X)
             self.shape = (1, src_shape[0], 1, src_shape[1], src_shape[2])
         elif source_ndim == 4:  # (Z, C, Y, X) -> (1, Z, C, Y, X)
-            self.shape = (1, src_shape[0], src_shape[1], src_shape[2], src_shape[3])
+            self.shape = (
+                1,
+                src_shape[0],
+                src_shape[1],
+                src_shape[2],
+                src_shape[3],
+            )
         elif source_ndim == 5:  # Already 5D
             self.shape = src_shape
         else:
-            raise ValueError(f"Unsupported zarr array dimensionality: {source_ndim}")
+            raise ValueError(
+                f"Unsupported zarr array dimensionality: {source_ndim}"
+            )
 
     def _normalize_key(self, key):
         """Normalize slicing key to 5D tuple."""
@@ -310,7 +318,9 @@ class Zarr5DProxy:
 
     def close(self):
         """Close the zarr store if it has a close method."""
-        if hasattr(self._store, 'store') and hasattr(self._store.store, 'close'):
+        if hasattr(self._store, "store") and hasattr(
+            self._store.store, "close"
+        ):
             self._store.store.close()
 
 
@@ -341,7 +351,7 @@ class ImageBuffer:
 
         self._store = zarr.open(
             str(self._path),
-            mode='w',
+            mode="w",
             shape=shape,
             dtype=dtype,
             chunks=chunks,
@@ -368,7 +378,7 @@ class ImageBuffer:
 
     def save_as(self, filepath):
         """Export buffer to OME-TIFF."""
-        scale = self.metadata.get('scale', (1.0, 1.0, 1.0))
+        scale = self.metadata.get("scale", (1.0, 1.0, 1.0))
         save_tiff(filepath, self._store[:], scale=scale)
 
     def close(self):
@@ -384,7 +394,9 @@ class ImageBuffer:
             pass
 
 
-def apply_transform(source, rotation_deg, translate, metadata=None, progress_cb=None):
+def apply_transform(
+    source, rotation_deg, translate, metadata=None, progress_cb=None
+):
     """
     Apply 2D rotation and translation to create a new buffer.
 
@@ -410,32 +422,32 @@ def apply_transform(source, rotation_deg, translate, metadata=None, progress_cb=
     buffer = ImageBuffer(
         shape=source.shape,
         dtype=source.dtype,
-        metadata=metadata or getattr(source, 'metadata', {}),
+        metadata=metadata or getattr(source, "metadata", {}),
     )
 
     # Build affine transform matrix (rotation around center + translation)
     # scipy uses inverse mapping: output[o] = input[matrix @ o + offset]
     # Negate angle because vispy's camera flips Y, inverting visual rotation direction
     cx, cy = X / 2, Y / 2
-    theta = np.radians(-rotation_deg)  # Negate to match vispy's flipped-Y display
+    theta = np.radians(
+        -rotation_deg
+    )  # Negate to match vispy's flipped-Y display
     cos_t, sin_t = np.cos(theta), np.sin(theta)
     tx, ty = translate
 
     # 3D matrix: identity on batch dimension (Z*C), rotation on Y-X
     # This allows transforming all Z and C slices in one call
-    matrix_3d = np.array([
-        [1, 0, 0],
-        [0, cos_t, sin_t],
-        [0, -sin_t, cos_t]
-    ])
+    matrix_3d = np.array([[1, 0, 0], [0, cos_t, sin_t], [0, -sin_t, cos_t]])
 
     # Offset for rotation around center with translation applied after rotation
     # Translation in output space means we subtract it before inverse-rotating
-    offset_3d = np.array([
-        0,  # batch dimension unchanged
-        cy * (1 - cos_t) - sin_t * cx - cos_t * ty - sin_t * tx,
-        cx * (1 - cos_t) + sin_t * cy + sin_t * ty - cos_t * tx
-    ])
+    offset_3d = np.array(
+        [
+            0,  # batch dimension unchanged
+            cy * (1 - cos_t) - sin_t * cx - cos_t * ty - sin_t * tx,
+            cx * (1 - cos_t) + sin_t * cy + sin_t * ty - cos_t * tx,
+        ]
+    )
 
     for t in range(T):
         # Load full volume for this timepoint: (Z, C, Y, X)
@@ -511,7 +523,9 @@ def normalize_to_5d(data, dims=None, rgb=None):
         elif ndim == 3:
             if rgb:
                 # RGB image: (Y, X, C) -> (1, 1, C, Y, X)
-                final_img = data.transpose(2, 0, 1)[np.newaxis, np.newaxis, :, :, :]
+                final_img = data.transpose(2, 0, 1)[
+                    np.newaxis, np.newaxis, :, :, :
+                ]
             else:
                 # Z-stack: (Z, Y, X) -> (1, Z, 1, Y, X)
                 final_img = data[np.newaxis, :, np.newaxis, :, :]
@@ -543,7 +557,7 @@ def load_zarr(filepath):
         raise FileNotFoundError(f"Zarr file not found: {filepath}")
 
     # Open zarr store
-    store = zarr.open(filepath, mode='r')
+    store = zarr.open(filepath, mode="r")
 
     # Check if it's a Group or Array
     is_group = isinstance(store, zarr.Group)
@@ -552,13 +566,13 @@ def load_zarr(filepath):
     zarr_array = None
     attrs = {}
 
-    if is_group and '0' in store:
+    if is_group and "0" in store:
         # OME-Zarr: use highest resolution level
-        zarr_array = store['0']
-        attrs = dict(store.attrs) if hasattr(store, 'attrs') else {}
+        zarr_array = store["0"]
+        attrs = dict(store.attrs) if hasattr(store, "attrs") else {}
     elif is_group:
         # Group without '0' - look for a data array
-        for key in ['data', 'array']:
+        for key in ["data", "array"]:
             if key in store and isinstance(store[key], zarr.Array):
                 zarr_array = store[key]
                 break
@@ -570,11 +584,11 @@ def load_zarr(filepath):
                     break
         if zarr_array is None:
             raise ValueError(f"No array found in zarr group: {filepath}")
-        attrs = dict(store.attrs) if hasattr(store, 'attrs') else {}
+        attrs = dict(store.attrs) if hasattr(store, "attrs") else {}
     else:
         # Direct zarr array
         zarr_array = store
-        attrs = dict(store.attrs) if hasattr(store, 'attrs') else {}
+        attrs = dict(store.attrs) if hasattr(store, "attrs") else {}
 
     # Wrap in lazy proxy
     source_ndim = len(zarr_array.shape)
@@ -582,18 +596,18 @@ def load_zarr(filepath):
 
     # Build metadata
     metadata = {
-        'filename': os.path.basename(filepath),
-        'shape': proxy.shape,
-        'is_rgb': False,
+        "filename": os.path.basename(filepath),
+        "shape": proxy.shape,
+        "is_rgb": False,
     }
 
     # Extract scale from attrs if available
-    if 'scale' in attrs:
-        metadata['scale'] = tuple(attrs['scale'])
-    elif 'spacing' in attrs:
-        metadata['scale'] = tuple(attrs['spacing'])
+    if "scale" in attrs:
+        metadata["scale"] = tuple(attrs["scale"])
+    elif "spacing" in attrs:
+        metadata["scale"] = tuple(attrs["spacing"])
     else:
-        metadata['scale'] = (1.0, 1.0, 1.0)
+        metadata["scale"] = (1.0, 1.0, 1.0)
 
     # Copy other attrs to metadata
     for key, value in attrs.items():
@@ -619,11 +633,14 @@ def load_image(filepath, use_memmap=True):
         raise FileNotFoundError(f"File not found: {filepath}")
 
     # Handle PSF zarr files (check before general .zarr)
-    if filepath.endswith('.psf.zarr') or filepath.endswith('.psf'):
+    # .psf.zarr is a directory, .psf may be a legacy file format
+    if filepath.endswith(".psf.zarr/") and os.path.isdir(filepath):
+        return load_psf(filepath)
+    if filepath.endswith(".psf"):
         return load_psf(filepath)
 
     # Handle general zarr directories
-    if filepath.endswith('.zarr') and os.path.isdir(filepath):
+    if filepath.endswith(".zarr/") and os.path.isdir(filepath):
         return load_zarr(filepath)
 
     ext = os.path.splitext(filepath)[1].lower()
@@ -735,7 +752,9 @@ def load_image(filepath, use_memmap=True):
     }
 
 
-def save_tiff(filepath, data, scale=(1.0, 1.0, 1.0), axes="TZCYX", input_axes=None):
+def save_tiff(
+    filepath, data, scale=(1.0, 1.0, 1.0), axes="TZCYX", input_axes=None
+):
     """
     Saves a 5D array to a TIFF file with metadata.
 
@@ -804,11 +823,11 @@ def save_psf(filepath, psf_data, metadata):
 
     # Ensure .psf.zarr extension
     filepath = str(filepath)
-    if not filepath.endswith('.psf.zarr'):
-        filepath += '.psf.zarr'
+    if not filepath.endswith(".psf.zarr"):
+        filepath += ".psf.zarr"
 
     # Get data as numpy array
-    if hasattr(psf_data, '__getitem__'):
+    if hasattr(psf_data, "__getitem__"):
         data = np.asarray(psf_data[:])
     else:
         data = np.asarray(psf_data)
@@ -828,10 +847,16 @@ def save_psf(filepath, psf_data, metadata):
     # Create zarr array
     store = zarr.open(
         filepath,
-        mode='w',
+        mode="w",
         shape=data.shape,
         dtype=data.dtype,
-        chunks=(1, min(16, data.shape[1]), data.shape[2], min(512, data.shape[3]), min(512, data.shape[4])),
+        chunks=(
+            1,
+            min(16, data.shape[1]),
+            data.shape[2],
+            min(512, data.shape[3]),
+            min(512, data.shape[4]),
+        ),
     )
 
     # Write data
@@ -858,7 +883,7 @@ def load_psf(filepath):
         raise FileNotFoundError(f"PSF file not found: {filepath}")
 
     # Open zarr store
-    store = zarr.open(filepath, mode='r')
+    store = zarr.open(filepath, mode="r")
 
     # Read data into memory and wrap in proxy
     data = np.asarray(store[:])
@@ -868,13 +893,13 @@ def load_psf(filepath):
     metadata = dict(store.attrs)
 
     # Add filename to metadata
-    metadata['filename'] = os.path.basename(filepath)
-    metadata['shape'] = data.shape
-    metadata['is_rgb'] = False
+    metadata["filename"] = os.path.basename(filepath)
+    metadata["shape"] = data.shape
+    metadata["is_rgb"] = False
 
     # Extract scale from spacing if available
-    if 'spacing' in metadata:
-        spacing = metadata['spacing']
-        metadata['scale'] = tuple(spacing)
+    if "spacing" in metadata:
+        spacing = metadata["spacing"]
+        metadata["scale"] = tuple(spacing)
 
     return proxy, metadata
