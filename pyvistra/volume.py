@@ -120,9 +120,10 @@ class VolumeRendererProxy:
         return self.channel_clims.get(channel_idx, (0, 1))
 
     def set_gamma(self, channel_idx, gamma):
-        """Set gamma for a channel (note: vispy Volume doesn't directly support gamma)."""
+        """Set gamma for a channel."""
         self.channel_gammas[channel_idx] = gamma
-        # Volume visual doesn't have a gamma property, but we store it for compatibility
+        if channel_idx < len(self.volumes):
+            self.volumes[channel_idx].gamma = gamma
 
     def get_gamma(self, channel_idx):
         """Get gamma for a channel."""
@@ -236,8 +237,8 @@ class VolumeViewer(QMainWindow):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        # Vispy Canvas with 3D scene
-        self.canvas = scene.SceneCanvas(keys="interactive", bgcolor="black")
+        # Vispy Canvas with 3D scene (keys=None to prevent escape from hiding visuals)
+        self.canvas = scene.SceneCanvas(keys=None, bgcolor="black")
         self.view = self.canvas.central_widget.add_view()
 
         # Use TurntableCamera for intuitive 3D interaction

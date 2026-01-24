@@ -33,6 +33,7 @@ from .rois import CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
 from .visuals import CompositeImageVisual
 from .widgets import (
     AlignmentDialog,
+    AxesDialog,
     ChannelPanel,
     ContrastDialog,
     MetadataDialog,
@@ -319,6 +320,12 @@ class ImageWindow(QMainWindow):
         align_action.triggered.connect(self.show_alignment_dialog)
         image_menu.addAction(align_action)
 
+        image_menu.addSeparator()
+
+        axes_action = QAction("Reorder Axes...", self)
+        axes_action.triggered.connect(self.show_axes_dialog)
+        image_menu.addAction(axes_action)
+
     # ---- ROI ID Management ----
 
     def _get_next_roi_id(self):
@@ -413,6 +420,88 @@ class ImageWindow(QMainWindow):
             self._alignment_dialog = AlignmentDialog(parent=self)
         self._alignment_dialog.show()
         self._alignment_dialog.raise_()
+
+    def show_axes_dialog(self):
+        """Show dialog to reorder axes for ambiguous TIFF dimensions."""
+        raw_shape = self.meta.get("raw_shape")
+        if raw_shape is None:
+            from qtpy.QtWidgets import QMessageBox
+
+            QMessageBox.information(
+                self,
+                "Reorder Axes",
+                "Axes reordering is only available for TIFF/PNG/JPEG images.",
+            )
+            return
+
+        dlg = AxesDialog(raw_shape, parent=self)
+        if dlg.exec_():
+            dims = dlg.get_dims_string()
+            self.reorder_axes(dims)
+
+    def reorder_axes(self, dims):
+        """
+        Reorder axes using a new dimension string.
+
+        Args:
+            dims: Dimension string (e.g., 'tyx', 'zyx', 'zcyx', 'tzyx')
+        """
+        if not self.filepath:
+            print("Cannot reorder axes: no source file available")
+            return
+
+        # Re-load and re-normalize with new dims
+        new_data, new_meta = load_image(self.filepath, dims=dims)
+
+        # Update data and dimensions
+        self.img_data = new_data
+        self.meta = new_meta
+        self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
+
+        # Reset indices
+        self.t_idx = 0
+        self.z_idx = 0
+        self.c_idx = 0
+
+        # Update renderer
+        self.renderer.data = new_data
+        self.renderer.num_channels = self.C
+        self.renderer._init_colormaps()
+
+        # Rebuild controls
+        self._rebuild_controls()
+
+        # Update view
+        self.update_view()
+
+    def _rebuild_controls(self):
+        """Rebuild control widgets after axes reorder."""
+        # Remove all widgets from controls_layout
+        while self.controls_layout.count():
+            item = self.controls_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                # Recursively delete layout items
+                while item.layout().count():
+                    sub = item.layout().takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
+
+        # Reset widget references
+        self.mode_combo = None
+        self.channel_row_widget = None
+        self.c_slider = None
+        self.z_slider = None
+        self.z_label = None
+        self.chk_proj = None
+        self.z_range_slider = None
+        self.z_range_slider_widget = None
+        self.z_range_slider_min_label = None
+        self.z_range_slider_max_label = None
+
+        # Rebuild controls
+        self._setup_controls()
 
     def set_tool(self, tool_name):
         """
@@ -546,12 +635,12 @@ class ImageWindow(QMainWindow):
 
     def on_z_change(self, val):
         self.z_idx = val
-        if hasattr(self, "z_label"):
+        if hasattr(self, "z_label") and self.z_label is not None:
             self.z_label.setText(str(val))
         self.update_view()
 
     def update_view(self):
-        if hasattr(self, "chk_proj") and self.chk_proj.isChecked():
+        if hasattr(self, "chk_proj") and self.chk_proj is not None and self.chk_proj.isChecked():
             mn, mx = self.z_range_slider.value()
             z_slice = slice(mn, mx + 1)
             self.renderer.update_slice(self.t_idx, z_slice)

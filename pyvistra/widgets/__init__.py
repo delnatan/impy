@@ -25,6 +25,7 @@ from .transform import TransformDialog
 from .alignment import AlignmentDialog
 from .output_selector import ImageOutputSelector
 from .psf_dialog import PSFComputeDialog
+from .axes_dialog import AxesDialog
 
 __all__ = [
     # Theme constants
@@ -48,4 +49,5 @@ __all__ = [
     "AlignmentDialog",
     "ImageOutputSelector",
     "PSFComputeDialog",
+    "AxesDialog",
 ]

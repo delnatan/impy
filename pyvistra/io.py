@@ -617,10 +617,16 @@ def load_zarr(filepath):
     return proxy, metadata
 
 
-def load_image(filepath, use_memmap=True):
+def load_image(filepath, use_memmap=True, dims=None):
     """
     Loads an image and normalizes it to (T, Z, C, Y, X).
     Returns: (image_data_proxy, metadata_dict)
+
+    Args:
+        filepath: Path to the image file.
+        use_memmap: If True, use memory-mapped loading for TIFFs.
+        dims: Optional dimension string for TIFF files (e.g., 'tyx', 'zyx', 'tzyx').
+              If None, heuristics are used. Only applies to TIFF/PNG/JPEG formats.
 
     Supported formats:
         - .ims (Imaris)
@@ -738,8 +744,8 @@ def load_image(filepath, use_memmap=True):
     except Exception as e:
         print(f"Warning: Could not read TIFF metadata: {e}")
 
-    # Use normalize_to_5d with RGB detection
-    final_img = normalize_to_5d(img, rgb=detected_rgb).array
+    # Use normalize_to_5d with RGB detection and optional dims override
+    final_img = normalize_to_5d(img, dims=dims, rgb=detected_rgb).array
 
     # Wrap in Proxy
     data_proxy = Numpy5DProxy(final_img)
@@ -747,6 +753,7 @@ def load_image(filepath, use_memmap=True):
     return data_proxy, {
         "filename": os.path.basename(filepath),
         "shape": final_img.shape,
+        "raw_shape": img.shape,
         "scale": scale,
         "is_rgb": detected_rgb,
     }
