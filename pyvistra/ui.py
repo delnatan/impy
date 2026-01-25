@@ -630,9 +630,23 @@ class ImageWindow(QMainWindow):
             return
 
         try:
-            from skimage.draw import polygon
+            from skimage.draw import polygon, line
         except ImportError:
             return
+
+        # Close the contour by appending the start point
+        if self._stroke_points:
+            start = self._stroke_points[0]
+            self._stroke_points.append(start)
+
+            # Paint the connecting segment from last point back to start
+            if len(self._stroke_points) >= 2:
+                last = self._stroke_points[-2]
+                r0, c0 = int(last[1]), int(last[0])
+                r1, c1 = int(start[1]), int(start[0])
+                rr_line, cc_line = line(r0, c0, r1, c1)
+                for r, c in zip(rr_line, cc_line):
+                    self._paint_stroke(c, r, erase=False)
 
         # Extract contour coordinates
         ys = np.array([p[1] for p in self._stroke_points])

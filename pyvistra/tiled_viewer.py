@@ -44,6 +44,7 @@ from .visuals import (
     get_colormap,
 )
 from .widgets import CompactHistogramWidget, ContrastDialog
+from .widgets.axes_dialog import AxesDialog
 
 
 class TiledVisualProxy:
@@ -768,11 +769,17 @@ class TileWidget(QFrame):
             return self.data.shape
         return None
 
-    def load(self, path):
-        """Load image from path."""
+    def load(self, path, dims=None):
+        """Load image from path.
+
+        Args:
+            path: Image file path
+            dims: Optional dimension string for axis reordering (e.g., 'zyx', 'tzcyx')
+        """
         self.file_path = path
+        self._dims = dims  # Store for potential reload
         try:
-            self.data, self.meta = load_image(path)
+            self.data, self.meta = load_image(path, dims=dims)
 
             # Create renderer
             self.renderer = CompositeImageVisual(self.view, self.data)
@@ -1049,6 +1056,9 @@ class TiledViewer(QMainWindow):
         # Display settings
         self.show_info = True  # Whether to show info labels on tiles
 
+        # Axis ordering (None = use default from load_image)
+        self._current_dims = None
+
         self.tile_widgets = []
 
         # Visual proxy for global channel settings
@@ -1280,6 +1290,12 @@ class TiledViewer(QMainWindow):
         reset_all_action.triggered.connect(self._reset_all_views)
         adjust_menu.addAction(reset_all_action)
 
+        adjust_menu.addSeparator()
+
+        axes_action = QAction("Reorder Axes...", self)
+        axes_action.triggered.connect(self.show_axes_dialog)
+        adjust_menu.addAction(axes_action)
+
     def show_channel_panel(self):
         """Show the global channel control panel."""
         if self.channel_panel is None:
@@ -1287,6 +1303,57 @@ class TiledViewer(QMainWindow):
         self.channel_panel.show()
         self.channel_panel.raise_()
         self.channel_panel.refresh_ui()
+
+    def show_axes_dialog(self):
+        """Show dialog to reorder axes for ambiguous TIFF dimensions."""
+        from qtpy.QtWidgets import QMessageBox
+
+        # Find a tile with raw_shape metadata
+        raw_shape = None
+        for tile in self.tile_widgets:
+            if tile.meta and "raw_shape" in tile.meta:
+                raw_shape = tile.meta["raw_shape"]
+                break
+
+        if raw_shape is None:
+            QMessageBox.information(
+                self,
+                "Reorder Axes",
+                "Axes reordering is only available for TIFF/PNG/JPEG images.",
+            )
+            return
+
+        dlg = AxesDialog(raw_shape, parent=self)
+        if dlg.exec_():
+            dims = dlg.get_dims_string()
+            self.reorder_axes(dims)
+
+    def reorder_axes(self, dims):
+        """
+        Reorder axes for all tiles using a new dimension string.
+
+        Args:
+            dims: Dimension string (e.g., 'tyx', 'zyx', 'zcyx', 'tzyx')
+        """
+        # Store the dims for future page loads
+        self._current_dims = dims
+
+        # Reload all current tiles with the new dimension ordering
+        for tile in self.tile_widgets:
+            if tile.file_path:
+                tile.unload()
+                tile.load(tile.file_path, dims=dims)
+                self.visual_proxy.apply_settings_to_tile(tile)
+
+        # Update dimension controls based on reloaded images
+        self._update_dimension_controls()
+
+        # Apply current global settings (mode, z-slice, etc.)
+        self._apply_global_settings()
+
+        # Refresh channel panel if open
+        if self.channel_panel is not None and self.channel_panel.isVisible():
+            self.channel_panel.refresh_ui()
 
     def _total_pages(self):
         return max(
@@ -1385,7 +1452,7 @@ class TiledViewer(QMainWindow):
             tile = TileWidget(self.tile_size, parent=self)
             tile.set_show_info(self.show_info)
             tile.set_camera_callback(self._on_tile_camera_changed)
-            tile.load(path)
+            tile.load(path, dims=self._current_dims)
             # Apply global visual settings (colormap, gamma, visibility)
             self.visual_proxy.apply_settings_to_tile(tile)
             self.flow_layout.addWidget(tile)

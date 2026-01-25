@@ -18,6 +18,8 @@ from qtpy.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -73,8 +75,12 @@ class LabelManager(QWidget):
             QComboBox.AdjustToMinimumContentsLengthWithIcon
         )
         self.window_combo.setMinimumContentsLength(10)
-        self.window_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.window_combo.currentIndexChanged.connect(self.on_window_combo_changed)
+        self.window_combo.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self.window_combo.currentIndexChanged.connect(
+            self.on_window_combo_changed
+        )
         win_layout.addWidget(self.window_combo)
         self.layout.addLayout(win_layout)
 
@@ -92,7 +98,9 @@ class LabelManager(QWidget):
         self.active_label_spin = QSpinBox()
         self.active_label_spin.setRange(1, 9999)
         self.active_label_spin.setValue(1)
-        self.active_label_spin.valueChanged.connect(self._on_active_label_changed)
+        self.active_label_spin.valueChanged.connect(
+            self._on_active_label_changed
+        )
         control_layout.addWidget(self.active_label_spin)
 
         control_layout.addWidget(QLabel("Brush:"))
@@ -120,7 +128,9 @@ class LabelManager(QWidget):
 
         self.show_checkbox = QCheckBox("Show (V)")
         self.show_checkbox.setChecked(True)
-        self.show_checkbox.setToolTip("Toggle label overlay visibility\nKeyboard shortcut: V")
+        self.show_checkbox.setToolTip(
+            "Toggle label overlay visibility\nKeyboard shortcut: V"
+        )
         self.show_checkbox.toggled.connect(self._on_show_changed)
         opacity_layout.addWidget(self.show_checkbox)
 
@@ -162,8 +172,14 @@ class LabelManager(QWidget):
         self.btn_save.clicked.connect(self.save_labels)
         btn_layout2.addWidget(self.btn_save)
 
+        # Load button with menu for format selection
         self.btn_load = QPushButton("Load")
-        self.btn_load.clicked.connect(self.load_labels)
+        load_menu = QMenu(self)
+        load_menu.addAction("Load Zarr Folder...", self.load_labels_zarr)
+        load_menu.addAction("Load NPZ File...", self.load_labels_npz)
+        load_menu.addSeparator()
+        load_menu.addAction("From Dense Image...", self.load_labels_from_dense)
+        self.btn_load.setMenu(load_menu)
         btn_layout2.addWidget(self.btn_load)
 
         self.layout.addLayout(btn_layout2)
@@ -183,7 +199,9 @@ class LabelManager(QWidget):
 
     def _on_preserve_changed(self, checked):
         """Handle preserve labels checkbox change."""
-        if self.active_window and hasattr(self.active_window, "_preserve_labels"):
+        if self.active_window and hasattr(
+            self.active_window, "_preserve_labels"
+        ):
             self.active_window._preserve_labels = checked
 
     def _on_show_changed(self, checked):
@@ -234,7 +252,9 @@ class LabelManager(QWidget):
         self._is_shutting_down = True
 
         try:
-            manager.window_registered.disconnect(self._on_manager_window_registered)
+            manager.window_registered.disconnect(
+                self._on_manager_window_registered
+            )
         except (TypeError, RuntimeError):
             pass
 
@@ -354,7 +374,9 @@ class LabelManager(QWidget):
 
         if hasattr(window, "label_overlay") and window.label_overlay:
             self.opacity_spin.blockSignals(True)
-            self.opacity_spin.setValue(int(window.label_overlay.get_opacity() * 100))
+            self.opacity_spin.setValue(
+                int(window.label_overlay.get_opacity() * 100)
+            )
             self.opacity_spin.blockSignals(False)
 
             self.show_checkbox.blockSignals(True)
@@ -435,7 +457,9 @@ class LabelManager(QWidget):
                 current_color[0], current_color[1], current_color[2]
             )
 
-            new_color = QColorDialog.getColor(qcolor, self, "Select Label Color")
+            new_color = QColorDialog.getColor(
+                qcolor, self, "Select Label Color"
+            )
             if new_color.isValid():
                 rgba = (
                     new_color.redF(),
@@ -601,8 +625,77 @@ class LabelManager(QWidget):
 
         labels.save(path)
 
-    def load_labels(self):
-        """Load labels from file."""
+    def _get_expected_shape(self):
+        """Get expected label shape for active window."""
+        Y, X = self.active_window.Y, self.active_window.X
+        if self.active_window.Z > 1:
+            return (self.active_window.Z, Y, X)
+        return (Y, X)
+
+    def _apply_loaded_labels(self, labels):
+        """Apply loaded labels to active window with validation."""
+        expected_shape = self._get_expected_shape()
+
+        if labels.shape != expected_shape:
+            QMessageBox.warning(
+                self,
+                "Shape Mismatch",
+                f"Label shape {labels.shape} does not match "
+                f"image shape {expected_shape}",
+            )
+            return False
+
+        self.active_window.labels = labels
+
+        # Update overlay
+        if hasattr(self.active_window, "_ensure_label_overlay"):
+            self.active_window._ensure_label_overlay()
+
+        overlay = getattr(self.active_window, "label_overlay", None)
+        if overlay:
+            overlay.set_labels(labels)
+            overlay.refresh()
+
+        self.active_window.label_changed.emit(labels)
+        self.refresh_list()
+        self.active_window.canvas.update()
+        return True
+
+    def load_labels_zarr(self):
+        """Load labels from .sparse.zarr folder."""
+        if not self.active_window:
+            return
+
+        default_dir = "."
+        if self.active_window.filepath:
+            default_dir = os.path.dirname(self.active_window.filepath)
+
+        # Use directory picker for zarr
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select .sparse.zarr Folder",
+            default_dir,
+        )
+
+        if not path:
+            return
+
+        if not path.endswith(".sparse.zarr"):
+            QMessageBox.warning(
+                self,
+                "Invalid Folder",
+                "Please select a folder ending with .sparse.zarr",
+            )
+            return
+
+        try:
+            labels = SparseLabels.from_file(path)
+            self._apply_loaded_labels(labels)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Failed", str(e))
+
+    def load_labels_npz(self):
+        """Load labels from .sparse.npz file."""
         if not self.active_window:
             return
 
@@ -612,9 +705,9 @@ class LabelManager(QWidget):
 
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Load Labels",
+            "Load NPZ Labels",
             default_dir,
-            "Sparse Labels (*.sparse.zarr *.sparse.npz);;All Files (*)",
+            "NPZ Labels (*.sparse.npz);;All Files (*)",
         )
 
         if not path:
@@ -622,43 +715,49 @@ class LabelManager(QWidget):
 
         try:
             labels = SparseLabels.from_file(path)
+            self._apply_loaded_labels(labels)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Failed", str(e))
 
-            # Validate shape compatibility
-            Y, X = self.active_window.Y, self.active_window.X
-            if self.active_window.Z > 1:
-                expected_shape = (self.active_window.Z, Y, X)
+    def load_labels_from_dense(self):
+        """Load labels from a dense label image (e.g., from segmentation)."""
+        if not self.active_window:
+            return
+
+        default_dir = "."
+        if self.active_window.filepath:
+            default_dir = os.path.dirname(self.active_window.filepath)
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Dense Label Image",
+            default_dir,
+            "Image Files (*.tif *.tiff *.png);;All Files (*)",
+        )
+
+        if not path:
+            return
+
+        try:
+            import numpy as np
+            from tifffile import imread
+
+            # Load the dense label image
+            if path.endswith(('.tif', '.tiff')):
+                dense_image = imread(path)
             else:
-                expected_shape = (Y, X)
+                from matplotlib.pyplot import imread as mpl_imread
+                dense_image = mpl_imread(path)
+                if dense_image.ndim == 3:
+                    # Convert RGB to grayscale labels
+                    dense_image = dense_image[:, :, 0]
+                dense_image = dense_image.astype(np.uint16)
 
-            if labels.shape != expected_shape:
-                from qtpy.QtWidgets import QMessageBox
-
-                QMessageBox.warning(
-                    self,
-                    "Shape Mismatch",
-                    f"Label shape {labels.shape} does not match "
-                    f"image shape {expected_shape}",
-                )
-                return
-
-            self.active_window.labels = labels
-
-            # Update overlay
-            if hasattr(self.active_window, "_ensure_label_overlay"):
-                self.active_window._ensure_label_overlay()
-
-            overlay = getattr(self.active_window, "label_overlay", None)
-            if overlay:
-                overlay.set_labels(labels)
-                overlay.refresh()
-
-            self.active_window.label_changed.emit(labels)
-            self.refresh_list()
-            self.active_window.canvas.update()
+            # Convert to sparse
+            labels = SparseLabels.from_dense(dense_image)
+            self._apply_loaded_labels(labels)
 
         except Exception as e:
-            from qtpy.QtWidgets import QMessageBox
-
             QMessageBox.critical(self, "Load Failed", str(e))
 
     # ---- Keyboard Shortcuts ----
