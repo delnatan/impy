@@ -8,6 +8,7 @@ __version__ = "0.1.2"
 
 from .imaris_reader import ImarisReader
 from .io import (
+    CZI5DProxy,
     ImageBuffer,
     Imaris5DProxy,
     Numpy5DProxy,
@@ -28,7 +29,8 @@ from .volume import VolumeViewer
 from .roi_manager import ROIManager, get_roi_manager
 from .gel_analyzer import GelAnalyzerWidget, get_gel_analyzer, show_gel_analyzer
 from .rois import ROI, CircleROI, CoordinateROI, LineROI, RectangleROI, LaneROI
-from .ui import ImageWindow, Toolbar, imshow, run_app
+from .toolbar import Toolbar
+from .ui import ImageWindow, imshow, run_app
 from .widgets import ImageOutputSelector, PSFComputeDialog
 
 __all__ = [
@@ -43,6 +45,7 @@ __all__ = [
     "normalize_to_5d",
     "Imaris5DProxy",
     "Numpy5DProxy",
+    "CZI5DProxy",
     "ImageBuffer",
     # ui
     "ImageWindow",

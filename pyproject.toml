@@ -30,6 +30,9 @@ dependencies = [
     "scikit-image>=0.26.0",
 ]
 
+[project.optional-dependencies]
+czi = ["aicspylibczi"]
+
 [project.scripts]
 pyvistra = "pyvistra.__main__:main"
 
