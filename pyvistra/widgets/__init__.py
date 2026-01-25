@@ -26,6 +26,7 @@ from .alignment import AlignmentDialog
 from .output_selector import ImageOutputSelector
 from .psf_dialog import PSFComputeDialog
 from .axes_dialog import AxesDialog
+from .line_profile import LineProfileDialog, get_line_profile_dialog, line_profile_dialog_exists
 
 __all__ = [
     # Theme constants
@@ -50,4 +51,7 @@ __all__ = [
     "ImageOutputSelector",
     "PSFComputeDialog",
     "AxesDialog",
+    "LineProfileDialog",
+    "get_line_profile_dialog",
+    "line_profile_dialog_exists",
 ]

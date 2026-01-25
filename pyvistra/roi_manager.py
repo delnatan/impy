@@ -91,6 +91,10 @@ class ROIManager(QWidget):
         action_measure.triggered.connect(lambda: self.run_analysis(measure_intensity))
         analysis_menu.addAction(action_measure)
 
+        action_line_profile = QAction("Line Profile...", self)
+        action_line_profile.triggered.connect(self.show_line_profile_dialog)
+        analysis_menu.addAction(action_line_profile)
+
         analysis_menu.addSeparator()
 
         action_gel = QAction("Gel Analyzer...", self)
@@ -450,6 +454,23 @@ class ROIManager(QWidget):
         count = align_lanes(self.active_window.rois, reference='top')
         if count > 0:
             self.active_window.canvas.update()
+
+    def show_line_profile_dialog(self):
+        """Show the Line Profile dialog."""
+        from .widgets import get_line_profile_dialog
+
+        dialog = get_line_profile_dialog()
+        if self.active_window:
+            dialog.active_window = self.active_window
+        dialog.show()
+        dialog.raise_()
+
+        # Update profile if a LineROI is selected
+        if self.active_window:
+            for roi in self.active_window.rois:
+                if roi.selected and isinstance(roi, LineROI):
+                    dialog._update_profile(roi)
+                    break
 
     def run_analysis(self, func):
         item = self.roi_list.currentItem()

@@ -59,6 +59,7 @@ class ImageWindow(QMainWindow):
     roi_added = Signal(object)  # Emits the ROI that was added
     roi_removed = Signal(object)  # Emits the ROI that was removed
     roi_selection_changed = Signal(object)  # Emits the selected ROI (or None)
+    roi_modified = Signal(object)  # Emits ROI when it's being modified (dragged)
     label_changed = Signal(object)  # Emits SparseLabels when labels change
 
     def __init__(self, data_or_path, title="Image", meta=None):
@@ -358,6 +359,13 @@ class ImageWindow(QMainWindow):
         channels_action.setShortcut("Shift+H")
         channels_action.triggered.connect(self.show_channel_panel)
         adjust_menu.addAction(channels_action)
+
+        adjust_menu.addSeparator()
+
+        line_profile_action = QAction("Line Profile...", self)
+        line_profile_action.setShortcut("Shift+K")
+        line_profile_action.triggered.connect(self.show_line_profile)
+        adjust_menu.addAction(line_profile_action)
 
         # Image Menu
         image_menu = menubar.addMenu("Image")
@@ -745,6 +753,20 @@ class ImageWindow(QMainWindow):
             self._alignment_dialog = AlignmentDialog(parent=self)
         self._alignment_dialog.show()
         self._alignment_dialog.raise_()
+
+    def show_line_profile(self):
+        """Show the line profile dialog."""
+        from .widgets import get_line_profile_dialog
+
+        dialog = get_line_profile_dialog()
+        dialog.active_window = self
+        dialog.show()
+        dialog.raise_()
+        # Trigger update if a LineROI is selected
+        for roi in self.rois:
+            if roi.selected and isinstance(roi, LineROI):
+                dialog._update_profile(roi)
+                break
 
     def show_axes_dialog(self):
         """Show dialog to reorder axes for ambiguous TIFF dimensions."""
@@ -1179,6 +1201,7 @@ class ImageWindow(QMainWindow):
                 self.dragging_roi.adjust(self.drag_handle, (x, y))
 
             self.last_pos = (x, y)
+            self.roi_modified.emit(self.dragging_roi)
             self.canvas.update()
             return
 
@@ -1220,6 +1243,8 @@ class ImageWindow(QMainWindow):
             return
 
         if self.dragging_roi:
+            # Emit final modification signal
+            self.roi_modified.emit(self.dragging_roi)
             # Notify ROI that drag ended (for LaneROI marker callbacks)
             if hasattr(self.dragging_roi, "end_marker_drag"):
                 self.dragging_roi.end_marker_drag()
@@ -1453,6 +1478,15 @@ class Toolbar(QMainWindow):
             try:
                 mgr = get_label_manager()
                 mgr.cleanup()
+            except Exception:
+                pass
+
+        # Signal Line Profile dialog to stop processing updates
+        from .widgets import line_profile_dialog_exists, get_line_profile_dialog
+        if line_profile_dialog_exists():
+            try:
+                dialog = get_line_profile_dialog()
+                dialog.cleanup()
             except Exception:
                 pass
 
