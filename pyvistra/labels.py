@@ -624,3 +624,131 @@ class SparseLabels:
             f"n_objects={self.n_objects}, "
             f"labels={self.labels[:5]}{'...' if len(self.labels) > 5 else ''})"
         )
+
+    # ---- Patch Extraction ----
+
+    def extract_patches(
+        self,
+        size: int | tuple[int, ...],
+        image: np.ndarray = None,
+        labels: list[int] = None,
+    ) -> Iterator[dict]:
+        """
+        Extract fixed-size patches centered on each object.
+
+        Args:
+            size: Output patch size (single int for square/cube, or tuple)
+            image: Optional source image to crop (must match self.shape)
+            labels: Subset of labels to extract (default: all)
+
+        Yields:
+            dict with keys:
+                - 'label': int - object label
+                - 'mask': np.ndarray - boolean mask (size x size)
+                - 'image': np.ndarray - cropped image (only if image provided)
+                - 'center': tuple - center coords in original image
+                - 'valid': bool - True if object fits within patch size
+        """
+        # Normalize size to tuple
+        if isinstance(size, int):
+            patch_size = (size,) * self.ndim
+        else:
+            patch_size = tuple(size)
+            if len(patch_size) != self.ndim:
+                raise ValueError(
+                    f"size must have {self.ndim} dimensions, got {len(patch_size)}"
+                )
+
+        # Validate image shape if provided
+        if image is not None and image.shape != self._shape:
+            raise ValueError(
+                f"image shape {image.shape} must match labels shape {self._shape}"
+            )
+
+        # Determine which labels to process
+        if labels is None:
+            labels_to_process = self.labels
+        else:
+            labels_to_process = [l for l in labels if l in self._objects]
+
+        for label in labels_to_process:
+            yield self._extract_single_patch(label, patch_size, image)
+
+    def _extract_single_patch(
+        self,
+        label: int,
+        patch_size: tuple[int, ...],
+        image: np.ndarray = None,
+    ) -> dict:
+        """Extract a single patch for one label."""
+        coords = self.coords(label)
+        arr = self._objects[label]
+
+        # Compute centroid
+        center = tuple(int(round(arr[i].mean())) for i in range(self.ndim))
+
+        # Check if object fits within patch size
+        bbox = self.bounding_box(label)
+        obj_size = tuple(s.stop - s.start for s in bbox)
+        valid = all(o <= p for o, p in zip(obj_size, patch_size))
+
+        # Calculate ideal slice (centered on centroid)
+        half_size = tuple(p // 2 for p in patch_size)
+
+        # Source slice (what we read from original image)
+        # Destination slice (where we write in output patch)
+        src_slices = []
+        dst_slices = []
+
+        for dim in range(self.ndim):
+            # Ideal start/end for centered patch
+            ideal_start = center[dim] - half_size[dim]
+            ideal_end = ideal_start + patch_size[dim]
+
+            # Clip to image bounds
+            src_start = max(0, ideal_start)
+            src_end = min(self._shape[dim], ideal_end)
+
+            # Compute offset in destination
+            dst_start = src_start - ideal_start
+            dst_end = dst_start + (src_end - src_start)
+
+            src_slices.append(slice(src_start, src_end))
+            dst_slices.append(slice(dst_start, dst_end))
+
+        src_slices = tuple(src_slices)
+        dst_slices = tuple(dst_slices)
+
+        # Create output mask (zero-padded)
+        out_mask = np.zeros(patch_size, dtype=bool)
+
+        # Map coordinates to patch space
+        patch_coords = tuple(
+            coords[dim] - src_slices[dim].start + dst_slices[dim].start
+            for dim in range(self.ndim)
+        )
+
+        # Filter coordinates that fall within patch bounds
+        in_bounds = np.ones(arr.shape[1], dtype=bool)
+        for dim in range(self.ndim):
+            in_bounds &= (patch_coords[dim] >= 0) & (
+                patch_coords[dim] < patch_size[dim]
+            )
+
+        valid_patch_coords = tuple(pc[in_bounds] for pc in patch_coords)
+        out_mask[valid_patch_coords] = True
+
+        result = {
+            "label": label,
+            "mask": out_mask,
+            "center": center,
+            "valid": valid,
+        }
+
+        # Extract image patch if provided
+        if image is not None:
+            out_image = np.zeros(patch_size, dtype=image.dtype)
+            out_image[dst_slices] = image[src_slices]
+            result["image"] = out_image
+
+        return result
