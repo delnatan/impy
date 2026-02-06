@@ -4,8 +4,16 @@ Based on vispy and PyQt (via qtpy)
 
 """
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
+from .annotation_manager import AnnotationManager, get_annotation_manager
+from .colors import (
+    DEFAULT_LABEL_PALETTE,
+    SMART_LABEL_PALETTE,
+    compute_adjacency_graph,
+    compute_smart_colors,
+)
+from .gel_analyzer import GelAnalyzerWidget, get_gel_analyzer, show_gel_analyzer
 from .imaris_reader import ImarisReader
 from .io import (
     CZI5DProxy,
@@ -20,17 +28,15 @@ from .io import (
     save_sparse_labels,
     save_tiff,
 )
-from .label_manager import LabelManager, get_label_manager
 from .label_visual import LabelOverlayVisual
 from .labels import SparseLabels
 from .manager import WindowManager, manager
 from .ortho import OrthoViewer
-from .volume import VolumeViewer
 from .roi_manager import ROIManager, get_roi_manager
-from .gel_analyzer import GelAnalyzerWidget, get_gel_analyzer, show_gel_analyzer
-from .rois import ROI, CircleROI, CoordinateROI, LineROI, RectangleROI, LaneROI
+from .rois import ROI, CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
 from .toolbar import Toolbar
 from .ui import ImageWindow, imshow, run_app
+from .volume import VolumeViewer
 from .widgets import ImageOutputSelector, PSFComputeDialog
 
 __all__ = [
@@ -65,9 +71,14 @@ __all__ = [
     # labels/masks
     "SparseLabels",
     "LabelOverlayVisual",
-    "LabelManager",
-    "get_label_manager",
+    # colors (smart coloring)
+    "SMART_LABEL_PALETTE",
+    "DEFAULT_LABEL_PALETTE",
+    "compute_smart_colors",
+    "compute_adjacency_graph",
     # managers
+    "AnnotationManager",
+    "get_annotation_manager",
     "ROIManager",
     "get_roi_manager",
     "WindowManager",

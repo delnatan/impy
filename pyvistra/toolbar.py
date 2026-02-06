@@ -17,10 +17,9 @@ from qtpy.QtWidgets import (
 )
 from vispy import app
 
+from .annotation_manager import annotation_manager_exists, get_annotation_manager
 from .console import console_exists, get_console
-from .label_manager import get_label_manager, label_manager_exists
 from .manager import manager
-from .roi_manager import get_roi_manager, roi_manager_exists
 
 
 class Toolbar(QMainWindow):
@@ -88,15 +87,11 @@ class Toolbar(QMainWindow):
         self.tools.addAction(self.act_brush)
         self.tools.addAction(self.act_eraser)
 
-        # Manager Buttons
+        # Manager Button
         self.tools.addSeparator()
-        self.act_roi_mgr = QAction("ROI Manager", self)
-        self.act_roi_mgr.triggered.connect(self.show_roi_manager)
-        self.tools.addAction(self.act_roi_mgr)
-
-        self.act_label_mgr = QAction("Label Manager", self)
-        self.act_label_mgr.triggered.connect(self.show_label_manager)
-        self.tools.addAction(self.act_label_mgr)
+        self.act_annotation_mgr = QAction("Annotations", self)
+        self.act_annotation_mgr.triggered.connect(self.show_annotation_manager)
+        self.tools.addAction(self.act_annotation_mgr)
 
         # Python Console Button
         self.act_console = QAction("Console", self)
@@ -138,13 +133,8 @@ class Toolbar(QMainWindow):
         for w in manager.get_all().values():
             w.update_cursor()
 
-    def show_roi_manager(self):
-        mgr = get_roi_manager()
-        mgr.show()
-        mgr.raise_()
-
-    def show_label_manager(self):
-        mgr = get_label_manager()
+    def show_annotation_manager(self):
+        mgr = get_annotation_manager()
         mgr.show()
         mgr.raise_()
 
@@ -223,19 +213,10 @@ class Toolbar(QMainWindow):
             self.spawn_viewer(fname)
 
     def closeEvent(self, event):
-        # Signal ROI Manager to stop processing updates BEFORE closing windows
-        # This prevents UI updates during the shutdown sequence
-        if roi_manager_exists():
+        # Signal Annotation Manager to stop processing updates BEFORE closing windows
+        if annotation_manager_exists():
             try:
-                mgr = get_roi_manager()
-                mgr.cleanup()  # Disconnects signals, sets shutdown flag
-            except Exception:
-                pass
-
-        # Signal Label Manager to stop processing updates
-        if label_manager_exists():
-            try:
-                mgr = get_label_manager()
+                mgr = get_annotation_manager()
                 mgr.cleanup()
             except Exception:
                 pass

@@ -1,24 +1,14 @@
 """
 LabelOverlayVisual - Vispy visual for rendering SparseLabels as RGBA overlay.
+
+Supports multiple render modes (filled, outline, both) and smart adjacency-aware
+coloring for improved visual distinction between neighboring labels.
 """
 
 import numpy as np
 from vispy import scene
 
-
-# Default color palette for labels (colorblind-friendly)
-DEFAULT_LABEL_COLORS = [
-    (0.90, 0.10, 0.29, 0.5),  # Red
-    (0.23, 0.70, 0.29, 0.5),  # Green
-    (0.00, 0.51, 0.78, 0.5),  # Blue
-    (0.96, 0.51, 0.19, 0.5),  # Orange
-    (0.57, 0.12, 0.71, 0.5),  # Purple
-    (0.27, 0.94, 0.94, 0.5),  # Cyan
-    (0.94, 0.20, 0.90, 0.5),  # Magenta
-    (0.98, 0.75, 0.00, 0.5),  # Yellow
-    (0.00, 0.50, 0.50, 0.5),  # Teal
-    (0.86, 0.75, 1.00, 0.5),  # Lavender
-]
+from .colors import DEFAULT_LABEL_PALETTE, compute_smart_colors
 
 
 class LabelOverlayVisual:
@@ -29,9 +19,16 @@ class LabelOverlayVisual:
     where each label gets a distinct color. Renders above image
     channels but below ROIs.
 
+    Supports three render modes:
+    - "filled": Solid fill with semi-transparency (default)
+    - "outline": Only boundary pixels are rendered
+    - "both": Filled with white outline overlay
+
     Example:
         >>> overlay = LabelOverlayVisual(view, shape_yx=(512, 512))
         >>> overlay.set_labels(sparse_labels)
+        >>> overlay.render_mode = "outline"
+        >>> overlay.auto_color = True
         >>> overlay.refresh()
     """
 
@@ -40,6 +37,8 @@ class LabelOverlayVisual:
         view: scene.ViewBox,
         shape_yx: tuple[int, int],
         scale: tuple[float, float] = (1.0, 1.0),
+        render_mode: str = "filled",
+        auto_color: bool = False,
     ):
         """
         Initialize the label overlay visual.
@@ -48,6 +47,8 @@ class LabelOverlayVisual:
             view: Vispy ViewBox to add visual to
             shape_yx: Image dimensions (Y, X)
             scale: Pixel scale (sy, sx) to match image transform
+            render_mode: "filled", "outline", or "both"
+            auto_color: Use smart adjacency-aware coloring
         """
         self.view = view
         self.shape_yx = shape_yx
@@ -56,6 +57,8 @@ class LabelOverlayVisual:
         self._labels = None  # SparseLabels instance
         self._z_idx = 0  # Current Z slice for 3D data
         self._opacity = 0.5  # Global overlay opacity
+        self._render_mode = render_mode
+        self._auto_color = auto_color
 
         # Per-label state
         self._label_colors: dict[int, tuple[float, ...]] = {}
@@ -104,6 +107,41 @@ class LabelOverlayVisual:
         """Set overlay visibility."""
         self._image.visible = value
 
+    @property
+    def render_mode(self) -> str:
+        """Get render mode ("filled", "outline", or "both")."""
+        return self._render_mode
+
+    @render_mode.setter
+    def render_mode(self, value: str):
+        """Set render mode."""
+        if value not in ("filled", "outline", "both"):
+            raise ValueError(f"Invalid render_mode: {value}")
+        self._render_mode = value
+        self.refresh()
+
+    @property
+    def auto_color(self) -> bool:
+        """Get auto-color mode (smart adjacency-aware coloring)."""
+        return self._auto_color
+
+    @auto_color.setter
+    def auto_color(self, value: bool):
+        """Set auto-color mode."""
+        self._auto_color = value
+        if value:
+            self._recompute_smart_colors()
+        self.refresh()
+
+    def _recompute_smart_colors(self) -> None:
+        """Recompute colors using smart adjacency-aware algorithm."""
+        if self._labels is None or self._labels.n_objects == 0:
+            return
+
+        z_idx = self._z_idx if self._labels.ndim == 3 else None
+        colors = compute_smart_colors(self._labels, z_idx=z_idx)
+        self._label_colors.update(colors)
+
     def set_labels(self, labels) -> None:
         """
         Set the SparseLabels to render.
@@ -120,10 +158,15 @@ class LabelOverlayVisual:
             return
 
         # Assign colors to new labels
+        if self._auto_color:
+            self._recompute_smart_colors()
+        else:
+            for label in labels:
+                if label not in self._label_colors:
+                    color_idx = (label - 1) % len(DEFAULT_LABEL_PALETTE)
+                    self._label_colors[label] = DEFAULT_LABEL_PALETTE[color_idx]
+
         for label in labels:
-            if label not in self._label_colors:
-                color_idx = (label - 1) % len(DEFAULT_LABEL_COLORS)
-                self._label_colors[label] = DEFAULT_LABEL_COLORS[color_idx]
             if label not in self._label_visible:
                 self._label_visible[label] = True
 
@@ -138,6 +181,8 @@ class LabelOverlayVisual:
             z_idx: Z index to display
         """
         self._z_idx = z_idx
+        if self._auto_color:
+            self._recompute_smart_colors()
         self.refresh()
 
     def refresh(self) -> None:
@@ -153,7 +198,7 @@ class LabelOverlayVisual:
                 continue
 
             color = self._label_colors.get(
-                label, DEFAULT_LABEL_COLORS[(label - 1) % len(DEFAULT_LABEL_COLORS)]
+                label, DEFAULT_LABEL_PALETTE[(label - 1) % len(DEFAULT_LABEL_PALETTE)]
             )
 
             coords = self._labels.coords(label)
@@ -182,16 +227,63 @@ class LabelOverlayVisual:
             y_valid = y_slice[valid]
             x_valid = x_slice[valid]
 
-            # Apply color with global opacity
-            rgba = (
-                color[0],
-                color[1],
-                color[2],
-                color[3] * self._opacity,
-            )
-            self._texture[y_valid, x_valid] = rgba
+            if len(y_valid) == 0:
+                continue
+
+            # Render based on mode
+            if self._render_mode == "filled":
+                self._render_filled(y_valid, x_valid, color)
+            elif self._render_mode == "outline":
+                self._render_outline(y_valid, x_valid, color)
+            else:  # "both"
+                self._render_filled(y_valid, x_valid, color)
+                # Overlay white outline
+                self._render_outline(y_valid, x_valid, (1.0, 1.0, 1.0, 0.8))
 
         self._image.set_data(self._texture)
+
+    def _render_filled(self, y_coords, x_coords, color: tuple) -> None:
+        """Render filled pixels."""
+        rgba = (
+            color[0],
+            color[1],
+            color[2],
+            color[3] * self._opacity,
+        )
+        self._texture[y_coords, x_coords] = rgba
+
+    def _render_outline(self, y_coords, x_coords, color: tuple) -> None:
+        """Render only boundary pixels using morphological erosion."""
+        if len(y_coords) == 0:
+            return
+
+        # Create temporary mask for this label
+        mask = np.zeros(self.shape_yx, dtype=bool)
+        mask[y_coords, x_coords] = True
+
+        # Find boundary using erosion
+        try:
+            from scipy.ndimage import binary_erosion
+
+            # Erode the mask to find interior
+            interior = binary_erosion(mask)
+            # Boundary = original - interior
+            boundary = mask & ~interior
+
+            # Get boundary coordinates
+            by, bx = np.where(boundary)
+
+            if len(by) > 0:
+                rgba = (
+                    color[0],
+                    color[1],
+                    color[2],
+                    color[3] * self._opacity,
+                )
+                self._texture[by, bx] = rgba
+        except ImportError:
+            # Fallback: render all pixels if scipy not available
+            self._render_filled(y_coords, x_coords, color)
 
     def set_label_color(
         self, label: int, rgba: tuple[float, float, float, float]
@@ -209,7 +301,7 @@ class LabelOverlayVisual:
     def get_label_color(self, label: int) -> tuple[float, float, float, float]:
         """Get color for a specific label."""
         return self._label_colors.get(
-            label, DEFAULT_LABEL_COLORS[(label - 1) % len(DEFAULT_LABEL_COLORS)]
+            label, DEFAULT_LABEL_PALETTE[(label - 1) % len(DEFAULT_LABEL_PALETTE)]
         )
 
     def set_label_visible(self, label: int, visible: bool) -> None:

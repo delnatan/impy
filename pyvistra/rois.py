@@ -9,6 +9,7 @@ class ROI:
     def __init__(self, view, name="ROI"):
         self.view = view
         self.name = name
+        self.group = "Default"
         self.visuals = []
         self.data = {}  # Store geometry data for serialization
 
@@ -109,11 +110,14 @@ class ROI:
         return {
             "type": self.__class__.__name__,
             "name": self.name,
+            "group": self.group,
             "data": self.data,
         }
 
-    def from_dict(self, data):
+    def from_dict(self, data, group=None):
         self.data = data
+        if group is not None:
+            self.group = group
         self._update_visuals_from_data()
 
     def _update_visuals_from_data(self):

@@ -1,5 +1,6 @@
 import heapq
 import sys
+from collections import OrderedDict
 
 import numpy as np
 from qtpy import API_NAME
@@ -53,6 +54,8 @@ class ImageWindow(QMainWindow):
     roi_selection_changed = Signal(object)  # Emits the selected ROI (or None)
     roi_modified = Signal(object)  # Emits ROI when it's being modified (dragged)
     label_changed = Signal(object)  # Emits SparseLabels when labels change
+    mask_layer_added = Signal(str)  # Emits mask layer name when added
+    mask_layer_removed = Signal(str)  # Emits mask layer name when removed
 
     def __init__(self, data_or_path, title="Image", meta=None):
         super().__init__()
@@ -156,17 +159,19 @@ class ImageWindow(QMainWindow):
         self._freed_roi_ids = []  # min-heap of freed IDs for reuse
         self.drawing_roi = None
         self.start_pos = None
+        # ROI grouping
+        self._roi_groups_visible = {"Default": True}
+        self._active_roi_group = "Default"
         # Editing State
         self.dragging_roi = None
         self.drag_handle = None
         self.last_pos = None
         # SPACE bar temporary pointer mode
         self._space_held_previous_tool = None
-        # Toolbar is now external
 
-        # 9. Label/Mask State
-        self.labels = None  # SparseLabels instance
-        self.label_overlay = None  # LabelOverlayVisual
+        # 9. Label/Mask State (multiple named mask layers)
+        self._mask_layers = OrderedDict()  # name → {"labels": SparseLabels, "visual": LabelOverlayVisual, "visible": True}
+        self._active_mask_layer = None  # name of active mask layer
         self._active_label = 1
         self._brush_size = 5
         self._preserve_labels = True  # Protect existing labels by default
@@ -268,10 +273,10 @@ class ImageWindow(QMainWindow):
                 new_id = 1
                 while new_id in existing:
                     new_id += 1
-                self._active_label = new_id
+                self.active_label = new_id
         elif event.key() == Qt.Key_P:
             # Toggle preserve labels
-            self._preserve_labels = not self._preserve_labels
+            self.preserve_labels = not self.preserve_labels
         elif event.key() == Qt.Key_V:
             # Toggle label overlay visibility
             if self.label_overlay is not None:
@@ -279,10 +284,10 @@ class ImageWindow(QMainWindow):
                 self.canvas.update()
         elif event.key() == Qt.Key_BracketLeft:
             # Decrease brush size
-            self._brush_size = max(1, self._brush_size - 1)
+            self.brush_size = max(1, self.brush_size - 1)
         elif event.key() == Qt.Key_BracketRight:
             # Increase brush size
-            self._brush_size = min(100, self._brush_size + 1)
+            self.brush_size = min(100, self.brush_size + 1)
         elif event.key() in (
             Qt.Key_1,
             Qt.Key_2,
@@ -296,7 +301,7 @@ class ImageWindow(QMainWindow):
         ):
             # Quick label selection 1-9
             label_num = event.key() - Qt.Key_0
-            self._active_label = label_num
+            self.active_label = label_num
         else:
             super().keyPressEvent(event)
 
@@ -418,17 +423,44 @@ class ImageWindow(QMainWindow):
 
     # ---- Label/Mask Methods ----
 
-    def set_labels(self, labels):
-        """
-        Set SparseLabels for this window.
+    # ---- Mask Layer Properties (backward compat) ----
 
-        Args:
-            labels: SparseLabels instance or None to clear
-        """
-        self.labels = labels
-        self._ensure_label_overlay()
-        if self.label_overlay:
-            self.label_overlay.set_labels(labels)
+    @property
+    def labels(self):
+        """Active mask layer's SparseLabels (backward compat)."""
+        if self._active_mask_layer and self._active_mask_layer in self._mask_layers:
+            return self._mask_layers[self._active_mask_layer]["labels"]
+        return None
+
+    @labels.setter
+    def labels(self, value):
+        """Set labels on active mask layer, creating one if needed."""
+        if value is None:
+            return
+        if not self._mask_layers:
+            self.add_mask_layer("Labels-1", labels=value)
+        elif self._active_mask_layer and self._active_mask_layer in self._mask_layers:
+            self._mask_layers[self._active_mask_layer]["labels"] = value
+            visual = self._mask_layers[self._active_mask_layer]["visual"]
+            if visual is not None:
+                visual.set_labels(value)
+
+    @property
+    def label_overlay(self):
+        """Active mask layer's visual (backward compat)."""
+        if self._active_mask_layer and self._active_mask_layer in self._mask_layers:
+            return self._mask_layers[self._active_mask_layer]["visual"]
+        return None
+
+    def set_labels(self, labels):
+        """Set SparseLabels for this window (backward compat)."""
+        if labels is None:
+            return
+        if not self._mask_layers:
+            self.add_mask_layer("Labels-1", labels=labels)
+        else:
+            self.labels = labels
+            self._ensure_label_overlay()
         self.label_changed.emit(labels)
         self.canvas.update()
 
@@ -437,15 +469,74 @@ class ImageWindow(QMainWindow):
         return self.labels
 
     def _ensure_label_overlay(self):
-        """Create label overlay if it doesn't exist."""
-        if self.label_overlay is None:
-            self.label_overlay = LabelOverlayVisual(
-                self.view,
-                shape_yx=(self.Y, self.X),
-                scale=self.renderer.scale,
-            )
-        if self.labels is not None:
-            self.label_overlay.set_labels(self.labels)
+        """Ensure a mask layer with visual exists. Auto-creates 'Labels-1' if none."""
+        if not self._mask_layers:
+            self.add_mask_layer("Labels-1")
+            return
+        if self._active_mask_layer and self._active_mask_layer in self._mask_layers:
+            entry = self._mask_layers[self._active_mask_layer]
+            if entry["visual"] is None:
+                entry["visual"] = LabelOverlayVisual(
+                    self.view,
+                    shape_yx=(self.Y, self.X),
+                    scale=self.renderer.scale,
+                )
+            if entry["labels"] is not None:
+                entry["visual"].set_labels(entry["labels"])
+
+    # ---- Multiple Mask Layers API ----
+
+    def add_mask_layer(self, name, labels=None):
+        """Create a named mask layer with its own SparseLabels and visual."""
+        if name in self._mask_layers:
+            return
+        if labels is None:
+            if self.Z > 1:
+                shape = (self.Z, self.Y, self.X)
+            else:
+                shape = (self.Y, self.X)
+            labels = SparseLabels(shape)
+        visual = LabelOverlayVisual(
+            self.view,
+            shape_yx=(self.Y, self.X),
+            scale=self.renderer.scale,
+        )
+        visual.set_labels(labels)
+        self._mask_layers[name] = {
+            "labels": labels,
+            "visual": visual,
+            "visible": True,
+        }
+        if self._active_mask_layer is None:
+            self._active_mask_layer = name
+        self.mask_layer_added.emit(name)
+
+    def remove_mask_layer(self, name):
+        """Remove a named mask layer and clean up its visual."""
+        if name not in self._mask_layers:
+            return
+        entry = self._mask_layers.pop(name)
+        if entry["visual"] is not None:
+            entry["visual"].remove()
+        if self._active_mask_layer == name:
+            self._active_mask_layer = next(iter(self._mask_layers), None)
+        self.mask_layer_removed.emit(name)
+        self.canvas.update()
+
+    def set_mask_layer_visible(self, name, visible):
+        """Toggle visibility of a specific mask layer."""
+        if name not in self._mask_layers:
+            return
+        self._mask_layers[name]["visible"] = visible
+        visual = self._mask_layers[name]["visual"]
+        if visual is not None:
+            visual.visible = visible
+        self.canvas.update()
+
+    def set_active_mask_layer(self, name):
+        """Switch which mask layer receives painting."""
+        if name in self._mask_layers:
+            self._active_mask_layer = name
 
     def _get_brush_coords(self, cx, cy):
         """
@@ -454,7 +545,7 @@ class ImageWindow(QMainWindow):
         Returns:
             Tuple of (y_coords, x_coords) arrays
         """
-        radius = self._brush_size
+        radius = self.brush_size
         yy, xx = np.ogrid[-radius : radius + 1, -radius : radius + 1]
         mask = xx**2 + yy**2 <= radius**2
         ys, xs = np.where(mask)
@@ -545,21 +636,21 @@ class ImageWindow(QMainWindow):
 
         if erase:
             # Remove from active label
-            if self._active_label in self.labels:
+            if self.active_label in self.labels:
                 try:
-                    self.labels.remove_pixels(self._active_label, coords)
+                    self.labels.remove_pixels(self.active_label, coords)
                 except KeyError:
                     pass  # Label was completely erased
         else:
             # Add to active label
-            if self._preserve_labels:
+            if self.preserve_labels:
                 coords = self._filter_existing_labels(coords)
                 if len(coords[0]) == 0:
                     return
 
-            self.labels.add_pixels(self._active_label, coords)
+            self.labels.add_pixels(self.active_label, coords)
 
-        # Update overlay
+        # Update visuals
         if self.label_overlay:
             self.label_overlay.refresh()
         self.canvas.update()
@@ -575,7 +666,7 @@ class ImageWindow(QMainWindow):
             face_color=(0.2, 1.0, 0.2, 0.8),
             edge_color=(1.0, 1.0, 1.0, 1.0),
             edge_width=2,
-            size=max(15, self._brush_size * 2),
+            size=max(15, self.brush_size * 2),
             symbol="o",
         )
         self._contour_marker.visible = True
@@ -603,7 +694,7 @@ class ImageWindow(QMainWindow):
         distance = np.linalg.norm(end - start)
 
         # Threshold: close if within 3x brush radius or 15 pixels
-        threshold = max(self._brush_size * 3, 15)
+        threshold = max(self.brush_size * 3, 15)
         if distance < threshold:
             self._fill_closed_contour()
 
@@ -665,16 +756,80 @@ class ImageWindow(QMainWindow):
         else:
             fill_coords = (rr, cc)
 
-        if self._preserve_labels:
+        if self.preserve_labels:
             fill_coords = self._filter_existing_labels(fill_coords)
             if len(fill_coords[0]) == 0:
                 return
 
-        self.labels.add_pixels(self._active_label, fill_coords)
+        self.labels.add_pixels(self.active_label, fill_coords)
 
+        # Update visuals
         if self.label_overlay:
             self.label_overlay.refresh()
         self.canvas.update()
+
+    @property
+    def active_label(self) -> int:
+        return self._active_label
+
+    @active_label.setter
+    def active_label(self, value: int):
+        self._active_label = value
+
+    @property
+    def brush_size(self) -> int:
+        return self._brush_size
+
+    @brush_size.setter
+    def brush_size(self, value: int):
+        self._brush_size = value
+
+    @property
+    def preserve_labels(self) -> bool:
+        return self._preserve_labels
+
+    @preserve_labels.setter
+    def preserve_labels(self, value: bool):
+        self._preserve_labels = value
+
+    # ---- ROI Grouping ----
+
+    def get_roi_groups(self):
+        """Return dict mapping group name → list of ROIs."""
+        groups = {}
+        for roi in self.rois:
+            g = getattr(roi, "group", "Default")
+            groups.setdefault(g, []).append(roi)
+        # Include empty groups that exist in visibility dict
+        for name in self._roi_groups_visible:
+            if name not in groups:
+                groups[name] = []
+        return groups
+
+    def set_group_visible(self, name, visible):
+        """Toggle visibility of all ROIs in a group."""
+        self._roi_groups_visible[name] = visible
+        for roi in self.rois:
+            if getattr(roi, "group", "Default") == name:
+                roi.set_visible(visible)
+        self.canvas.update()
+
+    def add_roi_group(self, name):
+        """Create a new empty ROI group."""
+        if name not in self._roi_groups_visible:
+            self._roi_groups_visible[name] = True
+
+    def remove_roi_group(self, name):
+        """Delete a group and all its ROIs."""
+        rois_to_remove = [
+            r for r in self.rois if getattr(r, "group", "Default") == name
+        ]
+        for roi in rois_to_remove:
+            self.remove_roi(roi)
+        self._roi_groups_visible.pop(name, None)
+        if self._active_roi_group == name:
+            self._active_roi_group = "Default"
+            self._roi_groups_visible.setdefault("Default", True)
 
     def show_metadata_dialog(self):
         dlg = MetadataDialog(self.meta, parent=self)
@@ -992,9 +1147,10 @@ class ImageWindow(QMainWindow):
         else:
             self.renderer.update_slice(self.t_idx, self.z_idx)
 
-        # Update label overlay for 3D data
-        if self.label_overlay and self.labels and self.labels.ndim == 3:
-            self.label_overlay.update_slice(self.z_idx)
+        # Update all mask layers for 3D data
+        for entry in self._mask_layers.values():
+            if entry["visual"] and entry["labels"] and entry["labels"].ndim == 3:
+                entry["visual"].update_slice(self.z_idx)
 
         self.canvas.update()
         if self.contrast_dialog and self.contrast_dialog.isVisible():
@@ -1015,7 +1171,7 @@ class ImageWindow(QMainWindow):
         self.window_activated.emit(self)
 
         if tool == "pointer":
-            # Hit Test (Reverse order to select top-most)
+            # Hit Test ROIs (Reverse order to select top-most)
             hit_roi = None
             hit_handle = None
 
@@ -1080,14 +1236,14 @@ class ImageWindow(QMainWindow):
 
         # Handle brush/eraser tools
         if tool in ("brush", "eraser"):
-            # Ensure labels exist
+            # Ensure labels and overlay exist
             if self.labels is None:
                 if self.Z > 1:
                     shape = (self.Z, self.Y, self.X)
                 else:
                     shape = (self.Y, self.X)
                 self.labels = SparseLabels(shape)
-                self._ensure_label_overlay()
+            self._ensure_label_overlay()
 
             # Right-click: toggle contour fill mode (brush only)
             if event.button == 2 and tool == "brush":
@@ -1114,26 +1270,29 @@ class ImageWindow(QMainWindow):
                 self._paint_stroke(x, y, erase=(tool == "eraser"))
             return
 
-        self.start_pos = (x, y)
+        # Handle shape drawing tools (rect, circle, line, coordinate)
+        if tool in ("rect", "circle", "line", "coordinate"):
+            self.start_pos = (x, y)
 
-        # Get unique ROI ID (reuses freed IDs via heapq)
-        roi_index = str(self._get_next_roi_id())
+            # Get unique ROI ID (reuses freed IDs via heapq)
+            roi_index = str(self._get_next_roi_id())
 
-        if tool == "coordinate":
-            self.drawing_roi = CoordinateROI(self.view, name=roi_index)
-        elif tool == "rect":
-            self.drawing_roi = RectangleROI(self.view, name=roi_index)
-        elif tool == "circle":
-            self.drawing_roi = CircleROI(self.view, name=roi_index)
-        elif tool == "line":
-            self.drawing_roi = LineROI(self.view, name=roi_index)
+            if tool == "coordinate":
+                self.drawing_roi = CoordinateROI(self.view, name=roi_index)
+            elif tool == "rect":
+                self.drawing_roi = RectangleROI(self.view, name=roi_index)
+            elif tool == "circle":
+                self.drawing_roi = CircleROI(self.view, name=roi_index)
+            elif tool == "line":
+                self.drawing_roi = LineROI(self.view, name=roi_index)
 
-        if self.drawing_roi:
-            self.rois.append(self.drawing_roi)
-            self.roi_added.emit(self.drawing_roi)
-            # Initial update (zero size/length)
-            self.drawing_roi.update((x, y), (x, y))
-            self.canvas.update()
+            if self.drawing_roi:
+                self.drawing_roi.group = self._active_roi_group
+                self.rois.append(self.drawing_roi)
+                self.roi_added.emit(self.drawing_roi)
+                self.drawing_roi.update((x, y), (x, y))
+                self.view.camera.interactive = False
+                self.canvas.update()
 
     def on_mouse_move(self, event):
         # 1. Update Info Label (always)
@@ -1168,7 +1327,7 @@ class ImageWindow(QMainWindow):
                 start = np.array(self._contour_start)
                 current = np.array([x, y])
                 distance = np.linalg.norm(current - start)
-                threshold = max(self._brush_size * 3, 15)
+                threshold = max(self.brush_size * 3, 15)
                 if distance < threshold:
                     self._finish_contour()
             return
@@ -1181,7 +1340,7 @@ class ImageWindow(QMainWindow):
             self._paint_stroke(x, y, erase=(tool == "eraser"))
             return
 
-        # 3. ROI Editing
+        # 4. ROI Editing
         if self.dragging_roi and event.button == 1:
             x, y = self._map_event_to_image(event)
             dx = x - self.last_pos[0]
@@ -1250,6 +1409,8 @@ class ImageWindow(QMainWindow):
         if self.drawing_roi:
             self.drawing_roi = None
             self.start_pos = None
+            # Re-enable camera after drawing
+            self.view.camera.interactive = False  # Keep disabled for draw tools
 
 
 from .toolbar import Toolbar  # Re-export for backward compatibility
