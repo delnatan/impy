@@ -9,6 +9,7 @@ Replaces ROIManager + LabelManager with a single widget that manages:
 import json
 import os
 
+import numpy as np
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
@@ -791,18 +792,29 @@ class AnnotationManager(QWidget):
             self,
             "Save Mask Layer",
             default_path,
-            "Zarr Labels (*.sparse.zarr);;NPZ Labels (*.sparse.npz)",
+            "Zarr Labels (*.sparse.zarr);;NPZ Labels (*.sparse.npz);;TIFF Image (*.tif)",
         )
         if not path:
             return
-        if not (path.endswith(".sparse.zarr") or path.endswith(".sparse.npz")):
+        if not (
+            path.endswith(".sparse.zarr")
+            or path.endswith(".sparse.npz")
+            or path.endswith(".tif")
+            or path.endswith(".tiff")
+        ):
             path += ".sparse.zarr"
 
         w = self.active_window
         if layer_name in w._mask_layers:
             labels = w._mask_layers[layer_name]["labels"]
             if labels and labels.n_objects > 0:
-                labels.save(path)
+                if path.endswith((".tif", ".tiff")):
+                    import tifffile
+
+                    dense = labels.to_dense(dtype=np.uint16)
+                    tifffile.imwrite(path, dense)
+                else:
+                    labels.save(path)
 
     def load_rois(self):
         """Load ROIs from JSON (backward compatible with old format)."""

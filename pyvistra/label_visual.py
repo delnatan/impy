@@ -69,6 +69,9 @@ class LabelOverlayVisual:
             (shape_yx[0], shape_yx[1], 4), dtype=np.float32
         )
 
+        # Label ID lookup map (for cursor queries)
+        self._label_map = np.zeros(shape_yx, dtype=np.uint16)
+
         # Create Image visual for the overlay
         self._image = scene.visuals.Image(
             self._texture,
@@ -153,6 +156,7 @@ class LabelOverlayVisual:
 
         if labels is None:
             self._texture.fill(0)
+            self._label_map.fill(0)
             self._image.set_data(self._texture)
             self._image.visible = False
             return
@@ -185,9 +189,16 @@ class LabelOverlayVisual:
             self._recompute_smart_colors()
         self.refresh()
 
+    def label_at(self, y: int, x: int) -> int:
+        """Return label ID at pixel (y, x), or 0 if background/out-of-bounds."""
+        if (0 <= y < self.shape_yx[0]) and (0 <= x < self.shape_yx[1]):
+            return int(self._label_map[y, x])
+        return 0
+
     def refresh(self) -> None:
         """Refresh the texture from current labels."""
         self._texture.fill(0)
+        self._label_map.fill(0)
 
         if self._labels is None:
             self._image.set_data(self._texture)
@@ -229,6 +240,9 @@ class LabelOverlayVisual:
 
             if len(y_valid) == 0:
                 continue
+
+            # Update label lookup map
+            self._label_map[y_valid, x_valid] = label
 
             # Render based on mode
             if self._render_mode == "filled":

@@ -180,6 +180,7 @@ class ImageWindow(QMainWindow):
         self._contour_start = None  # (x, y) of contour start
         self._contour_marker = None  # Visual marker for start point
         self._stroke_points = []  # Accumulated path for contour
+        self._contour_max_dist = 0.0  # Max distance from contour start
 
         # 10. Events
         self.canvas.events.mouse_move.connect(self.on_mouse_move)
@@ -707,6 +708,7 @@ class ImageWindow(QMainWindow):
         self._contour_mode = False
         self._contour_start = None
         self._stroke_points = []
+        self._contour_max_dist = 0.0
         self._hide_contour_marker()
 
     def _finish_stroke(self):
@@ -1170,6 +1172,21 @@ class ImageWindow(QMainWindow):
         # Notify that this window is now active
         self.window_activated.emit(self)
 
+        # Ctrl+Click (or Cmd+Click on Mac): delete label under cursor
+        if event.button == 1 and tool in ("pointer", "brush", "eraser"):
+            has_ctrl_or_cmd = (
+                "Control" in event.modifiers or "Meta" in event.modifiers
+            )
+            if has_ctrl_or_cmd and self.label_overlay is not None:
+                iy, ix = int(y), int(x)
+                label_id = self.label_overlay.label_at(iy, ix)
+                if label_id > 0 and self.labels is not None:
+                    self.labels.remove(label_id)
+                    self.label_overlay.refresh()
+                    self.label_changed.emit(self.labels)
+                    self.canvas.update()
+                    return
+
         if tool == "pointer":
             # Hit Test ROIs (Reverse order to select top-most)
             hit_roi = None
@@ -1254,6 +1271,7 @@ class ImageWindow(QMainWindow):
                     # Start contour mode
                     self._contour_mode = True
                     self._contour_start = (x, y)
+                    self._contour_max_dist = 0.0
                     self._stroke_points = [(x, y)]
                     self._show_contour_marker(x, y)
                     self.view.camera.interactive = False
@@ -1310,9 +1328,12 @@ class ImageWindow(QMainWindow):
                         except IndexError:
                             pass
                     val_str = ", ".join(vals)
-                    self.info_label.setText(
-                        f"X: {ix}  Y: {iy}  Val: [{val_str}]"
-                    )
+                    info_text = f"X: {ix}  Y: {iy}  Val: [{val_str}]"
+                    if self.label_overlay is not None:
+                        lid = self.label_overlay.label_at(iy, ix)
+                        if lid > 0:
+                            info_text += f"  Label: {lid}"
+                    self.info_label.setText(info_text)
             else:
                 self.info_label.setText("")
 
@@ -1323,13 +1344,15 @@ class ImageWindow(QMainWindow):
             self._paint_stroke(x, y, erase=False)
 
             # Check if we've returned close to start (auto-close)
-            if len(self._stroke_points) > 20:  # Minimum points before checking
-                start = np.array(self._contour_start)
-                current = np.array([x, y])
-                distance = np.linalg.norm(current - start)
-                threshold = max(self.brush_size * 3, 15)
-                if distance < threshold:
-                    self._finish_contour()
+            start = np.array(self._contour_start)
+            current = np.array([x, y])
+            distance = np.linalg.norm(current - start)
+            self._contour_max_dist = max(self._contour_max_dist, distance)
+
+            min_travel = 50.0
+            threshold = max(self.brush_size * 3, 15)
+            if self._contour_max_dist > min_travel and distance < threshold:
+                self._finish_contour()
             return
 
         # 3. Brush/Eraser Painting (left-click drag)
