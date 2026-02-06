@@ -826,7 +826,10 @@ def load_image(filepath, use_memmap=True, dims=None):
     scale = (1.0, 1.0, 1.0)
 
     if use_memmap:
-        img = tifffile.memmap(filepath)
+        try:
+            img = tifffile.memmap(filepath)
+        except ValueError:
+            img = tifffile.imread(filepath)
     else:
         img = tifffile.imread(filepath)
 
