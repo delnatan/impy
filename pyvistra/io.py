@@ -50,7 +50,25 @@ def load_standard_image(filepath):
     return img, is_rgb_image(img)
 
 
-class Imaris5DProxy:
+class RefCountMixin:
+    """Reference counting for data proxies with file handles."""
+
+    def _init_refcount(self):
+        self._refcount = 1
+
+    def acquire(self):
+        """Increment reference count. Returns self."""
+        self._refcount += 1
+        return self
+
+    def release(self):
+        """Decrement ref count. Calls close() when it reaches 0."""
+        self._refcount -= 1
+        if self._refcount <= 0:
+            self.close()
+
+
+class Imaris5DProxy(RefCountMixin):
     """
     Wraps ImarisReader to behave like a 5D numpy array (Time, Z, Channel, Y, X).
     This allows Vispy to 'slice' it without loading the whole file.
@@ -64,6 +82,7 @@ class Imaris5DProxy:
         self.shape = (t, z, c, y, x)
         self.dtype = reader.dtype
         self.ndim = 5
+        self._init_refcount()
 
     def close(self):
         """Close the underlying HDF5 file handle."""
@@ -74,7 +93,7 @@ class Imaris5DProxy:
     def __del__(self):
         """Cleanup on garbage collection."""
         try:
-            self.close()
+            self.release()
         except Exception:
             pass
 
@@ -193,7 +212,7 @@ class Imaris5DProxy:
             return self.reader.read(c=c, t=t, z=z)
 
 
-class CZI5DProxy:
+class CZI5DProxy(RefCountMixin):
     """
     Wraps CZIReader to behave like a 5D numpy array (Time, Z, Channel, Y, X).
     This allows lazy loading without reading the whole file.
@@ -207,6 +226,7 @@ class CZI5DProxy:
         self.shape = (t, z, c, y, x)
         self.dtype = reader.dtype
         self.ndim = 5
+        self._init_refcount()
 
     def close(self):
         """Close the underlying CZI file handle."""
@@ -217,7 +237,7 @@ class CZI5DProxy:
     def __del__(self):
         """Cleanup on garbage collection."""
         try:
-            self.close()
+            self.release()
         except Exception:
             pass
 
@@ -347,7 +367,7 @@ class Numpy5DProxy:
         return self.array[key]
 
 
-class Zarr5DProxy:
+class Zarr5DProxy(RefCountMixin):
     """
     Wraps a zarr array to behave like a 5D numpy array (T, Z, C, Y, X).
     Data is loaded lazily - only requested slices are read from disk.
@@ -384,6 +404,7 @@ class Zarr5DProxy:
             raise ValueError(
                 f"Unsupported zarr array dimensionality: {source_ndim}"
             )
+        self._init_refcount()
 
     def _normalize_key(self, key):
         """Normalize slicing key to 5D tuple."""
@@ -442,8 +463,15 @@ class Zarr5DProxy:
         ):
             self._store.store.close()
 
+    def __del__(self):
+        """Cleanup on garbage collection."""
+        try:
+            self.release()
+        except Exception:
+            pass
 
-class ImageBuffer:
+
+class ImageBuffer(RefCountMixin):
     """
     Zarr-backed 5D array buffer for streaming image operations.
 
@@ -478,6 +506,7 @@ class ImageBuffer:
 
         self.metadata = metadata or {}
         self.ndim = 5
+        self._init_refcount()
 
     @property
     def shape(self):
@@ -508,7 +537,7 @@ class ImageBuffer:
     def __del__(self):
         """Cleanup on garbage collection."""
         try:
-            self.close()
+            self.release()
         except Exception:
             pass
 

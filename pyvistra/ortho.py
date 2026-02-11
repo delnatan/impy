@@ -926,8 +926,13 @@ class OrthoViewer(QMainWindow):
             except Exception:
                 pass
 
-        # Close data proxy if it has a close method (e.g., HDF5 file handles)
-        if hasattr(self.data, "close"):
+        # Release data proxy ref count (or close if no ref counting)
+        if hasattr(self.data, "release"):
+            try:
+                self.data.release()
+            except Exception:
+                pass
+        elif hasattr(self.data, "close"):
             try:
                 self.data.close()
             except Exception:

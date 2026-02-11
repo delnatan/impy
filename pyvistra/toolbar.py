@@ -182,15 +182,22 @@ class Toolbar(QMainWindow):
             elif os.path.isdir(f):
                 # Folder: collect all images recursively
                 for root, dirs, names in os.walk(f):
+                    # Skip hidden directories (e.g. .Spotlight-V100, .fseventsd)
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
                     # Check for .zarr directories (skip descending into them)
                     zarr_dirs = [d for d in dirs if d.endswith(".zarr/")]
                     for d in zarr_dirs:
                         image_files.append(os.path.join(root, d))
                         dirs.remove(d)  # Don't descend into zarr directories
                     for name in names:
+                        if name.startswith("."):
+                            continue
                         if os.path.splitext(name)[1].lower() in supported_ext:
                             image_files.append(os.path.join(root, name))
-            elif os.path.splitext(f)[1].lower() in supported_ext:
+            elif (
+                os.path.splitext(f)[1].lower() in supported_ext
+                and not os.path.basename(f).startswith(".")
+            ):
                 image_files.append(f)
 
         # Sort by filename
