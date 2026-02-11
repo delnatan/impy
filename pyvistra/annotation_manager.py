@@ -154,6 +154,13 @@ class AnnotationManager(QWidget):
         layout.addWidget(self.preserve_checkbox)
         self.preserve_checkbox.setVisible(False)
 
+        # Fill all Z slices checkbox (cookie-cut)
+        self.fill_all_z_checkbox = QCheckBox("Fill all Z slices")
+        self.fill_all_z_checkbox.setChecked(False)
+        self.fill_all_z_checkbox.toggled.connect(self._on_fill_all_z_changed)
+        layout.addWidget(self.fill_all_z_checkbox)
+        self.fill_all_z_checkbox.setVisible(False)
+
         # Opacity control
         self.opacity_widget = QWidget()
         opacity_layout = QHBoxLayout(self.opacity_widget)
@@ -426,6 +433,10 @@ class AnnotationManager(QWidget):
             self.preserve_checkbox.blockSignals(True)
             self.preserve_checkbox.setChecked(window._preserve_labels)
             self.preserve_checkbox.blockSignals(False)
+        if hasattr(window, "_mask_propagate_z"):
+            self.fill_all_z_checkbox.blockSignals(True)
+            self.fill_all_z_checkbox.setChecked(window._mask_propagate_z)
+            self.fill_all_z_checkbox.blockSignals(False)
 
     def _remove_window(self, window):
         if self.active_window == window:
@@ -549,6 +560,9 @@ class AnnotationManager(QWidget):
         self.label_controls.setVisible(is_mask)
         self.preserve_checkbox.setVisible(is_mask)
         self.opacity_widget.setVisible(is_mask)
+        self.fill_all_z_checkbox.setVisible(
+            is_mask and self.active_window.Z > 1
+        )
 
         # Sync opacity if mask
         if is_mask and gname in self.active_window._mask_layers:
@@ -695,6 +709,12 @@ class AnnotationManager(QWidget):
             self.active_window, "_preserve_labels"
         ):
             self.active_window._preserve_labels = checked
+
+    def _on_fill_all_z_changed(self, checked):
+        if self.active_window and hasattr(
+            self.active_window, "_mask_propagate_z"
+        ):
+            self.active_window._mask_propagate_z = checked
 
     def _on_opacity_changed(self, value):
         if not self.active_window or not self._selected_group:

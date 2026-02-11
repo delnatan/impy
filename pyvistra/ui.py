@@ -181,6 +181,7 @@ class ImageWindow(QMainWindow):
         self._contour_marker = None  # Visual marker for start point
         self._stroke_points = []  # Accumulated path for contour
         self._contour_max_dist = 0.0  # Max distance from contour start
+        self._mask_propagate_z = False  # Fill all Z slices (cookie-cut)
 
         # 10. Events
         self.canvas.events.mouse_move.connect(self.on_mouse_move)
@@ -489,6 +490,8 @@ class ImageWindow(QMainWindow):
                 )
             if entry["labels"] is not None:
                 entry["visual"].set_labels(entry["labels"])
+                if entry["labels"].ndim == 3:
+                    entry["visual"].update_slice(self.z_idx)
 
     # ---- Multiple Mask Layers API ----
 
@@ -508,6 +511,8 @@ class ImageWindow(QMainWindow):
             scale=self.renderer.scale,
         )
         visual.set_labels(labels)
+        if labels.ndim == 3:
+            visual.update_slice(self.z_idx)
         self._mask_layers[name] = {
             "labels": labels,
             "visual": visual,
@@ -685,7 +690,7 @@ class ImageWindow(QMainWindow):
             self.canvas.update()
 
     def _finish_contour(self):
-        """Finalize contour mode; fill if closed near start."""
+        """Finalize contour mode and fill the enclosed region."""
         if not self._contour_mode or self._contour_start is None:
             self._cancel_contour()
             return
@@ -694,15 +699,7 @@ class ImageWindow(QMainWindow):
             self._cancel_contour()
             return
 
-        # Check if we closed near the start
-        end = np.array(self._stroke_points[-1])
-        start = np.array(self._contour_start)
-        distance = np.linalg.norm(end - start)
-
-        # Threshold: close if within 3x brush radius or 15 pixels
-        threshold = max(self.brush_size * 3, 15)
-        if distance < threshold:
-            self._fill_closed_contour()
+        self._fill_closed_contour()
 
         self._cancel_contour()
         if self.labels:
@@ -758,8 +755,26 @@ class ImageWindow(QMainWindow):
 
         # Convert to proper dimensionality
         if self.labels.ndim == 3:
-            z_coords = np.full(len(rr), self.z_idx, dtype=np.int32)
-            fill_coords = (z_coords, rr, cc)
+            if self._mask_propagate_z:
+                # Cookie-cut: fill across all Z slices
+                # Build combined mask: brush strokes + polygon interior
+                mask = np.zeros((self.Y, self.X), dtype=bool)
+                for px, py in self._stroke_points:
+                    by, bx = self._get_brush_coords(px, py)
+                    if len(by) > 0:
+                        mask[by, bx] = True
+                mask[rr, cc] = True
+                rr_all, cc_all = np.where(mask)
+
+                n_z = self.labels.shape[0]
+                n_px = len(rr_all)
+                z_coords = np.repeat(np.arange(n_z, dtype=np.int32), n_px)
+                rr_tiled = np.tile(rr_all, n_z)
+                cc_tiled = np.tile(cc_all, n_z)
+                fill_coords = (z_coords, rr_tiled, cc_tiled)
+            else:
+                z_coords = np.full(len(rr), self.z_idx, dtype=np.int32)
+                fill_coords = (z_coords, rr, cc)
         else:
             fill_coords = (rr, cc)
 
@@ -1275,8 +1290,8 @@ class ImageWindow(QMainWindow):
             # Right-click: toggle contour fill mode (brush only)
             if event.button == 2 and tool == "brush":
                 if self._contour_mode:
-                    # Already in contour mode - cancel it
-                    self._cancel_contour()
+                    # Already in contour mode - finish and fill
+                    self._finish_contour()
                 else:
                     # Start contour mode
                     self._contour_mode = True
