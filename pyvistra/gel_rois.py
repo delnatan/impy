@@ -22,8 +22,8 @@ class LaneROI(RectangleROI):
     """
 
     # Default colors
-    LADDER_COLOR = "cyan"
-    SAMPLE_COLOR = "orange"
+    LADDER_COLOR = "#FFBB16"
+    SAMPLE_COLOR = "#9C27B0"
 
     def __init__(self, view, name="Lane"):
         super().__init__(view, name)
@@ -105,11 +105,11 @@ class LaneROI(RectangleROI):
             text=label,
             color=color,
             font_size=8,
-            anchor_x="left",
+            anchor_x="right",
             anchor_y="center",
             parent=self.view.scene,
         )
-        text_visual.pos = (x_max + 3, y_global, 0)
+        text_visual.pos = (x_min - 3, y_global, 0)
         text_visual.visible = self.show_marker_labels and bool(label)
 
         self._marker_visuals.append((line_visual, text_visual))
@@ -151,7 +151,10 @@ class LaneROI(RectangleROI):
 
     def _get_sorted_marker_indices(self):
         """Get marker indices sorted by y_local position."""
-        return sorted(range(len(self._markers)), key=lambda i: self._markers[i]["y_local"])
+        return sorted(
+            range(len(self._markers)),
+            key=lambda i: self._markers[i]["y_local"],
+        )
 
     def update_marker_labels(self, labels):
         """
@@ -210,11 +213,11 @@ class LaneROI(RectangleROI):
                 text=label,
                 color=color,
                 font_size=8,
-                anchor_x="left",
+                anchor_x="right",
                 anchor_y="center",
                 parent=self.view.scene,
             )
-            text_visual.pos = (x_max + 3, y_global, 0)
+            text_visual.pos = (x_min - 3, y_global, 0)
             text_visual.visible = self.show_marker_labels and bool(label)
 
             self._marker_visuals.append((line_visual, text_visual))
@@ -246,7 +249,7 @@ class LaneROI(RectangleROI):
             [[x_min, y_global, 0], [x_max, y_global, 0]], dtype=np.float32
         )
         line_visual.set_data(pos=line_pos)
-        text_visual.pos = (x_max + 3, y_global, 0)
+        text_visual.pos = (x_min - 3, y_global, 0)
 
     def set_marker_labels_visible(self, visible):
         """Toggle marker label visibility."""
