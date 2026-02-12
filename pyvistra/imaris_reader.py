@@ -110,6 +110,45 @@ class ImarisReader:
             # If cast fails (e.g. "600 nm"), return the original string
             return str_val
 
+    def _group_for_index(self, parent_group, base_name, index):
+        """Return child group matching `base_name <index>` or `base_name<index>`."""
+        exact_names = (f"{base_name} {index}", f"{base_name}{index}")
+        for name in exact_names:
+            if name in parent_group:
+                return parent_group[name]
+
+        pat = re.compile(rf"^{re.escape(base_name)}\s*(\d+)$")
+        for name in parent_group.keys():
+            m = pat.match(name)
+            if m and int(m.group(1)) == int(index):
+                return parent_group[name]
+
+        return None
+
+    def _read_image_size_attrs(self, channel_group, data_node):
+        """Read logical image size from channel attrs, with safe fallbacks."""
+        sx = self._get_val(channel_group, "ImageSizeX", int)
+        sy = self._get_val(channel_group, "ImageSizeY", int)
+        sz = self._get_val(channel_group, "ImageSizeZ", int)
+
+        # Some writers store these on the Data dataset instead.
+        if not isinstance(sx, (int, float)):
+            sx = self._get_val(data_node, "ImageSizeX", int)
+        if not isinstance(sy, (int, float)):
+            sy = self._get_val(data_node, "ImageSizeY", int)
+        if not isinstance(sz, (int, float)):
+            sz = self._get_val(data_node, "ImageSizeZ", int)
+
+        # Final fallback: use actual allocated dataset shape.
+        if not isinstance(sx, (int, float)):
+            sx = data_node.shape[-1]
+        if not isinstance(sy, (int, float)):
+            sy = data_node.shape[-2]
+        if not isinstance(sz, (int, float)):
+            sz = data_node.shape[-3] if data_node.ndim >= 3 else 1
+
+        return int(sz), int(sy), int(sx)
+
     def _scan_structure(self):
         """Dynamically scans the HDF5 hierarchy to determine dimensions."""
         dataset_root = self._file["DataSet"]
@@ -137,49 +176,26 @@ class ImarisReader:
 
         self.n_timepoints = len(time_groups)
 
-        t0_name = sorted(
-            time_groups,
-            key=lambda x: int(re.search(r"\d+", x).group())
-            if re.search(r"\d+", x)
-            else 0,
-        )[0]
-        t0 = l0[t0_name]
+        t0 = self._group_for_index(l0, "TimePoint", 0)
+        if t0 is None:
+            raise ValueError("TimePoint 0 not found in Imaris file.")
 
         channel_groups = [k for k in t0.keys() if "Channel" in k]
         self.n_channels = len(channel_groups)
+        if self.n_channels == 0:
+            raise ValueError("No Channels found in Imaris file.")
 
         # 3. Get Image Dimensions
-        c0_name = sorted(
-            channel_groups,
-            key=lambda x: int(re.search(r"\d+", x).group())
-            if re.search(r"\d+", x)
-            else 0,
-        )[0]
-        c0 = t0[c0_name]
+        c0 = self._group_for_index(t0, "Channel", 0)
+        if c0 is None or "Data" not in c0:
+            raise ValueError("Channel 0/Data not found in Imaris file.")
+
         data_node = c0["Data"]
         self.dtype = data_node.dtype
 
-        # Dimensions are almost always pure integers, so strict int() works
-        sx = self._get_val(data_node, "ImageSizeX", int)
-        sy = self._get_val(data_node, "ImageSizeY", int)
-        sz = self._get_val(data_node, "ImageSizeZ", int)
-
-        # Fallback to dataset shape if attributes failed
-        if not isinstance(sx, (int, float)):
-            d_shape = data_node.shape
-            if len(d_shape) == 3:
-                sz, sy, sx = d_shape
-            elif len(d_shape) == 2:
-                sz = 1
-                sy, sx = d_shape
-            else:
-                sx = d_shape[-1]
-                sy = d_shape[-2]
-                sz = d_shape[-3] if len(d_shape) > 2 else 1
-
-        self.size_x = int(sx)
-        self.size_y = int(sy)
-        self.size_z = int(sz)
+        self.size_z, self.size_y, self.size_x = self._read_image_size_attrs(
+            c0, data_node
+        )
         self.shape = (
             self.n_timepoints,
             self.n_channels,
@@ -295,31 +311,31 @@ class ImarisReader:
             res_grp_name = self._res_groups[res_level]
             res_grp = self._file["DataSet"][res_grp_name]
 
-            t_candidates = [
-                k
-                for k in res_grp.keys()
-                if f"TimePoint {t}" in k or f"TimePoint{t}" == k
-            ]
-            if not t_candidates:
+            t_grp = self._group_for_index(res_grp, "TimePoint", t)
+            if t_grp is None:
                 raise ValueError(f"TimePoint {t} not found")
-            t_grp = res_grp[t_candidates[0]]
 
-            c_candidates = [
-                k
-                for k in t_grp.keys()
-                if f"Channel {c}" in k or f"Channel{c}" == k
-            ]
-            if not c_candidates:
+            c_grp = self._group_for_index(t_grp, "Channel", c)
+            if c_grp is None:
                 raise ValueError(f"Channel {c} not found")
 
-            dataset = t_grp[c_candidates[0]]["Data"]
+            dataset = c_grp["Data"]
         except Exception as e:
             raise ValueError(f"Error locating data: {str(e)}")
 
+        size_z, size_y, size_x = self._read_image_size_attrs(c_grp, dataset)
+        size_z = min(size_z, dataset.shape[0])
+        size_y = min(size_y, dataset.shape[1])
+        size_x = min(size_x, dataset.shape[2])
+
         if z is not None:
-            return dataset[z, :, :]
+            if z < 0 or z >= size_z:
+                raise IndexError(
+                    f"z index {z} out of range for size_z={size_z}"
+                )
+            return dataset[z, :size_y, :size_x]
         else:
-            return dataset[:]
+            return dataset[:size_z, :size_y, :size_x]
 
     def __repr__(self):
         return (

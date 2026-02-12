@@ -101,6 +101,8 @@ class ImarisWriter:
                 f"TimePoint {t}/Channel {c}"
             ]
             grp["Data"][:] = vol
+            _set_attr(grp, "HistogramMin", f"{vmin:.6f}")
+            _set_attr(grp, "HistogramMax", f"{vmax:.6f}")
             _set_attr(grp["Data"], "HistogramMin", f"{vmin:.6f}")
             _set_attr(grp["Data"], "HistogramMax", f"{vmax:.6f}")
             grp["Histogram"][:] = hist.astype(np.uint64)
@@ -254,6 +256,9 @@ class ImarisWriter:
                         compression="gzip",
                         compression_opts=self._compression,
                     )
+                    _set_attr(ch_grp, "ImageSizeX", str(lx))
+                    _set_attr(ch_grp, "ImageSizeY", str(ly))
+                    _set_attr(ch_grp, "ImageSizeZ", str(lz))
                     _set_attr(dset, "ImageSizeX", str(lx))
                     _set_attr(dset, "ImageSizeY", str(ly))
                     _set_attr(dset, "ImageSizeZ", str(lz))
@@ -408,6 +413,11 @@ def save_imaris(
                     _set_attr(dset, "ImageSizeX", str(lx))
                     _set_attr(dset, "ImageSizeY", str(ly))
                     _set_attr(dset, "ImageSizeZ", str(lz))
+                    _set_attr(ch_grp, "ImageSizeX", str(lx))
+                    _set_attr(ch_grp, "ImageSizeY", str(ly))
+                    _set_attr(ch_grp, "ImageSizeZ", str(lz))
+                    _set_attr(ch_grp, "HistogramMin", f"{vmin:.6f}")
+                    _set_attr(ch_grp, "HistogramMax", f"{vmax:.6f}")
                     _set_attr(dset, "HistogramMin", f"{vmin:.6f}")
                     _set_attr(dset, "HistogramMax", f"{vmax:.6f}")
 
