@@ -3,14 +3,15 @@
 import os
 
 from natsort import natsort_key
-from qtpy.QtCore import Qt
-from qtpy.QtGui import QDragEnterEvent, QDropEvent
+from qtpy.QtCore import QSize, Qt
+from qtpy.QtGui import QDragEnterEvent, QDropEvent, QIcon
 from qtpy.QtWidgets import (
     QAction,
     QActionGroup,
     QFileDialog,
     QLabel,
     QMainWindow,
+    QStyle,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -48,10 +49,16 @@ class Toolbar(QMainWindow):
         # Tool Bar (Actual QToolBar)
         self.tools = QToolBar("Tools")
         self.addToolBar(self.tools)
-        self.tools.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.tools.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.tools.setIconSize(QSize(18, 18))
+        self.tools.setStyleSheet(
+            "QToolButton { padding: 3px; border-radius: 4px; }"
+            "QToolButton:checked { background: rgba(45, 106, 79, 0.25); }"
+            "QToolButton:hover { background: rgba(255, 255, 255, 0.08); }"
+        )
 
         self._tool_labels = {
-            "pointer": "Pointer",
+            "pointer": "Pan/Zoom",
             "coordinate": "Coordinate",
             "rect": "Rectangle",
             "circle": "Circle",
@@ -62,19 +69,66 @@ class Toolbar(QMainWindow):
 
         self.tool_actions = {}
         self.act_pointer = self._create_tool_action(
-            "pointer", "Pointer", "Ctrl+1"
+            "pointer",
+            self._load_tool_icon(
+                "pointer", self.style().standardIcon(QStyle.SP_ArrowUp)
+            ),
+            "Pan/Zoom",
+            "Ctrl+1",
         )
         self.act_coord = self._create_tool_action(
-            "coordinate", "Coordinate", "Ctrl+2"
+            "coordinate",
+            self._load_tool_icon(
+                "coordinate",
+                self.style().standardIcon(QStyle.SP_DialogYesButton),
+            ),
+            "Coordinate",
+            "Ctrl+2",
         )
-        self.act_rect = self._create_tool_action("rect", "Rectangle", "Ctrl+3")
+        self.act_rect = self._create_tool_action(
+            "rect",
+            self._load_tool_icon(
+                "rect",
+                self.style().standardIcon(QStyle.SP_TitleBarNormalButton),
+            ),
+            "Rectangle",
+            "Ctrl+3",
+        )
         self.act_circle = self._create_tool_action(
-            "circle", "Circle", "Ctrl+4"
+            "circle",
+            self._load_tool_icon(
+                "circle",
+                self.style().standardIcon(QStyle.SP_BrowserReload),
+            ),
+            "Circle",
+            "Ctrl+4",
         )
-        self.act_line = self._create_tool_action("line", "Line", "Ctrl+5")
-        self.act_brush = self._create_tool_action("brush", "Brush", "Ctrl+6")
+        self.act_line = self._create_tool_action(
+            "line",
+            self._load_tool_icon(
+                "line",
+                self.style().standardIcon(QStyle.SP_LineEditClearButton),
+            ),
+            "Line",
+            "Ctrl+5",
+        )
+        self.act_brush = self._create_tool_action(
+            "brush",
+            self._load_tool_icon(
+                "brush",
+                self.style().standardIcon(QStyle.SP_FileDialogDetailedView),
+            ),
+            "Brush",
+            "Ctrl+6",
+        )
         self.act_eraser = self._create_tool_action(
-            "eraser", "Eraser", "Ctrl+7"
+            "eraser",
+            self._load_tool_icon(
+                "eraser",
+                self.style().standardIcon(QStyle.SP_DialogDiscardButton),
+            ),
+            "Eraser",
+            "Ctrl+7",
         )
 
         self.tools.addAction(self.act_pointer)
@@ -90,27 +144,37 @@ class Toolbar(QMainWindow):
 
         # Manager Button
         self.tools.addSeparator()
-        self.act_annotation_mgr = QAction("Annotations", self)
+        self.act_annotation_mgr = QAction(
+            self._load_tool_icon(
+                "annotations",
+                self.style().standardIcon(QStyle.SP_FileDialogContentsView),
+            ),
+            "",
+            self,
+        )
+        self.act_annotation_mgr.setToolTip("Annotations")
         self.act_annotation_mgr.triggered.connect(self.show_annotation_manager)
         self.tools.addAction(self.act_annotation_mgr)
 
         # Python Console Button
-        self.act_console = QAction("Console", self)
+        self.act_console = QAction(
+            self._load_tool_icon(
+                "console",
+                self.style().standardIcon(QStyle.SP_FileDialogListView),
+            ),
+            "",
+            self,
+        )
+        self.act_console.setToolTip("Console")
         self.act_console.triggered.connect(self.show_console)
         self.tools.addAction(self.act_console)
 
         self.tools.addSeparator()
-        self.tool_status = QLabel("Tool: Pointer")
-        self.tool_status.setStyleSheet(
-            "QLabel {"
-            "background: #2D6A4F;"
-            "color: white;"
-            "font-weight: 700;"
-            "padding: 2px 8px;"
-            "border-radius: 4px;"
-            "}"
+        self.mode_indicator = QLabel("Mode: Pan/Zoom")
+        self.mode_indicator.setStyleSheet(
+            "QLabel { color: #d2d2d2; font-size: 11px; padding: 0 4px; }"
         )
-        self.tools.addWidget(self.tool_status)
+        self.tools.addWidget(self.mode_indicator)
 
         # Group for exclusive tool selection
         self.group = QActionGroup(self)
@@ -145,15 +209,26 @@ class Toolbar(QMainWindow):
         manager.tool_changed.connect(self._on_tool_changed)
         self._on_tool_changed(manager.active_tool)
 
-    def _create_tool_action(self, tool_name, text, shortcut):
-        action = QAction(text, self)
+    def _create_tool_action(self, tool_name, icon, tooltip, shortcut):
+        action = QAction(icon, "", self)
         action.setCheckable(True)
         action.setShortcut(shortcut)
         action.setShortcutContext(Qt.ApplicationShortcut)
-        action.setToolTip(f"{text} ({shortcut})")
+        action.setToolTip(f"{tooltip} ({shortcut})")
         action.triggered.connect(lambda: self.set_tool(tool_name))
         self.tool_actions[tool_name] = action
         return action
+
+    def _load_tool_icon(self, name, fallback_icon):
+        """Load custom toolbar icon if available, otherwise use fallback."""
+        icon_dir = os.path.join(os.path.dirname(__file__), "data", "icons")
+        for ext in ("svg", "png"):
+            path = os.path.join(icon_dir, f"{name}.{ext}")
+            if os.path.exists(path):
+                icon = QIcon(path)
+                if not icon.isNull():
+                    return icon
+        return fallback_icon
 
     def set_tool(self, tool_name):
         manager.set_active_tool(tool_name)
@@ -166,7 +241,7 @@ class Toolbar(QMainWindow):
         if action is not None and not action.isChecked():
             action.setChecked(True)
         label = self._tool_labels.get(tool_name, tool_name.title())
-        self.tool_status.setText(f"Tool: {label}")
+        self.mode_indicator.setText(f"Mode: {label}")
 
     def show_annotation_manager(self):
         mgr = get_annotation_manager()
