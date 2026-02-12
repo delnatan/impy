@@ -989,6 +989,32 @@ def save_tiff(
     )
 
 
+def save_imaris(
+    filepath, data, metadata=None, resolution_levels=True, progress_cb=None
+):
+    """
+    Save 5D data to Imaris .ims format.
+
+    Args:
+        filepath: Output path (.ims)
+        data: 5D array-like in pyvistra (T, Z, C, Y, X) format
+        metadata: dict with 'scale', 'channels', etc. Defaults provided if None.
+        resolution_levels: Generate downsampled pyramid (default True)
+        progress_cb: Optional callback(fraction)
+    """
+    from .imaris_writer import save_imaris as _save_imaris
+
+    if metadata is None:
+        metadata = {"scale": (1.0, 1.0, 1.0), "filename": "Image"}
+    _save_imaris(
+        filepath,
+        data,
+        metadata,
+        resolution_levels=resolution_levels,
+        progress_cb=progress_cb,
+    )
+
+
 def save_psf(filepath, psf_data, metadata):
     """
     Save PSF to .psf.zarr format.

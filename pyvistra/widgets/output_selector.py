@@ -207,6 +207,10 @@ class ImageOutputSelector(QWidget):
             save_tiff(filepath, data, scale=scale)
         elif ext == ".psf.zarr":
             save_psf(filepath, data, metadata)
+        elif ext == ".ims":
+            from pyvistra.io import save_imaris
+
+            save_imaris(filepath, data, metadata)
 
         self.output_sent.emit(filepath)
         return filepath

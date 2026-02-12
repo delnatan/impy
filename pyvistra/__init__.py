@@ -15,6 +15,7 @@ from .colors import (
 )
 from .gel_analyzer import GelAnalyzerWidget, get_gel_analyzer, show_gel_analyzer
 from .imaris_reader import ImarisReader
+from .imaris_writer import ImarisWriter
 from .io import (
     CZI5DProxy,
     ImageBuffer,
@@ -24,6 +25,7 @@ from .io import (
     load_psf,
     load_sparse_labels,
     normalize_to_5d,
+    save_imaris,
     save_psf,
     save_sparse_labels,
     save_tiff,
@@ -46,6 +48,7 @@ __all__ = [
     "load_psf",
     "load_sparse_labels",
     "save_tiff",
+    "save_imaris",
     "save_psf",
     "save_sparse_labels",
     "normalize_to_5d",
@@ -90,6 +93,7 @@ __all__ = [
     # viewers
     "OrthoViewer",
     "VolumeViewer",
-    # readers
+    # readers/writers
     "ImarisReader",
+    "ImarisWriter",
 ]
