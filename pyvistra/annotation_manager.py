@@ -204,20 +204,12 @@ class AnnotationManager(QWidget):
         layout.setMenuBar(self.menu_bar)
 
         # Analysis Menu (same as ROIManager)
-        from .analysis import crop_image, measure_intensity, plot_profile
+        from .analysis import crop_image, measure_intensity
 
         analysis_menu = self.menu_bar.addMenu("Analysis")
 
-        action_profile = QAction("Plot Profile", self)
-        action_profile.triggered.connect(
-            lambda: self._run_analysis(plot_profile)
-        )
-        analysis_menu.addAction(action_profile)
-
         action_crop = QAction("Crop Image", self)
-        action_crop.triggered.connect(
-            lambda: self._run_analysis(crop_image)
-        )
+        action_crop.triggered.connect(lambda: self._run_analysis(crop_image))
         analysis_menu.addAction(action_crop)
 
         action_measure = QAction("Measure Intensity", self)
@@ -414,9 +406,7 @@ class AnnotationManager(QWidget):
         if self.active_window == window:
             return
         self.active_window = window
-        self.setWindowTitle(
-            f"Annotation Manager - Window {window.window_id}"
-        )
+        self.setWindowTitle(f"Annotation Manager - Window {window.window_id}")
         self.refresh_windows()
         self.refresh_list()
 
@@ -566,9 +556,7 @@ class AnnotationManager(QWidget):
                 if labels:
                     for label in labels:
                         area = labels.area(label)
-                        item = QListWidgetItem(
-                            f"Label {label} ({area} px)"
-                        )
+                        item = QListWidgetItem(f"Label {label} ({area} px)")
                         item.setData(Qt.UserRole, ("label", label))
                         # Show color
                         if overlay:
@@ -635,9 +623,7 @@ class AnnotationManager(QWidget):
     def _add_roi_group(self):
         if not self.active_window:
             return
-        name, ok = QInputDialog.getText(
-            self, "New ROI Group", "Group name:"
-        )
+        name, ok = QInputDialog.getText(self, "New ROI Group", "Group name:")
         if ok and name:
             self.active_window.add_roi_group(name)
             self.refresh_list()
@@ -807,9 +793,7 @@ class AnnotationManager(QWidget):
 
         w = self.active_window
         rois_in_group = [
-            r
-            for r in w.rois
-            if getattr(r, "group", "Default") == group_name
+            r for r in w.rois if getattr(r, "group", "Default") == group_name
         ]
 
         data = {
@@ -1101,8 +1085,10 @@ class AnnotationManager(QWidget):
             item = self.item_list.currentItem()
             if item and self.active_window:
                 data = item.data(Qt.UserRole)
-                if data and data[0] == "roi" and isinstance(
-                    data[1], CoordinateROI
+                if (
+                    data
+                    and data[0] == "roi"
+                    and isinstance(data[1], CoordinateROI)
                 ):
                     data[1].flip()
                     self.active_window.canvas.update()
