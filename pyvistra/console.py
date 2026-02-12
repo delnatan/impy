@@ -179,7 +179,7 @@ class PythonConsole(QWidget):
 
     Provides a REPL with access to application state including:
     - manager: WindowManager singleton
-    - roi_mgr: ROIManager singleton
+    - annotation_mgr: AnnotationManager singleton
     - windows: dict of all open ImageWindow instances
     - np: numpy
     - plt: matplotlib.pyplot
@@ -286,26 +286,29 @@ class PythonConsole(QWidget):
 
     def _update_namespace(self):
         """Update namespace with current pyvistra state."""
+        from .annotation_manager import (
+            annotation_manager_exists,
+            get_annotation_manager,
+        )
         from .manager import manager
-        from .roi_manager import get_roi_manager, roi_manager_exists
 
         self.namespace["manager"] = manager
         self.namespace["windows"] = manager.get_all()
 
-        # Only add roi_mgr if it exists (avoid creating during startup)
-        if roi_manager_exists():
-            self.namespace["roi_mgr"] = get_roi_manager()
+        # Expose the annotation manager directly.
+        if annotation_manager_exists():
+            self.namespace["annotation_mgr"] = get_annotation_manager()
         else:
             # Lazy accessor
-            self.namespace["roi_mgr"] = property(
-                lambda self: get_roi_manager()
+            self.namespace["annotation_mgr"] = property(
+                lambda self: get_annotation_manager()
             )
 
         # Add helper function to get current/active window
         def get_active_window():
             """Get the currently active ImageWindow, or None."""
-            if roi_manager_exists():
-                mgr = get_roi_manager()
+            if annotation_manager_exists():
+                mgr = get_annotation_manager()
                 return mgr.active_window
             # Fallback: return first window
             windows = manager.get_all()
@@ -381,7 +384,7 @@ class PythonConsole(QWidget):
 Available objects:
   manager     - WindowManager (tracks all windows)
   windows     - dict of all ImageWindow instances
-  roi_mgr     - ROIManager (when available)
+  annotation_mgr - AnnotationManager (when available)
   aw()        - Get active window (shortcut for active_window())
   np          - numpy
   plt         - matplotlib.pyplot

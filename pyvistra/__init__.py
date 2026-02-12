@@ -34,7 +34,6 @@ from .label_visual import LabelOverlayVisual
 from .labels import SparseLabels
 from .manager import WindowManager, manager
 from .ortho import OrthoViewer
-from .roi_manager import ROIManager, get_roi_manager
 from .rois import ROI, CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
 from .toolbar import Toolbar
 from .ui import ImageWindow, imshow, run_app
@@ -82,8 +81,6 @@ __all__ = [
     # managers
     "AnnotationManager",
     "get_annotation_manager",
-    "ROIManager",
-    "get_roi_manager",
     "WindowManager",
     "manager",
     # gel analysis

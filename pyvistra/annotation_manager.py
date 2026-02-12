@@ -27,6 +27,7 @@ from qtpy.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QPushButton,
+    QShortcut,
     QSizePolicy,
     QSpinBox,
     QTreeWidget,
@@ -74,6 +75,7 @@ class AnnotationManager(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        self._install_shortcuts()
 
         # Window Selection
         win_layout = QHBoxLayout()
@@ -237,6 +239,16 @@ class AnnotationManager(QWidget):
         action_align = QAction("Align Lanes", self)
         action_align.triggered.connect(self._align_lanes_action)
         lanes_menu.addAction(action_align)
+
+    def _install_shortcuts(self):
+        """Install manager-local shortcuts that work with child focus."""
+        self._shortcut_delete = QShortcut(Qt.Key_Delete, self)
+        self._shortcut_delete.setContext(Qt.WidgetWithChildrenShortcut)
+        self._shortcut_delete.activated.connect(self.delete_selected_item)
+
+        self._shortcut_flip = QShortcut(Qt.Key_F, self)
+        self._shortcut_flip.setContext(Qt.WidgetWithChildrenShortcut)
+        self._shortcut_flip.activated.connect(self._flip_selected_coordinate_roi)
 
     # ---- Window Management ----
 
@@ -1078,20 +1090,20 @@ class AnnotationManager(QWidget):
 
     # ---- Keyboard Shortcuts ----
 
+    def _flip_selected_coordinate_roi(self):
+        item = self.item_list.currentItem()
+        if not item or not self.active_window:
+            return
+        data = item.data(Qt.UserRole)
+        if data and data[0] == "roi" and isinstance(data[1], CoordinateROI):
+            data[1].flip()
+            self.active_window.canvas.update()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
             self.delete_selected_item()
         elif event.key() == Qt.Key_F:
-            item = self.item_list.currentItem()
-            if item and self.active_window:
-                data = item.data(Qt.UserRole)
-                if (
-                    data
-                    and data[0] == "roi"
-                    and isinstance(data[1], CoordinateROI)
-                ):
-                    data[1].flip()
-                    self.active_window.canvas.update()
+            self._flip_selected_coordinate_roi()
         else:
             super().keyPressEvent(event)
 

@@ -15,7 +15,7 @@
 ### Separation of Concerns (MVC-inspired)
 - **Model**: Data proxies (`io.py`), ROI geometry (`rois.py`)
 - **View**: Vispy visuals (`visuals.py`), Qt widgets (`widgets.py`, `ui.py`)
-- **Controller**: Event handlers in `ui.py`, managers (`manager.py`, `roi_manager.py`)
+- **Controller**: Event handlers in `ui.py`, managers (`manager.py`, `annotation_manager.py`)
 
 Keep data structures separate from algorithms. A class should either hold data OR perform operations, rarely both.
 
@@ -71,7 +71,7 @@ flowchart TB
 
     subgraph "Managers"
         WindowManager[WindowManager<br/>singleton]
-        ROIManager[ROIManager<br/>singleton]
+        AnnotationManager[AnnotationManager<br/>singleton]
     end
 
     subgraph "Views"
@@ -89,24 +89,24 @@ flowchart TB
     MouseHandler --> ROIVisuals
     SliderHandlers --> CompositeVisual
 
-    WindowSignals --> ROIManager
-    ManagerSignals --> ROIManager
-    ROISignals --> ROIManager
+    WindowSignals --> AnnotationManager
+    ManagerSignals --> AnnotationManager
+    ROISignals --> AnnotationManager
 
     WindowManager -.-> ManagerSignals
 ```
 
 **Key flows:**
-1. **Mouse interaction**: Vispy canvas captures mouse → `ImageWindow` handlers → ROI creation/modification → signals to `ROIManager`
+1. **Mouse interaction**: Vispy canvas captures mouse → `ImageWindow` handlers → ROI creation/modification → signals to `AnnotationManager`
 2. **Slider changes**: Qt widget signals → handler updates `CompositeImageVisual`
-3. **Window lifecycle**: `WindowManager` emits signals → `ROIManager` updates its window list
+3. **Window lifecycle**: `WindowManager` emits signals → `AnnotationManager` updates its window list
 
 ### ROI System
 
 ROIs follow a distributed storage pattern:
 - Each `ImageWindow` owns its `rois` list (Model)
 - `ROI` subclasses define geometry and visuals (View + data)
-- `ROIManager` provides centralized UI and cross-window operations (Controller)
+- `AnnotationManager` provides centralized UI and cross-window operations (Controller)
 
 Serialization uses JSON: `{"type": "RectangleROI", "name": "...", "data": {...}}`
 
@@ -119,7 +119,7 @@ Serialization uses JSON: `{"type": "RectangleROI", "name": "...", "data": {...}}
 | `ui.py` | `ImageWindow`, `Toolbar`, event handling |
 | `visuals.py` | `CompositeImageVisual` for GPU rendering |
 | `rois.py` | ROI base class and concrete types |
-| `roi_manager.py` | ROI list UI, save/load, analysis integration |
+| `annotation_manager.py` | ROI/label group UI, save/load, analysis integration |
 | `widgets.py` | `HistogramWidget`, `ContrastDialog` |
 | `manager.py` | `WindowManager` singleton |
 | `ortho.py` | `OrthoViewer` for 3-panel orthogonal views |
@@ -166,7 +166,7 @@ self.roi_added.emit(new_roi)
 
 ### Adding Analysis Functions
 1. Create function in `analysis.py` with `@magicgui` decorator
-2. Register in `ROIManager.create_analysis_menu()`
+2. Register in `AnnotationManager._setup_ui()`
 
 ## Critical Gotchas
 
@@ -175,7 +175,7 @@ self.roi_added.emit(new_roi)
 | Wrong dimension order | Always use `(T, Z, C, Y, X)` after `load_image()` |
 | Proxy slicing loads into RAM | Be aware when slicing large regions |
 | Mouse coords don't match data | Use `_map_event_to_image()` |
-| ROI Manager out of sync | Emit signals after modifying `window.rois` |
+| Annotation Manager out of sync | Emit signals after modifying `window.rois` |
 | Multiple Qt event loops | Only call `app.exec_()` once |
 | HDF5 file handle leaks | Close reader when done |
 

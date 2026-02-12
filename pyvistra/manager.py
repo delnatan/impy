@@ -6,7 +6,7 @@ class WindowManager(QObject):
     Manages all ImageWindow instances.
 
     Emits signals when windows are registered/unregistered so that
-    other components (like ROIManager) can respond immediately.
+    other components (like AnnotationManager) can respond immediately.
     """
 
     # Signals for window lifecycle

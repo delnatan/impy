@@ -58,9 +58,9 @@ class GelAnalyzerWidget(QWidget):
     Supports both protein (kDa) and DNA (bp) gels.
     """
 
-    def __init__(self, roi_manager):
+    def __init__(self, annotation_manager):
         super().__init__()
-        self.roi_manager = roi_manager
+        self.annotation_manager = annotation_manager
         self.ladders = load_ladders()
         self._lane_rois = []  # Track LaneROIs we've created/converted
         self._std_idx = None  # Index of standard lane ROI
@@ -228,7 +228,7 @@ class GelAnalyzerWidget(QWidget):
     def _toggle_labels(self, state):
         """Toggle peak label visibility."""
         visible = state == Qt.Checked.value
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if window:
             for roi in window.rois:
                 if isinstance(roi, LaneROI):
@@ -238,7 +238,7 @@ class GelAnalyzerWidget(QWidget):
     def _toggle_borders(self, state):
         """Toggle lane border visibility."""
         show_border = state == Qt.Checked.value
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if window:
             for roi in window.rois:
                 if isinstance(roi, LaneROI):
@@ -247,7 +247,7 @@ class GelAnalyzerWidget(QWidget):
 
     def _update_canvas(self):
         """Update the canvas."""
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if window:
             window.canvas.update()
 
@@ -292,7 +292,7 @@ class GelAnalyzerWidget(QWidget):
         """Refresh the lane combo box with current Rectangle/Lane ROIs."""
         self.lane_combo.clear()
 
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if not window:
             return
 
@@ -302,7 +302,7 @@ class GelAnalyzerWidget(QWidget):
 
     def _get_current_image(self):
         """Get the current 2D grayscale image from the active window."""
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if not window:
             return None
 
@@ -333,7 +333,7 @@ class GelAnalyzerWidget(QWidget):
         # Remove old ROI visuals
         roi.remove()
 
-        # Emit signal for ROI manager
+        # Emit signal for annotation manager
         window.roi_removed.emit(roi)
         window.roi_added.emit(lane)
 
@@ -346,7 +346,7 @@ class GelAnalyzerWidget(QWidget):
         self._calibration = None
         self.btn_apply.setEnabled(False)
 
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if not window:
             self.results_text.setText("No active window")
             return
@@ -427,8 +427,8 @@ class GelAnalyzerWidget(QWidget):
 
         window.canvas.update()
 
-        # Update ROI manager list
-        self.roi_manager.refresh_list()
+        # Update annotation manager list
+        self.annotation_manager.refresh_list()
 
         # Show detection summary
         results = [
@@ -443,7 +443,7 @@ class GelAnalyzerWidget(QWidget):
 
     def _calibrate(self):
         """Create calibration curve from ladder lane markers."""
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if not window:
             self.results_text.setText("No active window")
             return
@@ -529,7 +529,7 @@ class GelAnalyzerWidget(QWidget):
             self.results_text.setText("No calibration available. Click 'Calibrate' first.")
             return
 
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if not window:
             self.results_text.setText("No active window")
             return
@@ -578,7 +578,7 @@ class GelAnalyzerWidget(QWidget):
 
     def _clear_markers(self):
         """Clear all markers, unlock lanes, and reset calibration."""
-        window = self.roi_manager.active_window
+        window = self.annotation_manager.active_window
         if not window:
             return
 
@@ -645,17 +645,17 @@ class GelAnalyzerWidget(QWidget):
 _gel_analyzer_instance = None
 
 
-def get_gel_analyzer(roi_manager):
+def get_gel_analyzer(annotation_manager):
     """Get or create the GelAnalyzer singleton."""
     global _gel_analyzer_instance
     if _gel_analyzer_instance is None:
-        _gel_analyzer_instance = GelAnalyzerWidget(roi_manager)
+        _gel_analyzer_instance = GelAnalyzerWidget(annotation_manager)
     return _gel_analyzer_instance
 
 
-def show_gel_analyzer(roi_manager):
+def show_gel_analyzer(annotation_manager):
     """Show the Gel Analyzer widget."""
-    analyzer = get_gel_analyzer(roi_manager)
+    analyzer = get_gel_analyzer(annotation_manager)
     analyzer.show()
     analyzer.raise_()
     analyzer.activateWindow()

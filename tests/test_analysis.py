@@ -4,7 +4,7 @@ from qtpy.QtWidgets import QApplication
 from qtpy.QtCore import Qt
 from impy.ui import ImageWindow
 from impy.rois import LineROI, RectangleROI
-from impy.roi_manager import get_roi_manager
+from impy.annotation_manager import get_annotation_manager
 from impy import analysis
 
 def verify_analysis():
@@ -23,7 +23,7 @@ def verify_analysis():
     win = ImageWindow(data, title="Analysis Test")
     win.show()
     
-    mgr = get_roi_manager()
+    mgr = get_annotation_manager()
     mgr.show()
     
     # 1. Test Line Profile
