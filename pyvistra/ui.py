@@ -53,6 +53,7 @@ class ImageWindow(QMainWindow):
     roi_removed = Signal(object)  # Emits the ROI that was removed
     roi_selection_changed = Signal(object)  # Emits the selected ROI (or None)
     roi_modified = Signal(object)  # Emits ROI when it's being modified (dragged)
+    view_changed = Signal(object)  # Emits self when displayed slice/channel changes
     label_changed = Signal(object)  # Emits SparseLabels when labels change
     mask_layer_added = Signal(str)  # Emits mask layer name when added
     mask_layer_removed = Signal(str)  # Emits mask layer name when removed
@@ -1139,6 +1140,7 @@ class ImageWindow(QMainWindow):
         self.c_idx = val
         self.renderer.set_active_channel(val)
         self.canvas.update()
+        self.view_changed.emit(self)
 
         # If Contrast Dialog is open, sync it to this channel
         if self.contrast_dialog and self.contrast_dialog.isVisible():
@@ -1184,6 +1186,7 @@ class ImageWindow(QMainWindow):
             self.contrast_dialog.refresh_ui()
         if self.channel_panel and self.channel_panel.isVisible():
             self.channel_panel.refresh_ui()
+        self.view_changed.emit(self)
 
     def _map_event_to_image(self, event):
         tr = self.canvas.scene.node_transform(self.renderer.layers[0])

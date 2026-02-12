@@ -452,8 +452,46 @@ class AnnotationManager(QWidget):
 
     def refresh_list(self):
         """Refresh both the group tree and items list."""
+        self._ensure_valid_selected_group()
         self._refresh_group_tree()
         self._refresh_items()
+
+    def _ensure_valid_selected_group(self):
+        """
+        Ensure selected group is valid for the active window.
+
+        On first open, default to the active ROI group so pre-existing ROIs
+        are immediately visible in the items list.
+        """
+        if not self.active_window:
+            self._selected_group = None
+            return
+
+        w = self.active_window
+        roi_groups = w.get_roi_groups()
+        mask_groups = set(w._mask_layers.keys())
+
+        if self._selected_group is not None:
+            gtype, gname = self._selected_group
+            if gtype == "roi" and gname in roi_groups:
+                return
+            if gtype == "mask" and gname in mask_groups:
+                return
+
+        preferred_roi = getattr(w, "_active_roi_group", None)
+        if preferred_roi in roi_groups:
+            self._selected_group = ("roi", preferred_roi)
+            return
+
+        if roi_groups:
+            self._selected_group = ("roi", next(iter(roi_groups.keys())))
+            return
+
+        if mask_groups:
+            self._selected_group = ("mask", next(iter(mask_groups)))
+            return
+
+        self._selected_group = None
 
     def _refresh_group_tree(self):
         self.group_tree.blockSignals(True)
@@ -481,6 +519,8 @@ class AnnotationManager(QWidget):
                 font = item.font(0)
                 font.setBold(True)
                 item.setFont(0, font)
+            if self._selected_group == ("roi", name):
+                self.group_tree.setCurrentItem(item)
 
         # Mask layers
         for name, entry in w._mask_layers.items():
@@ -498,6 +538,8 @@ class AnnotationManager(QWidget):
                 font = item.font(0)
                 font.setBold(True)
                 item.setFont(0, font)
+            if self._selected_group == ("mask", name):
+                self.group_tree.setCurrentItem(item)
 
         self.group_tree.blockSignals(False)
 
