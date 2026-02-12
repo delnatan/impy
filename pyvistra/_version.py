@@ -2,9 +2,8 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
-
 # Fallback version for source-tree runs when package metadata is unavailable.
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 def get_version():
