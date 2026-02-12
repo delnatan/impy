@@ -881,6 +881,11 @@ class ImageWindow(QMainWindow):
         """Open 3D volume rendering view."""
         from .volume import VolumeViewer
 
+        # Copy colormap settings from current renderer
+        colormaps = {}
+        for c in range(self.renderer.num_channels):
+            colormaps[c] = self.renderer.get_colormap_name(c)
+
         # Acquire reference if proxy supports ref counting (for shared HDF5 files)
         data = self.img_data
         if hasattr(data, "acquire"):
@@ -892,6 +897,7 @@ class ImageWindow(QMainWindow):
             title=f"3D Volume - {self.windowTitle()}",
             channel=self.c_idx if hasattr(self, "c_idx") else 0,
             time=self.t_idx if hasattr(self, "t_idx") else 0,
+            channel_colormaps=colormaps,
         )
         self.volume_viewer.show()
 

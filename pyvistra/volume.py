@@ -208,7 +208,15 @@ class VolumeViewer(QMainWindow):
         "average",
     ]
 
-    def __init__(self, data, meta=None, title="3D Volume", channel=0, time=0):
+    def __init__(
+        self,
+        data,
+        meta=None,
+        title="3D Volume",
+        channel=0,
+        time=0,
+        channel_colormaps=None,
+    ):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowTitle(title)
@@ -216,6 +224,7 @@ class VolumeViewer(QMainWindow):
 
         self.data = data  # (T, Z, C, Y, X)
         self.meta = meta or {}
+        self._channel_colormaps = channel_colormaps
         self.T, self.Z, self.C, self.Y, self.X = self.data.shape
 
         # Current state
@@ -252,6 +261,9 @@ class VolumeViewer(QMainWindow):
         # Create renderer proxy (manages Volume visuals)
         self.renderer = VolumeRendererProxy(self)
         self.renderer._setup_volumes(self.data, self.view, self.scale)
+        if self._channel_colormaps:
+            for channel_idx, cmap_name in self._channel_colormaps.items():
+                self.renderer.set_colormap(channel_idx, cmap_name)
 
         # Controls
         self.controls_widget = QWidget()
