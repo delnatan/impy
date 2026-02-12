@@ -263,16 +263,16 @@ class ImageWindow(QMainWindow):
             # Temporarily switch to pointer mode for panning/zooming
             if self._space_held_previous_tool is None:
                 self._space_held_previous_tool = manager.active_tool
-                manager.active_tool = "pointer"
+                manager.set_active_tool("pointer")
                 self.update_cursor()
         # Label/Mask shortcuts
         elif event.key() == Qt.Key_B:
             # Brush tool
-            manager.active_tool = "brush"
+            manager.set_active_tool("brush")
             self.update_cursor()
         elif event.key() == Qt.Key_E:
             # Eraser tool
-            manager.active_tool = "eraser"
+            manager.set_active_tool("eraser")
             self.update_cursor()
         elif event.key() == Qt.Key_N:
             # New label (next available ID)
@@ -317,7 +317,7 @@ class ImageWindow(QMainWindow):
         if event.key() == Qt.Key_Space:
             # Restore previous tool when SPACE is released
             if self._space_held_previous_tool is not None:
-                manager.active_tool = self._space_held_previous_tool
+                manager.set_active_tool(self._space_held_previous_tool)
                 self._space_held_previous_tool = None
                 self.update_cursor()
         else:
@@ -1046,7 +1046,7 @@ class ImageWindow(QMainWindow):
             print(f"Invalid tool: {tool_name}. Valid tools: {valid_tools}")
             return
 
-        manager.active_tool = tool_name
+        manager.set_active_tool(tool_name)
 
         # Update cursors in all windows
         for w in manager.get_all().values():

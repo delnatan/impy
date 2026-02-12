@@ -1,15 +1,26 @@
 import json
 import os
-from qtpy.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton,
-    QLabel, QFileDialog, QListWidgetItem, QComboBox, QMenuBar, QAction,
-    QSizePolicy
-)
+
 from qtpy.QtCore import Qt
-from .manager import manager
-from .rois import CoordinateROI, RectangleROI, CircleROI, LineROI, LaneROI
-from .analysis import plot_profile, crop_image, measure_intensity, align_lanes
+from qtpy.QtWidgets import (
+    QAction,
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMenuBar,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .analysis import align_lanes, crop_image, measure_intensity
 from .gel_analyzer import show_gel_analyzer
+from .manager import manager
+from .rois import CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
 
 
 class ROIManager(QWidget):
@@ -35,60 +46,72 @@ class ROIManager(QWidget):
         self.resize(300, 400)
         self.active_window = None
         self._connected_windows = set()  # Track windows we've connected to
-        self._is_shutting_down = False  # Flag to prevent UI updates during shutdown
+        self._is_shutting_down = (
+            False  # Flag to prevent UI updates during shutdown
+        )
 
         self.layout = QVBoxLayout(self)
-        
+
         # Window Selection
         win_layout = QHBoxLayout()
         win_layout.addWidget(QLabel("Window:"))
         self.window_combo = QComboBox()
-        self.window_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.window_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
         self.window_combo.setMinimumContentsLength(10)
-        self.window_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.window_combo.currentIndexChanged.connect(self.on_window_combo_changed)
+        self.window_combo.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self.window_combo.currentIndexChanged.connect(
+            self.on_window_combo_changed
+        )
         win_layout.addWidget(self.window_combo)
         self.layout.addLayout(win_layout)
-        
+
         # List
         self.roi_list = QListWidget()
         self.roi_list.itemClicked.connect(self.on_item_clicked)
         self.layout.addWidget(self.roi_list)
-        
+
         # Buttons
         btn_layout = QHBoxLayout()
-        
+
         self.btn_delete = QPushButton("Delete")
         self.btn_delete.clicked.connect(self.delete_roi)
         btn_layout.addWidget(self.btn_delete)
-        
+
         self.btn_save = QPushButton("Save")
         self.btn_save.clicked.connect(self.save_rois)
         btn_layout.addWidget(self.btn_save)
-        
+
         self.btn_load = QPushButton("Load")
         self.btn_load.clicked.connect(self.load_rois)
         btn_layout.addWidget(self.btn_load)
-        
+
         self.layout.addLayout(btn_layout)
-        
+
         # Menu Bar
         self.menu_bar = QMenuBar()
         self.layout.setMenuBar(self.menu_bar)
-        
+
         # Analysis Menu
         analysis_menu = self.menu_bar.addMenu("Analysis")
-        
+
         action_profile = QAction("Plot Profile", self)
-        action_profile.triggered.connect(lambda: self.run_analysis(plot_profile))
+        action_profile.triggered.connect(
+            lambda: self.run_analysis(plot_profile)
+        )
         analysis_menu.addAction(action_profile)
-        
+
         action_crop = QAction("Crop Image", self)
         action_crop.triggered.connect(lambda: self.run_analysis(crop_image))
         analysis_menu.addAction(action_crop)
-        
+
         action_measure = QAction("Measure Intensity", self)
-        action_measure.triggered.connect(lambda: self.run_analysis(measure_intensity))
+        action_measure.triggered.connect(
+            lambda: self.run_analysis(measure_intensity)
+        )
         analysis_menu.addAction(action_measure)
 
         action_line_profile = QAction("Line Profile...", self)
@@ -184,7 +207,9 @@ class ROIManager(QWidget):
 
         # Disconnect from WindowManager
         try:
-            manager.window_registered.disconnect(self._on_manager_window_registered)
+            manager.window_registered.disconnect(
+                self._on_manager_window_registered
+            )
         except (TypeError, RuntimeError):
             pass
 
@@ -204,7 +229,7 @@ class ROIManager(QWidget):
         windows = manager.get_all()
         for wid, win in windows.items():
             # Only show ROI-capable windows (skip OrthoViewer, etc.)
-            if not hasattr(win, 'roi_added'):
+            if not hasattr(win, "roi_added"):
                 continue
             title = win.windowTitle()
             self.window_combo.addItem(title, userData=wid)
@@ -230,7 +255,7 @@ class ROIManager(QWidget):
             return  # Already connected
 
         # Duck typing: only connect to windows that have ROI-related signals
-        if not hasattr(window, 'roi_added'):
+        if not hasattr(window, "roi_added"):
             return  # Not an ROI-capable window (e.g., OrthoViewer)
 
         window.window_shown.connect(self._on_window_shown)
@@ -253,7 +278,9 @@ class ROIManager(QWidget):
             window.window_activated.disconnect(self._on_window_activated)
             window.roi_added.disconnect(self._on_roi_added)
             window.roi_removed.disconnect(self._on_roi_removed)
-            window.roi_selection_changed.disconnect(self._on_roi_selection_changed)
+            window.roi_selection_changed.disconnect(
+                self._on_roi_selection_changed
+            )
         except (TypeError, RuntimeError):
             # Signal might already be disconnected
             pass
@@ -310,10 +337,10 @@ class ROIManager(QWidget):
     def set_active_window(self, window):
         if self.active_window == window:
             return
-            
+
         self.active_window = window
         self.setWindowTitle(f"ROI Manager - Window {window.window_id}")
-        self.refresh_windows() # Ensure combo is up to date and selected
+        self.refresh_windows()  # Ensure combo is up to date and selected
         self.refresh_list()
 
     def remove_window(self, window):
@@ -322,9 +349,9 @@ class ROIManager(QWidget):
             self.active_window = None
             self.setWindowTitle("ROI Manager")
             self.roi_list.clear()
-            
+
         self.refresh_windows()
-        
+
         # Auto-select another window if available
         if not self.active_window and self.window_combo.count() > 0:
             self.window_combo.setCurrentIndex(0)
@@ -333,9 +360,11 @@ class ROIManager(QWidget):
         self.roi_list.clear()
         if not self.active_window:
             return
-            
+
         for i, roi in enumerate(self.active_window.rois):
-            item = QListWidgetItem(f"{i}: {roi.name} ({roi.__class__.__name__})")
+            item = QListWidgetItem(
+                f"{i}: {roi.name} ({roi.__class__.__name__})"
+            )
             item.setData(Qt.UserRole, roi)
             self.roi_list.addItem(item)
 
@@ -356,7 +385,7 @@ class ROIManager(QWidget):
     def on_item_clicked(self, item):
         if not self.active_window:
             return
-            
+
         roi = item.data(Qt.UserRole)
         for r in self.active_window.rois:
             r.select(r is roi)
@@ -364,7 +393,9 @@ class ROIManager(QWidget):
 
     def select_roi(self, roi):
         """Select the item corresponding to the given ROI."""
-        self.roi_list.blockSignals(True) # Prevent recursion if itemClicked triggers something
+        self.roi_list.blockSignals(
+            True
+        )  # Prevent recursion if itemClicked triggers something
         found = False
         for i in range(self.roi_list.count()):
             item = self.roi_list.item(i)
@@ -372,7 +403,7 @@ class ROIManager(QWidget):
                 self.roi_list.setCurrentItem(item)
                 found = True
                 break
-        
+
         if not found:
             self.roi_list.clearSelection()
         self.roi_list.blockSignals(False)
@@ -380,11 +411,11 @@ class ROIManager(QWidget):
     def save_rois(self):
         if not self.active_window:
             return
-            
+
         # Default path logic
         default_dir = "."
         default_name = "rois.json"
-        
+
         if self.active_window.filepath:
             default_dir = os.path.dirname(self.active_window.filepath)
             base_name = os.path.basename(self.active_window.filepath)
@@ -393,10 +424,12 @@ class ROIManager(QWidget):
 
         default_path = os.path.join(default_dir, default_name)
 
-        path, _ = QFileDialog.getSaveFileName(self, "Save ROIs", default_path, "JSON Files (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save ROIs", default_path, "JSON Files (*.json)"
+        )
         if not path:
             return
-            
+
         data = [roi.to_dict() for roi in self.active_window.rois]
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
@@ -404,11 +437,11 @@ class ROIManager(QWidget):
     def load_rois(self):
         if not self.active_window:
             return
-            
+
         # Default path logic
         default_dir = "."
         default_name = "rois.json"
-        
+
         if self.active_window.filepath:
             default_dir = os.path.dirname(self.active_window.filepath)
             base_name = os.path.basename(self.active_window.filepath)
@@ -417,13 +450,15 @@ class ROIManager(QWidget):
 
         default_path = os.path.join(default_dir, default_name)
 
-        path, _ = QFileDialog.getOpenFileName(self, "Load ROIs", default_path, "JSON Files (*.json)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load ROIs", default_path, "JSON Files (*.json)"
+        )
         if not path:
             return
-            
+
         with open(path, "r") as f:
             data = json.load(f)
-            
+
         for item in data:
             cls_name = item["type"]
             if cls_name == "CoordinateROI":
@@ -438,7 +473,7 @@ class ROIManager(QWidget):
                 roi = LaneROI(self.active_window.view, name=item["name"])
             else:
                 continue
-                
+
             roi.from_dict(item["data"])
             self.active_window.rois.append(roi)
             self.active_window.roi_added.emit(roi)
@@ -451,7 +486,7 @@ class ROIManager(QWidget):
         if not self.active_window:
             print("No active window")
             return
-        count = align_lanes(self.active_window.rois, reference='top')
+        count = align_lanes(self.active_window.rois, reference="top")
         if count > 0:
             self.active_window.canvas.update()
 
@@ -477,18 +512,18 @@ class ROIManager(QWidget):
         if not item or not self.active_window:
             print("No ROI selected")
             return
-            
+
         roi = item.data(Qt.UserRole)
-        
+
         # Prepare Data
         # For profile/measure, we usually want the CURRENT slice (2D)
         # For crop, we might want 5D?
         # Let's check the function signature or just pass what makes sense.
         # The analysis functions currently handle 2D or 5D checks.
-        
+
         # Get 5D data
         data_5d = self.active_window.img_data
-        
+
         # Get 2D slice
         # We need to access the cache or slice it manually using window indices
         t = self.active_window.t_idx
@@ -496,12 +531,12 @@ class ROIManager(QWidget):
         # Handle Z-slice (projection) if active?
         # If projection is active, z is a slice.
         # The proxy handles it.
-        
+
         # But wait, `img_data` is the proxy or array.
         # If we want the VISIBLE image (e.g. projected), we should slice it.
         # If we pass the whole 5D proxy to `crop`, it works.
         # If we pass 5D to `plot_profile`, it fails (expects 2D).
-        
+
         # Let's try to pass the appropriate data.
         if func == crop_image:
             # Pass full data
@@ -512,19 +547,19 @@ class ROIManager(QWidget):
             # Renderer cache is (C, Y, X) or (Y, X).
             # If Composite, it's (C, Y, X). Profile needs 2D.
             # Let's use the active channel if composite.
-            
+
             # Slice manually to be safe
             # We need to handle the Z-slice logic from UI?
             # The UI constructs a slice for Z if projection is on.
             # But here we don't have easy access to that logic without duplicating it.
             # Let's just use the current z_idx (int) for now, or ask the window?
-            
+
             # Actually, let's just grab what's in the renderer cache?
             cache = self.active_window.renderer.current_slice_cache
             if cache is None:
                 print("No image data available")
                 return
-                
+
             # cache is (C, Y, X) or (Y, X)
             if cache.ndim == 3:
                 # Use active channel
@@ -532,14 +567,16 @@ class ROIManager(QWidget):
                 if c < cache.shape[0]:
                     data_2d = cache[c]
                 else:
-                    data_2d = cache[0] # Fallback
+                    data_2d = cache[0]  # Fallback
             else:
                 data_2d = cache
-                
+
             func(data_2d, roi)
+
 
 # Global instance
 _roi_manager_instance = None
+
 
 def get_roi_manager():
     global _roi_manager_instance
@@ -551,5 +588,3 @@ def get_roi_manager():
 def roi_manager_exists():
     """Check if ROI manager singleton has been created without creating it."""
     return _roi_manager_instance is not None
-
-

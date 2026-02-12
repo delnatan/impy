@@ -4,7 +4,7 @@ Based on vispy and PyQt (via qtpy)
 
 """
 
-__version__ = "0.2.0"
+from ._version import __version__
 
 from .annotation_manager import AnnotationManager, get_annotation_manager
 from .colors import (

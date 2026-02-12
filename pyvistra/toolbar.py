@@ -17,7 +17,11 @@ from qtpy.QtWidgets import (
 )
 from vispy import app
 
-from .annotation_manager import annotation_manager_exists, get_annotation_manager
+from ._version import get_version
+from .annotation_manager import (
+    annotation_manager_exists,
+    get_annotation_manager,
+)
 from .console import console_exists, get_console
 from .manager import manager
 
@@ -25,7 +29,7 @@ from .manager import manager
 class Toolbar(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("pyvistra v0.1 (prototype)")
+        self.setWindowTitle(f"pyvistra v{get_version()}")
         self.setGeometry(100, 100, 600, 100)  # Wider
         self.setAcceptDrops(True)
         self.open_windows = []
@@ -44,37 +48,34 @@ class Toolbar(QMainWindow):
         # Tool Bar (Actual QToolBar)
         self.tools = QToolBar("Tools")
         self.addToolBar(self.tools)
+        self.tools.setToolButtonStyle(Qt.ToolButtonTextOnly)
 
-        # Actions
-        self.act_pointer = QAction("Pointer", self)
-        self.act_pointer.setCheckable(True)
-        self.act_pointer.setChecked(True)
-        self.act_pointer.triggered.connect(lambda: self.set_tool("pointer"))
+        self._tool_labels = {
+            "pointer": "Pointer",
+            "coordinate": "Coordinate",
+            "rect": "Rectangle",
+            "circle": "Circle",
+            "line": "Line",
+            "brush": "Brush",
+            "eraser": "Eraser",
+        }
 
-        self.act_coord = QAction("Coordinate", self)
-        self.act_coord.setCheckable(True)
-        self.act_coord.triggered.connect(lambda: self.set_tool("coordinate"))
-
-        self.act_rect = QAction("Rectangle", self)
-        self.act_rect.setCheckable(True)
-        self.act_rect.triggered.connect(lambda: self.set_tool("rect"))
-
-        self.act_circle = QAction("Circle", self)
-        self.act_circle.setCheckable(True)
-        self.act_circle.triggered.connect(lambda: self.set_tool("circle"))
-
-        self.act_line = QAction("Line", self)
-        self.act_line.setCheckable(True)
-        self.act_line.triggered.connect(lambda: self.set_tool("line"))
-
-        # Painting tools
-        self.act_brush = QAction("Brush", self)
-        self.act_brush.setCheckable(True)
-        self.act_brush.triggered.connect(lambda: self.set_tool("brush"))
-
-        self.act_eraser = QAction("Eraser", self)
-        self.act_eraser.setCheckable(True)
-        self.act_eraser.triggered.connect(lambda: self.set_tool("eraser"))
+        self.tool_actions = {}
+        self.act_pointer = self._create_tool_action(
+            "pointer", "Pointer", "Ctrl+1"
+        )
+        self.act_coord = self._create_tool_action(
+            "coordinate", "Coordinate", "Ctrl+2"
+        )
+        self.act_rect = self._create_tool_action("rect", "Rectangle", "Ctrl+3")
+        self.act_circle = self._create_tool_action(
+            "circle", "Circle", "Ctrl+4"
+        )
+        self.act_line = self._create_tool_action("line", "Line", "Ctrl+5")
+        self.act_brush = self._create_tool_action("brush", "Brush", "Ctrl+6")
+        self.act_eraser = self._create_tool_action(
+            "eraser", "Eraser", "Ctrl+7"
+        )
 
         self.tools.addAction(self.act_pointer)
         self.tools.addAction(self.act_coord)
@@ -98,15 +99,29 @@ class Toolbar(QMainWindow):
         self.act_console.triggered.connect(self.show_console)
         self.tools.addAction(self.act_console)
 
+        self.tools.addSeparator()
+        self.tool_status = QLabel("Tool: Pointer")
+        self.tool_status.setStyleSheet(
+            "QLabel {"
+            "background: #2D6A4F;"
+            "color: white;"
+            "font-weight: 700;"
+            "padding: 2px 8px;"
+            "border-radius: 4px;"
+            "}"
+        )
+        self.tools.addWidget(self.tool_status)
+
         # Group for exclusive tool selection
-        group = QActionGroup(self)
-        group.addAction(self.act_pointer)
-        group.addAction(self.act_coord)
-        group.addAction(self.act_rect)
-        group.addAction(self.act_circle)
-        group.addAction(self.act_line)
-        group.addAction(self.act_brush)
-        group.addAction(self.act_eraser)
+        self.group = QActionGroup(self)
+        self.group.setExclusive(True)
+        self.group.addAction(self.act_pointer)
+        self.group.addAction(self.act_coord)
+        self.group.addAction(self.act_rect)
+        self.group.addAction(self.act_circle)
+        self.group.addAction(self.act_line)
+        self.group.addAction(self.act_brush)
+        self.group.addAction(self.act_eraser)
 
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -127,11 +142,31 @@ class Toolbar(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        manager.tool_changed.connect(self._on_tool_changed)
+        self._on_tool_changed(manager.active_tool)
+
+    def _create_tool_action(self, tool_name, text, shortcut):
+        action = QAction(text, self)
+        action.setCheckable(True)
+        action.setShortcut(shortcut)
+        action.setShortcutContext(Qt.ApplicationShortcut)
+        action.setToolTip(f"{text} ({shortcut})")
+        action.triggered.connect(lambda: self.set_tool(tool_name))
+        self.tool_actions[tool_name] = action
+        return action
+
     def set_tool(self, tool_name):
-        manager.active_tool = tool_name
+        manager.set_active_tool(tool_name)
         # Update cursor in all windows
         for w in manager.get_all().values():
             w.update_cursor()
+
+    def _on_tool_changed(self, tool_name):
+        action = self.tool_actions.get(tool_name)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
+        label = self._tool_labels.get(tool_name, tool_name.title())
+        self.tool_status.setText(f"Tool: {label}")
 
     def show_annotation_manager(self):
         mgr = get_annotation_manager()
@@ -194,9 +229,10 @@ class Toolbar(QMainWindow):
                             continue
                         if os.path.splitext(name)[1].lower() in supported_ext:
                             image_files.append(os.path.join(root, name))
-            elif (
-                os.path.splitext(f)[1].lower() in supported_ext
-                and not os.path.basename(f).startswith(".")
+            elif os.path.splitext(f)[
+                1
+            ].lower() in supported_ext and not os.path.basename(f).startswith(
+                "."
             ):
                 image_files.append(f)
 
@@ -229,7 +265,10 @@ class Toolbar(QMainWindow):
                 pass
 
         # Signal Line Profile dialog to stop processing updates
-        from .widgets import line_profile_dialog_exists, get_line_profile_dialog
+        from .widgets import (
+            get_line_profile_dialog,
+            line_profile_dialog_exists,
+        )
 
         if line_profile_dialog_exists():
             try:

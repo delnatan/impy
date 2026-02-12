@@ -12,12 +12,20 @@ class WindowManager(QObject):
     # Signals for window lifecycle
     window_registered = Signal(object)    # Emits the window that was registered
     window_unregistered = Signal(object)  # Emits the window that was unregistered
+    tool_changed = Signal(str)  # Emits active tool name when changed
 
     def __init__(self):
         super().__init__()
         self.windows = {}
         self._next_id = 1
         self.active_tool = "pointer"  # Global tool state
+
+    def set_active_tool(self, tool_name):
+        """Set the global active tool and emit update signal if it changed."""
+        if tool_name == self.active_tool:
+            return
+        self.active_tool = tool_name
+        self.tool_changed.emit(tool_name)
 
     def register(self, window):
         """Register a window and return its assigned ID."""
