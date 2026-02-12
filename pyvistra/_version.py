@@ -1,14 +1,9 @@
 """Version helpers for pyvistra."""
 
-from importlib.metadata import PackageNotFoundError, version
-
-# Fallback version for source-tree runs when package metadata is unavailable.
+# Source-of-truth version for in-repo runtime UI and package exports.
 __version__ = "0.3.1"
 
 
 def get_version():
-    """Return installed package version, falling back to source version."""
-    try:
-        return version("pyvistra")
-    except PackageNotFoundError:
-        return __version__
+    """Return the current pyvistra version string."""
+    return __version__
