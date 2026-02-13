@@ -38,7 +38,11 @@ from .rois import ROI, CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
 from .toolbar import Toolbar
 from .ui import ImageWindow, imshow, run_app
 from .volume import VolumeViewer
-from .widgets import ImageOutputSelector, PSFComputeDialog
+from .widgets import (
+    Denoise2DTimelapseDialog,
+    ImageOutputSelector,
+    PSFComputeDialog,
+)
 
 __all__ = [
     "__version__",
@@ -63,6 +67,7 @@ __all__ = [
     # widgets
     "ImageOutputSelector",
     "PSFComputeDialog",
+    "Denoise2DTimelapseDialog",
     # rois
     "ROI",
     "RectangleROI",

@@ -27,6 +27,8 @@ from .output_selector import ImageOutputSelector
 from .psf_dialog import PSFComputeDialog
 from .axes_dialog import AxesDialog
 from .line_profile import LineProfileDialog, get_line_profile_dialog, line_profile_dialog_exists
+from .denoise_dialog import Denoise2DTimelapseDialog
+from .processing_helper import BufferProcessingRunner
 
 __all__ = [
     # Theme constants
@@ -51,6 +53,8 @@ __all__ = [
     "ImageOutputSelector",
     "PSFComputeDialog",
     "AxesDialog",
+    "Denoise2DTimelapseDialog",
+    "BufferProcessingRunner",
     "LineProfileDialog",
     "get_line_profile_dialog",
     "line_profile_dialog_exists",

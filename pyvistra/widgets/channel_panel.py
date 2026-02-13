@@ -14,7 +14,11 @@ from qtpy.QtWidgets import (
 )
 
 from pyvistra.visuals import COLORMAPS
-from .histogram import CompactHistogramWidget, configure_spinbox_for_range
+from .histogram import (
+    CompactHistogramWidget,
+    configure_spinbox_for_range,
+    get_safe_contrast_bounds,
+)
 
 
 class ChannelRow(QWidget):
@@ -33,9 +37,12 @@ class ChannelRow(QWidget):
     colormapChanged = Signal(int, str)  # channel_idx, colormap_name
     gammaChanged = Signal(int, float)  # channel_idx, gamma
 
-    def __init__(self, channel_idx, channel_name, color, parent=None):
+    def __init__(
+        self, channel_idx, channel_name, color, data_dtype=None, parent=None
+    ):
         super().__init__(parent)
         self.channel_idx = channel_idx
+        self.data_dtype = data_dtype
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -69,6 +76,7 @@ class ChannelRow(QWidget):
         self.min_spin.setDecimals(1)
         self.min_spin.setRange(-1e9, 1e9)
         self.min_spin.setSingleStep(10)
+        self.min_spin.setKeyboardTracking(False)
         self.min_spin.setFixedWidth(65)
         self.min_spin.setToolTip("Minimum intensity")
         self.min_spin.valueChanged.connect(self._on_min_changed)
@@ -84,6 +92,7 @@ class ChannelRow(QWidget):
         self.max_spin.setDecimals(1)
         self.max_spin.setRange(-1e9, 1e9)
         self.max_spin.setSingleStep(10)
+        self.max_spin.setKeyboardTracking(False)
         self.max_spin.setFixedWidth(65)
         self.max_spin.setToolTip("Maximum intensity")
         self.max_spin.valueChanged.connect(self._on_max_changed)
@@ -182,6 +191,10 @@ class ChannelRow(QWidget):
         data_max = self.histogram.data_max
         configure_spinbox_for_range(self.min_spin, data_min, data_max)
         configure_spinbox_for_range(self.max_spin, data_min, data_max)
+        dtype = self.data_dtype if self.data_dtype is not None else data_slice.dtype
+        hard_min, hard_max = get_safe_contrast_bounds(dtype, data_min, data_max)
+        self.min_spin.setRange(hard_min, hard_max)
+        self.max_spin.setRange(hard_min, hard_max)
 
     def set_clim(self, vmin, vmax):
         """Update contrast limits display (histogram and spinboxes)."""
@@ -280,7 +293,7 @@ class ChannelPanel(QDialog):
                 c % len(self.viewer.renderer.channel_colors)
             ]
 
-            row = ChannelRow(c, ch_name, color)
+            row = ChannelRow(c, ch_name, color, data_dtype=self.viewer.img_data.dtype)
             row.visibilityChanged.connect(self._on_visibility_changed)
             row.climChanged.connect(self._on_clim_changed)
             row.colormapChanged.connect(self._on_colormap_changed)

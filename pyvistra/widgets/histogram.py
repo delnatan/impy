@@ -103,6 +103,30 @@ def configure_spinbox_for_range(spinbox, data_min, data_max):
     spinbox.blockSignals(False)
 
 
+def get_safe_contrast_bounds(dtype, data_min, data_max):
+    """
+    Return safe min/max bounds for contrast spinboxes.
+
+    - Integer data: use full dtype range (safe hard limits).
+    - Float data: use a wider range around observed data to allow exploration.
+    """
+    np_dtype = np.dtype(dtype)
+
+    if np.issubdtype(np_dtype, np.integer):
+        info = np.iinfo(np_dtype)
+        return float(info.min), float(info.max)
+
+    if np.issubdtype(np_dtype, np.bool_):
+        return 0.0, 1.0
+
+    span = float(data_max - data_min)
+    if span <= 0:
+        span = max(abs(float(data_max)), abs(float(data_min)), 1.0)
+
+    margin = span * 10.0
+    return float(data_min - margin), float(data_max + margin)
+
+
 class BaseHistogramWidget(QWidget):
     """
     Base class for histogram widgets with shared logic for:
@@ -138,16 +162,25 @@ class BaseHistogramWidget(QWidget):
 
     def set_data(self, data_slice, color_name):
         """Set histogram data and compute bins."""
-        self.data_min = float(np.nanmin(data_slice))
-        self.data_max = float(np.nanmax(data_slice))
+        data = np.asarray(data_slice)
+        finite_data = data[np.isfinite(data)]
 
-        if self.data_max <= self.data_min:
-            self.data_max = self.data_min + 1e-5
+        if finite_data.size == 0:
+            # Graceful fallback for empty/all-NaN/all-inf slices.
+            self.data_min = 0.0
+            self.data_max = 1.0
+            self.hist_data = np.zeros(100, dtype=float)
+        else:
+            self.data_min = float(np.min(finite_data))
+            self.data_max = float(np.max(finite_data))
 
-        y, x = np.histogram(
-            data_slice, bins=100, range=(self.data_min, self.data_max)
-        )
-        self.hist_data = np.log1p(y)
+            if self.data_max <= self.data_min:
+                self.data_max = self.data_min + 1e-5
+
+            y, _ = np.histogram(
+                finite_data, bins=100, range=(self.data_min, self.data_max)
+            )
+            self.hist_data = np.log1p(y)
 
         self.color = QColor(color_name)
         self._update_display_range()

@@ -32,6 +32,7 @@ class ImageOutputSelector(QWidget):
         super().__init__(parent)
         self._default_title = default_title
         self._formats = formats or [("TIFF", ".tif")]
+        self._manager = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -80,16 +81,20 @@ class ImageOutputSelector(QWidget):
         layout.addWidget(self._secondary)
 
         # Initial population
+        from pyvistra.manager import manager
+
+        self._manager = manager
+        self._manager.window_registered.connect(self.refresh_windows)
+        self._manager.window_unregistered.connect(self.refresh_windows)
         self.refresh_windows()
 
     def refresh_windows(self):
         """Update list of available windows from WindowManager."""
+        previous_selection = self._combo.currentData()
+
         self._combo.blockSignals(True)
         self._combo.clear()
-
-        from pyvistra.manager import manager
-
-        windows = manager.get_all()
+        windows = self._manager.get_all()
 
         # Add existing windows
         for wid, win in sorted(windows.items()):
@@ -105,8 +110,10 @@ class ImageOutputSelector(QWidget):
         self._combo.addItem("New Window", self._NEW_WINDOW)
         self._combo.addItem("Save to File", self._SAVE_FILE)
 
-        # Default to "New Window"
-        idx = self._combo.findData(self._NEW_WINDOW)
+        # Restore previous selection if it still exists; otherwise default to New Window
+        idx = self._combo.findData(previous_selection)
+        if idx < 0:
+            idx = self._combo.findData(self._NEW_WINDOW)
         self._combo.setCurrentIndex(idx)
 
         self._combo.blockSignals(False)

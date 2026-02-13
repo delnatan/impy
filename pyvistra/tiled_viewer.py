@@ -1180,6 +1180,24 @@ class TiledViewer(QMainWindow):
 
         toolbar2_layout.addSpacing(20)
 
+        # Time controls
+        self.time_widget = QWidget()
+        time_layout = QHBoxLayout(self.time_widget)
+        time_layout.setContentsMargins(0, 0, 0, 0)
+        time_layout.addWidget(QLabel("Time:"))
+        self.time_slider = QSlider(Qt.Horizontal)
+        self.time_slider.setRange(0, 0)
+        self.time_slider.setFixedWidth(100)
+        self.time_slider.valueChanged.connect(self._on_time_changed)
+        time_layout.addWidget(self.time_slider)
+        self.time_label = QLabel("0")
+        self.time_label.setFixedWidth(25)
+        time_layout.addWidget(self.time_label)
+        self.time_widget.setVisible(False)
+        toolbar2_layout.addWidget(self.time_widget)
+
+        toolbar2_layout.addSpacing(20)
+
         # Z controls
         self.z_widget = QWidget()
         z_layout = QHBoxLayout(self.z_widget)
@@ -1396,6 +1414,14 @@ class TiledViewer(QMainWindow):
         # Update visual proxy with max channels
         self.visual_proxy.update_max_channels(max_C)
 
+        # Update time slider
+        if max_T > 1:
+            self.time_slider.setRange(0, max_T - 1)
+            self.time_slider.setValue(min(self.t_idx, max_T - 1))
+            self.time_widget.setVisible(True)
+        else:
+            self.time_widget.setVisible(False)
+
         # Update Z slider
         if max_Z > 1:
             self.z_slider.setRange(0, max_Z - 1)
@@ -1420,6 +1446,7 @@ class TiledViewer(QMainWindow):
 
     def _update_labels(self):
         """Update dimension labels."""
+        self.time_label.setText(str(self.t_idx))
         self.z_label.setText(str(self.z_idx))
         self.channel_label.setText(str(self.channel_idx))
         self.proj_range_label.setText(
@@ -1526,6 +1553,12 @@ class TiledViewer(QMainWindow):
         """Handle channel slider change."""
         self.channel_idx = value
         self.channel_label.setText(str(value))
+        self._apply_global_settings()
+
+    def _on_time_changed(self, value):
+        """Handle time slider change."""
+        self.t_idx = value
+        self.time_label.setText(str(value))
         self._apply_global_settings()
 
     def _on_z_changed(self, value):

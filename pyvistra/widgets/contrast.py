@@ -13,7 +13,11 @@ from qtpy.QtWidgets import (
 )
 
 from pyvistra.visuals import COLORMAPS
-from .histogram import HistogramWidget, configure_spinbox_for_range
+from .histogram import (
+    HistogramWidget,
+    configure_spinbox_for_range,
+    get_safe_contrast_bounds,
+)
 
 
 class ContrastDialog(QDialog):
@@ -65,6 +69,7 @@ class ContrastDialog(QDialog):
         self.min_spin.setDecimals(1)
         self.min_spin.setRange(-1e9, 1e9)
         self.min_spin.setSingleStep(10)
+        self.min_spin.setKeyboardTracking(False)
         self.min_spin.setFixedWidth(75)
         self.min_spin.setToolTip("Minimum intensity")
         self.min_spin.valueChanged.connect(self.on_min_spin_changed)
@@ -83,6 +88,7 @@ class ContrastDialog(QDialog):
         self.max_spin.setDecimals(1)
         self.max_spin.setRange(-1e9, 1e9)
         self.max_spin.setSingleStep(10)
+        self.max_spin.setKeyboardTracking(False)
         self.max_spin.setFixedWidth(75)
         self.max_spin.setToolTip("Maximum intensity")
         self.max_spin.valueChanged.connect(self.on_max_spin_changed)
@@ -169,6 +175,12 @@ class ContrastDialog(QDialog):
             data_max = self.hist_widget.data_max
             configure_spinbox_for_range(self.min_spin, data_min, data_max)
             configure_spinbox_for_range(self.max_spin, data_min, data_max)
+            dtype = getattr(self.viewer.img_data, "dtype", plane.dtype)
+            hard_min, hard_max = get_safe_contrast_bounds(
+                dtype, data_min, data_max
+            )
+            self.min_spin.setRange(hard_min, hard_max)
+            self.max_spin.setRange(hard_min, hard_max)
 
             # Get current clim from renderer
             curr_min, curr_max = self.viewer.renderer.get_clim(c_idx)

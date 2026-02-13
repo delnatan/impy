@@ -1,3 +1,4 @@
+import os
 import heapq
 import sys
 from collections import OrderedDict
@@ -10,9 +11,11 @@ from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -20,7 +23,14 @@ from qtpy.QtWidgets import (
 from superqt import QRangeSlider
 from vispy import app, scene
 
-from .io import Imaris5DProxy, Numpy5DProxy, load_image, normalize_to_5d
+from .io import (
+    Imaris5DProxy,
+    Numpy5DProxy,
+    load_image,
+    normalize_to_5d,
+    save_imaris,
+    save_tiff,
+)
 from .label_visual import LabelOverlayVisual
 from .labels import SparseLabels
 from .manager import manager
@@ -32,6 +42,7 @@ from .widgets import (
     AxesDialog,
     ChannelPanel,
     ContrastDialog,
+    Denoise2DTimelapseDialog,
     MetadataDialog,
     TransformDialog,
 )
@@ -151,6 +162,7 @@ class ImageWindow(QMainWindow):
         self.contrast_dialog = None
         self.channel_panel = None
         self.transform_dialog = None
+        self.denoise_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
 
@@ -336,22 +348,75 @@ class ImageWindow(QMainWindow):
                       If provided, replaces self.meta.
         """
         if new_data.ndim != 5:
-            # Try to reshape or warn? For now assume 5D or compatible
-            pass
+            raise ValueError("new_data must be 5D (T, Z, C, Y, X)")
 
+        old_shape = (self.T, self.Z, self.C, self.Y, self.X)
+        old_is_rgb = self.meta.get("is_rgb", False)
+
+        # Update data and metadata
         self.img_data = new_data
-        # Update renderer data
-        self.renderer.data = new_data
-
-        # Update metadata if provided
         if metadata is not None:
             self.meta = metadata
 
-        self.renderer.update_slice(self.t_idx, self.z_idx)
-        self.canvas.update()
+        self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
+        new_shape = (self.T, self.Z, self.C, self.Y, self.X)
+        new_is_rgb = self.meta.get("is_rgb", False)
+
+        # Clamp indices to valid bounds for the new data.
+        self.t_idx = min(max(0, self.t_idx), self.T - 1)
+        self.z_idx = min(max(0, self.z_idx), self.Z - 1)
+        self.c_idx = min(max(0, self.c_idx), self.C - 1)
+
+        needs_rebuild = (old_shape != new_shape) or (old_is_rgb != new_is_rgb)
+        if needs_rebuild:
+            # Remove old renderer layers, then rebuild renderer and controls.
+            for layer in self.renderer.layers:
+                layer.parent = None
+
+            self.renderer = CompositeImageVisual(
+                self.view, self.img_data, is_rgb=new_is_rgb
+            )
+            self.renderer.reset_camera(self.img_data.shape)
+            self._rebuild_controls()
+        else:
+            self.renderer.data = new_data
+
+        # Sync sliders to clamped indices without emitting callbacks.
+        if self.c_slider is not None:
+            self.c_slider.blockSignals(True)
+            self.c_slider.setValue(self.c_idx)
+            self.c_slider.blockSignals(False)
+        if getattr(self, "t_slider", None) is not None:
+            self.t_slider.blockSignals(True)
+            self.t_slider.setValue(self.t_idx)
+            self.t_slider.blockSignals(False)
+        if self.z_slider is not None:
+            self.z_slider.blockSignals(True)
+            self.z_slider.setValue(self.z_idx)
+            self.z_slider.blockSignals(False)
+        if getattr(self, "c_label", None) is not None:
+            self.c_label.setText(str(self.c_idx))
+        if getattr(self, "t_label", None) is not None:
+            self.t_label.setText(str(self.t_idx))
+        if self.z_label is not None:
+            self.z_label.setText(str(self.z_idx))
+
+        self.update_view()
 
     def _setup_menu(self):
         menubar = self.menuBar()
+
+        # File Menu
+        file_menu = menubar.addMenu("File")
+        save_tiff_action = QAction("Save as TIFF...", self)
+        save_tiff_action.setShortcut("Ctrl+S")
+        save_tiff_action.triggered.connect(self.save_as_tiff)
+        file_menu.addAction(save_tiff_action)
+
+        save_ims_action = QAction("Save as Imaris...", self)
+        save_ims_action.setShortcut("Ctrl+Shift+S")
+        save_ims_action.triggered.connect(self.save_as_imaris)
+        file_menu.addAction(save_ims_action)
 
         # Adjust Menu
         adjust_menu = menubar.addMenu("Adjust")
@@ -398,11 +463,88 @@ class ImageWindow(QMainWindow):
         align_action.triggered.connect(self.show_alignment_dialog)
         image_menu.addAction(align_action)
 
+        denoise_action = QAction("Denoise 2D Timelapse...", self)
+        denoise_action.triggered.connect(self.show_denoise_dialog)
+        image_menu.addAction(denoise_action)
+
         image_menu.addSeparator()
 
         axes_action = QAction("Reorder Axes...", self)
         axes_action.triggered.connect(self.show_axes_dialog)
         image_menu.addAction(axes_action)
+
+    def _default_save_path(self, ext):
+        """Build a default save path for Save As."""
+        if self.filepath:
+            root, _ = os.path.splitext(self.filepath)
+            return f"{root}_export{ext}"
+
+        filename = self.meta.get("filename", "image")
+        root, _ = os.path.splitext(filename)
+        if not root:
+            root = "image"
+        return f"{root}{ext}"
+
+    def _save_image_file(self, filepath):
+        """Save current image data to TIFF or Imaris depending on extension."""
+        ext = os.path.splitext(filepath)[1].lower()
+        scale = self.meta.get("scale", (1.0, 1.0, 1.0))
+
+        if ext in (".tif", ".tiff"):
+            save_tiff(filepath, self.img_data, scale=scale)
+            return
+
+        if ext == ".ims":
+            save_imaris(filepath, self.img_data, metadata=self.meta)
+            return
+
+        raise ValueError(f"Unsupported output format: {ext}")
+
+    def _save_with_dialog(self, title, default_ext, valid_exts, file_filter):
+        """Prompt for output path for a specific format and save current image."""
+        default_path = self._default_save_path(default_ext)
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, title, default_path, file_filter
+        )
+        if not filepath:
+            return
+
+        current_ext = os.path.splitext(filepath)[1].lower()
+        allowed_exts = [e.lower() for e in valid_exts]
+        if current_ext not in allowed_exts:
+            filepath += default_ext
+
+        try:
+            self._save_image_file(filepath)
+            QMessageBox.information(
+                self,
+                "Save Complete",
+                f"Saved image to:\n{filepath}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Save Failed",
+                f"Could not save image:\n{exc}",
+            )
+
+    def save_as_tiff(self):
+        """Save image as TIFF."""
+        self._save_with_dialog(
+            title="Save Image as TIFF",
+            default_ext=".tif",
+            valid_exts=[".tif", ".tiff"],
+            file_filter="TIFF files (*.tif *.tiff)",
+        )
+
+    def save_as_imaris(self):
+        """Save image as Imaris .ims."""
+        self._save_with_dialog(
+            title="Save Image as Imaris",
+            default_ext=".ims",
+            valid_exts=[".ims"],
+            file_filter="Imaris files (*.ims)",
+        )
 
     # ---- ROI ID Management ----
 
@@ -935,6 +1077,14 @@ class ImageWindow(QMainWindow):
         self._alignment_dialog.show()
         self._alignment_dialog.raise_()
 
+    def show_denoise_dialog(self):
+        if self.denoise_dialog is None:
+            self.denoise_dialog = Denoise2DTimelapseDialog(
+                self, parent=self
+            )
+        self.denoise_dialog.show()
+        self.denoise_dialog.raise_()
+
     def show_line_profile(self):
         """Show the line profile dialog."""
         from .widgets import get_line_profile_dialog
@@ -1026,6 +1176,9 @@ class ImageWindow(QMainWindow):
         self.mode_combo = None
         self.channel_row_widget = None
         self.c_slider = None
+        self.c_label = None
+        self.t_slider = None
+        self.t_label = None
         self.z_slider = None
         self.z_label = None
         self.chk_proj = None
@@ -1073,8 +1226,14 @@ class ImageWindow(QMainWindow):
             c_layout.addWidget(QLabel("Channel"))
             self.c_slider = QSlider(Qt.Horizontal)
             self.c_slider.setRange(0, self.C - 1)
+            self.c_slider.setValue(self.c_idx)
             self.c_slider.valueChanged.connect(self.on_channel_change)
             c_layout.addWidget(self.c_slider)
+
+            self.c_label = QLabel(str(self.c_idx))
+            self.c_label.setFixedWidth(30)
+            self.c_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            c_layout.addWidget(self.c_label)
 
             self.controls_layout.addWidget(self.channel_row_widget)
             self.channel_row_widget.setVisible(False)  # Default is Composite
@@ -1083,10 +1242,15 @@ class ImageWindow(QMainWindow):
         if self.T > 1:
             row = QHBoxLayout()
             row.addWidget(QLabel("Time"))
-            sl = QSlider(Qt.Horizontal)
-            sl.setRange(0, self.T - 1)
-            sl.valueChanged.connect(self.on_time_change)
-            row.addWidget(sl)
+            self.t_slider = QSlider(Qt.Horizontal)
+            self.t_slider.setRange(0, self.T - 1)
+            self.t_slider.setValue(self.t_idx)
+            self.t_slider.valueChanged.connect(self.on_time_change)
+            row.addWidget(self.t_slider)
+            self.t_label = QLabel(str(self.t_idx))
+            self.t_label.setFixedWidth(30)
+            self.t_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(self.t_label)
             self.controls_layout.addLayout(row)
 
         # -- Z Slider --
@@ -1144,6 +1308,8 @@ class ImageWindow(QMainWindow):
 
     def on_channel_change(self, val):
         self.c_idx = val
+        if hasattr(self, "c_label") and self.c_label is not None:
+            self.c_label.setText(str(val))
         self.renderer.set_active_channel(val)
         self.canvas.update()
         self.view_changed.emit(self)
@@ -1155,6 +1321,8 @@ class ImageWindow(QMainWindow):
 
     def on_time_change(self, val):
         self.t_idx = val
+        if hasattr(self, "t_label") and self.t_label is not None:
+            self.t_label.setText(str(val))
         self.update_view()
 
     def toggle_z_projection(self, checked):
