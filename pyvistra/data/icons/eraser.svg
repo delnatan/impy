@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none">
+  <!-- Eraser body -->
+  <path d="M9 21l-5.5-5.5a2 2 0 010-2.83l9.17-9.17a2 2 0 012.83 0l4 4a2 2 0 010 2.83L12 18" 
+        stroke="#e0e0e0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Eraser tip fill -->
+  <path d="M3.5 15.5L9 21l3-3-5.5-5.5z" 
+        fill="#e0e0e0" fill-opacity="0.25" stroke="#e0e0e0" stroke-width="1.5" stroke-linejoin="round"/>
+  <!-- Ground line -->
+  <line x1="9" y1="21" x2="21" y2="21" stroke="#e0e0e0" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
