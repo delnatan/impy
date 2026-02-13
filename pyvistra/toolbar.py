@@ -53,8 +53,8 @@ class Toolbar(QMainWindow):
         self.tools.setIconSize(QSize(18, 18))
         self.tools.setStyleSheet(
             "QToolButton { padding: 3px; border-radius: 4px; }"
-            "QToolButton:checked { background: rgba(45, 106, 79, 0.25); }"
-            "QToolButton:hover { background: rgba(255, 255, 255, 0.08); }"
+            "QToolButton:checked { background: rgba(45, 106, 79, 0.8); }"
+            "QToolButton:hover { background: rgba(255, 255, 255, 0.2); }"
         )
 
         self._tool_labels = {
