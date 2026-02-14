@@ -14,8 +14,14 @@ from qtpy.QtWidgets import (
 from vispy import scene
 from vispy.visuals.transforms import STTransform
 
+from .overlays import ScaleTimestampOverlay
 from .visuals import CompositeImageVisual
-from .widgets import ChannelPanel, ContrastDialog, MetadataDialog
+from .widgets import (
+    ChannelPanel,
+    ContrastDialog,
+    MetadataDialog,
+    OverlaySettingsDialog,
+)
 
 
 class OrthoVisualProxy:
@@ -257,6 +263,7 @@ class OrthoViewer(QMainWindow):
         )
 
         self.proxy = OrthoVisualProxy([self.vis_yx, self.vis_zy, self.vis_zx])
+        self._init_overlays()
 
         # Apply colormaps from source window if provided
         if self._channel_colormaps:
@@ -385,14 +392,17 @@ class OrthoViewer(QMainWindow):
         ]:
             wheel_handler = make_camera_handler(view_name)
             release_handler = make_camera_handler(view_name)
+            resize_handler = make_camera_handler(view_name)
             canvas.events.mouse_wheel.connect(wheel_handler)
             canvas.events.mouse_release.connect(release_handler)
+            canvas.events.resize.connect(resize_handler)
             self._event_handlers.append(
                 (canvas.events.mouse_wheel, wheel_handler)
             )
             self._event_handlers.append(
                 (canvas.events.mouse_release, release_handler)
             )
+            self._event_handlers.append((canvas.events.resize, resize_handler))
 
     def _setup_controls(self):
         # Mode (Composite/Single)
@@ -454,6 +464,10 @@ class OrthoViewer(QMainWindow):
         reset_view_action.setShortcut("A")
         reset_view_action.triggered.connect(self.reset_cameras)
         view_menu.addAction(reset_view_action)
+
+        overlay_action = QAction("Overlay Settings...", self)
+        overlay_action.triggered.connect(self.show_overlay_settings_dialog)
+        view_menu.addAction(overlay_action)
 
         # Image
         image_menu = menubar.addMenu("Image")
@@ -668,6 +682,7 @@ class OrthoViewer(QMainWindow):
         self.line_zx_v.set_data(pos=(self.cx + 0.5) * sx)
         self.line_zx_h.set_data(pos=(self.cz + 0.5) * sz)
 
+        self._update_overlays()
         self.canvas_yx.update()
         self.canvas_zy.update()
         self.canvas_zx.update()
@@ -712,6 +727,7 @@ class OrthoViewer(QMainWindow):
         self._syncing_cameras = False
 
         # Force canvas updates
+        self._update_overlays()
         self.canvas_yx.update()
         self.canvas_zy.update()
         self.canvas_zx.update()
@@ -829,6 +845,8 @@ class OrthoViewer(QMainWindow):
         finally:
             self._syncing_cameras = False
 
+        self._update_overlays()
+
     def on_time_change(self, val):
         self.ct = val
         self.update_views()
@@ -874,6 +892,15 @@ class OrthoViewer(QMainWindow):
         return self.proxy
 
     @property
+    def img_data(self):
+        """Compatibility alias for widgets expecting the main viewer API."""
+        return self.data
+
+    @img_data.setter
+    def img_data(self, value):
+        self.data = value
+
+    @property
     def canvas(self):
         # ContrastDialog calls viewer.canvas.update()
         # We return the YX canvas as a proxy.
@@ -903,6 +930,16 @@ class OrthoViewer(QMainWindow):
         dlg = MetadataDialog(self.meta, parent=self)
         dlg.exec_()
 
+    def show_overlay_settings_dialog(self):
+        dlg = OverlaySettingsDialog(self._overlay_config, parent=self)
+        if dlg.exec_():
+            self._overlay_config = dlg.get_config()
+            for overlay in self._overlays.values():
+                overlay.set_config(self._overlay_config)
+            self.canvas_yx.update()
+            self.canvas_zy.update()
+            self.canvas_zx.update()
+
     def closeEvent(self, event):
         # Disconnect all event handlers to prevent callbacks to dead objects
         for event_emitter, handler in self._event_handlers:
@@ -911,6 +948,9 @@ class OrthoViewer(QMainWindow):
             except Exception:
                 pass
         self._event_handlers.clear()
+
+        for overlay in self._overlays.values():
+            overlay.remove()
 
         # Unparent crosshair visuals from scene
         for line in [
@@ -938,6 +978,41 @@ class OrthoViewer(QMainWindow):
             except Exception:
                 pass
 
-        # Clear data references to allow garbage collection
+        # Clear data reference to help GC after proxies are released.
         self.data = None
         super().closeEvent(event)
+
+    def _init_overlays(self):
+        sz, _sy, sx = self.scale
+        self._overlay_config = dict(ScaleTimestampOverlay.DEFAULT_CONFIG)
+
+        self._overlays = {
+            "yx": ScaleTimestampOverlay(
+                self.view_yx,
+                axis_spacing_um=sx,
+                world_units_are_um=True,
+                get_time_index=lambda: self.ct,
+                get_timestamps=lambda: self.meta.get("timestamps", []),
+                config=self._overlay_config,
+            ),
+            "zy": ScaleTimestampOverlay(
+                self.view_zy,
+                axis_spacing_um=sz,
+                world_units_are_um=True,
+                get_time_index=lambda: self.ct,
+                get_timestamps=lambda: self.meta.get("timestamps", []),
+                config=self._overlay_config,
+            ),
+            "zx": ScaleTimestampOverlay(
+                self.view_zx,
+                axis_spacing_um=sx,
+                world_units_are_um=True,
+                get_time_index=lambda: self.ct,
+                get_timestamps=lambda: self.meta.get("timestamps", []),
+                config=self._overlay_config,
+            ),
+        }
+
+    def _update_overlays(self):
+        for overlay in self._overlays.values():
+            overlay.update()

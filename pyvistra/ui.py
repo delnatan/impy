@@ -34,6 +34,7 @@ from .io import (
 from .label_visual import LabelOverlayVisual
 from .labels import SparseLabels
 from .manager import manager
+from .overlays import ScaleTimestampOverlay
 from .ortho import OrthoViewer
 from .rois import CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
 from .visuals import CompositeImageVisual
@@ -44,6 +45,7 @@ from .widgets import (
     ContrastDialog,
     Denoise2DTimelapseDialog,
     MetadataDialog,
+    OverlaySettingsDialog,
     TransformDialog,
 )
 
@@ -155,6 +157,7 @@ class ImageWindow(QMainWindow):
         self.t_idx = 0
         self.z_idx = 0
         self.c_idx = 0  # Active channel index for Single mode
+        self._init_overlay()
 
         self._setup_controls()
 
@@ -201,6 +204,9 @@ class ImageWindow(QMainWindow):
         self.canvas.events.mouse_press.connect(self.on_mouse_press)
         self.canvas.events.mouse_release.connect(self.on_mouse_release)
         self.canvas.events.key_press.connect(self._on_vispy_key_press)
+        self.canvas.events.mouse_release.connect(self._on_view_transform_event)
+        self.canvas.events.mouse_wheel.connect(self._on_view_transform_event)
+        self.canvas.events.resize.connect(self._on_view_transform_event)
 
         # Focus policy
         self.setFocusPolicy(Qt.StrongFocus)
@@ -215,6 +221,9 @@ class ImageWindow(QMainWindow):
     def closeEvent(self, event):
         manager.unregister(self)
         self.window_closing.emit(self)
+
+        if hasattr(self, "overlay") and self.overlay is not None:
+            self.overlay.remove()
 
         # Cleanup data buffers/proxies (ImageBuffer, Imaris5DProxy)
         if hasattr(self.img_data, "release"):
@@ -243,6 +252,8 @@ class ImageWindow(QMainWindow):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_A:
             self.renderer.reset_camera(self.img_data.shape)
+            if self.overlay is not None:
+                self.overlay.update()
             self.canvas.update()
         elif event.key() == Qt.Key_F:
             # Flip selected CoordinateROI
@@ -381,25 +392,31 @@ class ImageWindow(QMainWindow):
         else:
             self.renderer.data = new_data
 
+        self._sync_overlay_spacing()
+
         # Sync sliders to clamped indices without emitting callbacks.
-        if self.c_slider is not None:
-            self.c_slider.blockSignals(True)
-            self.c_slider.setValue(self.c_idx)
-            self.c_slider.blockSignals(False)
-        if getattr(self, "t_slider", None) is not None:
-            self.t_slider.blockSignals(True)
-            self.t_slider.setValue(self.t_idx)
-            self.t_slider.blockSignals(False)
-        if self.z_slider is not None:
-            self.z_slider.blockSignals(True)
-            self.z_slider.setValue(self.z_idx)
-            self.z_slider.blockSignals(False)
+        c_slider = getattr(self, "c_slider", None)
+        if c_slider is not None:
+            c_slider.blockSignals(True)
+            c_slider.setValue(self.c_idx)
+            c_slider.blockSignals(False)
+        t_slider = getattr(self, "t_slider", None)
+        if t_slider is not None:
+            t_slider.blockSignals(True)
+            t_slider.setValue(self.t_idx)
+            t_slider.blockSignals(False)
+        z_slider = getattr(self, "z_slider", None)
+        if z_slider is not None:
+            z_slider.blockSignals(True)
+            z_slider.setValue(self.z_idx)
+            z_slider.blockSignals(False)
         if getattr(self, "c_label", None) is not None:
             self.c_label.setText(str(self.c_idx))
         if getattr(self, "t_label", None) is not None:
             self.t_label.setText(str(self.t_idx))
-        if self.z_label is not None:
-            self.z_label.setText(str(self.z_idx))
+        z_label = getattr(self, "z_label", None)
+        if z_label is not None:
+            z_label.setText(str(self.z_idx))
 
         self.update_view()
 
@@ -472,6 +489,11 @@ class ImageWindow(QMainWindow):
         axes_action = QAction("Reorder Axes...", self)
         axes_action.triggered.connect(self.show_axes_dialog)
         image_menu.addAction(axes_action)
+
+        view_menu = menubar.addMenu("View")
+        overlay_action = QAction("Overlay Settings...", self)
+        overlay_action.triggered.connect(self.show_overlay_settings_dialog)
+        view_menu.addAction(overlay_action)
 
     def _default_save_path(self, ext):
         """Build a default save path for Save As."""
@@ -1151,6 +1173,7 @@ class ImageWindow(QMainWindow):
             self.view, self.img_data, is_rgb=is_rgb
         )
         self.renderer.reset_camera(self.img_data.shape)
+        self._sync_overlay_spacing()
 
         # Rebuild controls
         self._rebuild_controls()
@@ -1355,12 +1378,43 @@ class ImageWindow(QMainWindow):
             if entry["visual"] and entry["labels"] and entry["labels"].ndim == 3:
                 entry["visual"].update_slice(self.z_idx)
 
+        if self.overlay is not None:
+            self.overlay.update()
         self.canvas.update()
         if self.contrast_dialog and self.contrast_dialog.isVisible():
             self.contrast_dialog.refresh_ui()
         if self.channel_panel and self.channel_panel.isVisible():
             self.channel_panel.refresh_ui()
         self.view_changed.emit(self)
+
+    def _init_overlay(self):
+        _, _, sx = self.meta.get("scale", (1.0, 1.0, 1.0))
+        self.overlay = ScaleTimestampOverlay(
+            self.view,
+            axis_spacing_um=sx,
+            world_units_are_um=False,
+            get_time_index=lambda: self.t_idx,
+            get_timestamps=lambda: self.meta.get("timestamps", []),
+        )
+
+    def _sync_overlay_spacing(self):
+        if self.overlay is None:
+            return
+        _, _, sx = self.meta.get("scale", (1.0, 1.0, 1.0))
+        self.overlay.set_axis_spacing_um(sx)
+
+    def _on_view_transform_event(self, _event):
+        if self.overlay is not None:
+            self.overlay.update()
+            self.canvas.update()
+
+    def show_overlay_settings_dialog(self):
+        if self.overlay is None:
+            return
+        dlg = OverlaySettingsDialog(self.overlay.get_config(), parent=self)
+        if dlg.exec_():
+            self.overlay.set_config(dlg.get_config())
+            self.canvas.update()
 
     def _map_event_to_image(self, event):
         tr = self.canvas.scene.node_transform(self.renderer.layers[0])

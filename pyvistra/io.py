@@ -810,6 +810,7 @@ def load_image(filepath, use_memmap=True, dims=None):
             "scale": reader.voxel_size,  # (Z, Y, X)
             "channels": reader.channels_info,
             "is_rgb": False,
+            "timestamps": reader.timestamps,
         }
         return data, meta
 
@@ -832,6 +833,7 @@ def load_image(filepath, use_memmap=True, dims=None):
             "scale": reader.voxel_size,  # (Z, Y, X)
             "channels": reader.channels_info,
             "is_rgb": False,
+            "timestamps": reader.timestamps,
         }
         return data, meta
 
