@@ -40,6 +40,8 @@ from .manager import manager
 from .overlays import ScaleTimestampOverlay
 from .ortho import OrthoViewer
 from .rois import CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
+from .tracks import TrackTable
+from .track_visual import TrackLayerVisual
 from .visuals import CompositeImageVisual
 from .widgets import (
     AlignmentDialog,
@@ -73,6 +75,8 @@ class ImageWindow(QMainWindow):
     label_changed = Signal(object)  # Emits SparseLabels when labels change
     mask_layer_added = Signal(str)  # Emits mask layer name when added
     mask_layer_removed = Signal(str)  # Emits mask layer name when removed
+    track_layer_added = Signal(str)  # Emits track layer name when added
+    track_layer_removed = Signal(str)  # Emits track layer name when removed
 
     def __init__(self, data_or_path, title="Image", meta=None):
         super().__init__()
@@ -212,7 +216,11 @@ class ImageWindow(QMainWindow):
         self._contour_max_dist = 0.0  # Max distance from contour start
         self._mask_propagate_z = False  # Fill all Z slices (cookie-cut)
 
-        # 10. Events
+        # 10. Track State (multiple named track layers)
+        self._track_layers = OrderedDict()  # name -> {"tracks": TrackTable, "visual": TrackLayerVisual, "visible": True}
+        self._active_track_layer = None
+
+        # 11. Events
         self.canvas.events.mouse_move.connect(self.on_mouse_move)
         self.canvas.events.mouse_press.connect(self.on_mouse_press)
         self.canvas.events.mouse_release.connect(self.on_mouse_release)
@@ -239,6 +247,10 @@ class ImageWindow(QMainWindow):
 
         if hasattr(self, "overlay") and self.overlay is not None:
             self.overlay.remove()
+        for entry in self._track_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.remove()
 
         # Cleanup data buffers/proxies (ImageBuffer, Imaris5DProxy)
         if hasattr(self.img_data, "release"):
@@ -729,6 +741,83 @@ class ImageWindow(QMainWindow):
         """Switch which mask layer receives painting."""
         if name in self._mask_layers:
             self._active_mask_layer = name
+
+    # ---- Multiple Track Layers API ----
+
+    def add_track_layer(self, name, tracks=None, trail_window=30):
+        """Create a named track layer with its own visual."""
+        if name in self._track_layers:
+            return
+
+        if tracks is None:
+            tracks = TrackTable.from_arrays(track_id=[], t=[], x=[], y=[])
+        elif not isinstance(tracks, TrackTable):
+            raise TypeError("tracks must be a TrackTable or None")
+
+        visual = TrackLayerVisual(
+            self.view,
+            trail_window=trail_window,
+        )
+        visual.set_tracks(tracks)
+        visual.set_time_z(self.t_idx, self.z_idx)
+        self._track_layers[name] = {
+            "tracks": tracks,
+            "visual": visual,
+            "visible": True,
+        }
+        if self._active_track_layer is None:
+            self._active_track_layer = name
+        self.track_layer_added.emit(name)
+        self.canvas.update()
+
+    def set_track_layer_tracks(self, name, tracks):
+        """Replace data for a specific track layer."""
+        if name not in self._track_layers:
+            return
+        if not isinstance(tracks, TrackTable):
+            raise TypeError("tracks must be a TrackTable")
+
+        self._track_layers[name]["tracks"] = tracks
+        visual = self._track_layers[name]["visual"]
+        if visual is not None:
+            visual.set_tracks(tracks)
+            visual.set_time_z(self.t_idx, self.z_idx)
+        self.canvas.update()
+
+    def remove_track_layer(self, name):
+        """Remove a named track layer and clean up its visual."""
+        if name not in self._track_layers:
+            return
+        entry = self._track_layers.pop(name)
+        if entry["visual"] is not None:
+            entry["visual"].remove()
+        if self._active_track_layer == name:
+            self._active_track_layer = next(iter(self._track_layers), None)
+        self.track_layer_removed.emit(name)
+        self.canvas.update()
+
+    def set_track_layer_visible(self, name, visible):
+        """Toggle visibility of a specific track layer."""
+        if name not in self._track_layers:
+            return
+        self._track_layers[name]["visible"] = bool(visible)
+        visual = self._track_layers[name]["visual"]
+        if visual is not None:
+            visual.visible = bool(visible)
+        self.canvas.update()
+
+    def set_active_track_layer(self, name):
+        """Switch which track layer is active in the annotation manager."""
+        if name in self._track_layers:
+            self._active_track_layer = name
+
+    def remove_track_from_layer(self, layer_name, track_id):
+        """Remove a single trajectory from a track layer by track ID."""
+        if layer_name not in self._track_layers:
+            return
+        tracks = self._track_layers[layer_name]["tracks"]
+        updated = tracks.remove_track(track_id)
+        self.set_track_layer_tracks(layer_name, updated)
 
     def _get_brush_coords(self, cx, cy):
         """
@@ -1562,7 +1651,11 @@ class ImageWindow(QMainWindow):
         self.update_view()
 
     def update_view(self):
-        if hasattr(self, "chk_proj") and self.chk_proj is not None and self.chk_proj.isChecked():
+        if (
+            hasattr(self, "chk_proj")
+            and self.chk_proj is not None
+            and self.chk_proj.isChecked()
+        ):
             mn, mx = self.z_range_slider.value()
             z_slice = slice(mn, mx + 1)
             self.renderer.update_slice(self.t_idx, z_slice)
@@ -1573,6 +1666,10 @@ class ImageWindow(QMainWindow):
         for entry in self._mask_layers.values():
             if entry["visual"] and entry["labels"] and entry["labels"].ndim == 3:
                 entry["visual"].update_slice(self.z_idx)
+        for entry in self._track_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.set_time_z(self.t_idx, self.z_idx)
 
         if self.overlay is not None:
             self.overlay.update()
