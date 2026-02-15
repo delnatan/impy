@@ -275,6 +275,7 @@ class Toolbar(QMainWindow):
         supported_ext = {
             ".ims",
             ".czi",
+            ".nd2",
             ".tif",
             ".tiff",
             ".png",

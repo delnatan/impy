@@ -1,6 +1,8 @@
 import os
 import shutil
 import uuid
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -765,6 +767,321 @@ def load_zarr(filepath):
     return proxy, metadata
 
 
+def _nd2_to_plain(value):
+    """Convert ND2 metadata objects to plain Python containers."""
+    if is_dataclass(value):
+        return {k: _nd2_to_plain(v) for k, v in asdict(value).items()}
+    if isinstance(value, dict):
+        return {k: _nd2_to_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_nd2_to_plain(v) for v in value]
+    return value
+
+
+def _nd2_attr(obj, key, default=None):
+    """Read an attribute from dict-like or object-like values."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _nd2_first_value(obj, names):
+    """Return first non-None value from candidate field names."""
+    for name in names:
+        value = _nd2_attr(obj, name)
+        if value is not None:
+            return value
+    return None
+
+
+def _extract_nd2_channels(metadata_obj, n_channels):
+    """Extract channel metadata in pyvistra's channel schema."""
+    channels = []
+    nd2_channels = _nd2_attr(metadata_obj, "channels") or []
+
+    for i in range(n_channels):
+        info = {
+            "id": i,
+            "name": f"Channel {i}",
+            "emission_wavelength": None,
+            "excitation_wavelength": None,
+            "exposure_time": None,
+        }
+
+        if i < len(nd2_channels):
+            channel_obj = nd2_channels[i]
+            channel_meta = _nd2_attr(channel_obj, "channel", channel_obj)
+
+            name = _nd2_first_value(
+                channel_meta,
+                ("name", "channel_name", "label"),
+            )
+            if name:
+                info["name"] = str(name)
+
+            emission = _nd2_first_value(
+                channel_meta,
+                (
+                    "emission_lambda_nm",
+                    "emissionLambdaNm",
+                    "emission_wavelength_nm",
+                    "emissionWavelengthNm",
+                ),
+            )
+            excitation = _nd2_first_value(
+                channel_meta,
+                (
+                    "excitation_lambda_nm",
+                    "excitationLambdaNm",
+                    "excitation_wavelength_nm",
+                    "excitationWavelengthNm",
+                ),
+            )
+
+            info["emission_wavelength"] = emission
+            info["excitation_wavelength"] = excitation
+
+            time_meta = _nd2_attr(channel_obj, "time")
+            exposure_ms = _nd2_first_value(
+                time_meta,
+                (
+                    "exposureTimeMs",
+                    "exposure_time_ms",
+                    "exposureTime",
+                    "exposure_time",
+                ),
+            )
+            if exposure_ms is not None:
+                # Store in seconds to match pyvistra metadata usage.
+                try:
+                    info["exposure_time"] = float(exposure_ms) / 1000.0
+                except (TypeError, ValueError):
+                    info["exposure_time"] = exposure_ms
+
+        channels.append(info)
+
+    return channels
+
+
+def _normalize_nd2_to_5d(data, sizes):
+    """
+    Normalize ND2 array to (T, Z, C, Y, X).
+
+    Any ND2 dimensions other than Z/C/Y/X are collapsed into T to preserve
+    frame sequencing while keeping pyvistra's fixed 5D data model.
+    """
+    dims_keys = [str(k) for k in sizes.keys()]
+    dims = [d.lower() for d in dims_keys]
+    shape = tuple(data.shape)
+
+    if len(dims) != len(shape):
+        return normalize_to_5d(data).array, []
+
+    y_axis = dims.index("y") if "y" in dims else None
+    x_axis = dims.index("x") if "x" in dims else None
+    if y_axis is None or x_axis is None:
+        return normalize_to_5d(data).array, []
+
+    z_axis = dims.index("z") if "z" in dims else None
+    c_axis = dims.index("c") if "c" in dims else None
+
+    time_axes = [
+        i for i, d in enumerate(dims) if d not in {"x", "y", "z", "c"}
+    ]
+    collapsed_dims = [dims_keys[i] for i in time_axes if dims[i] != "t"]
+
+    ordered_axes = list(time_axes)
+    if z_axis is not None:
+        ordered_axes.append(z_axis)
+    if c_axis is not None:
+        ordered_axes.append(c_axis)
+    ordered_axes.extend([y_axis, x_axis])
+
+    transposed = np.transpose(data, ordered_axes)
+
+    t_size = (
+        int(np.prod([shape[i] for i in time_axes], dtype=np.int64))
+        if time_axes
+        else 1
+    )
+    z_size = shape[z_axis] if z_axis is not None else 1
+    c_size = shape[c_axis] if c_axis is not None else 1
+    y_size = shape[y_axis]
+    x_size = shape[x_axis]
+
+    normalized = transposed.reshape((t_size, z_size, c_size, y_size, x_size))
+    return normalized, collapsed_dims
+
+
+def _extract_nd2_timestamp_seconds(nd2_file, t_size):
+    """Extract per-timepoint relative acquisition times in seconds."""
+    loop_indices = getattr(nd2_file, "loop_indices", None) or []
+    if not loop_indices:
+        return []
+
+    # ND2 sequence indices are per-frame and may include Z/C/P loops.
+    # We keep first observed time per T index.
+    t_seconds = [None] * t_size
+    for seq_idx, index_map in enumerate(loop_indices):
+        t_idx = None
+        if isinstance(index_map, dict):
+            t_idx = index_map.get("T")
+        else:
+            t_idx = getattr(index_map, "get", lambda *_: None)("T")
+        if t_idx is None or t_idx >= t_size or t_seconds[t_idx] is not None:
+            continue
+
+        try:
+            frame_meta = nd2_file.frame_metadata(seq_idx)
+        except Exception:
+            continue
+
+        channels = _nd2_attr(frame_meta, "channels") or []
+        if not channels:
+            continue
+        time_meta = _nd2_attr(channels[0], "time")
+        rel_ms = _nd2_first_value(
+            time_meta, ("relativeTimeMs", "relative_time_ms")
+        )
+        if rel_ms is None:
+            continue
+        try:
+            t_seconds[t_idx] = float(rel_ms) / 1000.0
+        except (TypeError, ValueError):
+            continue
+
+    return t_seconds
+
+
+def _build_nd2_timestamps(acquisition_start, rel_seconds):
+    """Build datetime timestamps from acquisition start and relative seconds."""
+    if acquisition_start is None:
+        return []
+    timestamps = []
+    for dt_s in rel_seconds:
+        if dt_s is None:
+            timestamps.append(None)
+        else:
+            timestamps.append(acquisition_start + timedelta(seconds=dt_s))
+    return timestamps
+
+
+def _parse_nd2_acquisition_start(text_info):
+    """Try to parse acquisition datetime from ND2 text info."""
+    if not isinstance(text_info, dict):
+        return None
+
+    for key in (
+        "date",
+        "acquisition_date",
+        "acquisitionDate",
+        "capturing_date",
+        "capturingDate",
+        "time_start",
+        "timeStart",
+    ):
+        raw = text_info.get(key)
+        if not isinstance(raw, str):
+            continue
+        txt = raw.strip()
+        if not txt:
+            continue
+        try:
+            return datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%m/%d/%Y %I:%M:%S %p",
+            "%m/%d/%Y %H:%M:%S",
+        ):
+            try:
+                return datetime.strptime(txt, fmt)
+            except ValueError:
+                continue
+
+    return None
+
+
+def load_nd2(filepath):
+    """
+    Load ND2 image data and metadata.
+
+    Returns:
+        tuple: (Numpy5DProxy, metadata_dict)
+    """
+    try:
+        import nd2
+    except ImportError:
+        raise ImportError(
+            "ND2 support requires nd2. Install with: pip install pyvistra[nd2]"
+        )
+
+    with nd2.ND2File(filepath) as f:
+        raw = f.asarray()
+        sizes = dict(f.sizes)
+        normalized, collapsed_dims = _normalize_nd2_to_5d(raw, sizes)
+
+        voxel = f.voxel_size()
+        sx = float(getattr(voxel, "x", 1.0) or 1.0)
+        sy = float(getattr(voxel, "y", 1.0) or 1.0)
+        sz = float(getattr(voxel, "z", 1.0) or 1.0)
+
+        metadata_obj = _nd2_to_plain(getattr(f, "metadata", None))
+        text_info = _nd2_to_plain(getattr(f, "text_info", None))
+        attributes = _nd2_to_plain(getattr(f, "attributes", None))
+        experiment = _nd2_to_plain(getattr(f, "experiment", None))
+
+        n_channels = normalized.shape[2]
+        channels = _extract_nd2_channels(metadata_obj, n_channels)
+
+        rel_seconds = _extract_nd2_timestamp_seconds(
+            f, normalized.shape[0]
+        )
+        acquisition_start = _parse_nd2_acquisition_start(text_info)
+        timestamps = _build_nd2_timestamps(acquisition_start, rel_seconds)
+
+        events = None
+        try:
+            events = f.events(orient="records")
+        except TypeError:
+            try:
+                events = f.events()
+            except Exception:
+                events = None
+        except Exception:
+            events = None
+        if hasattr(events, "to_dict"):
+            events = events.to_dict(orient="records")
+
+    data_proxy = Numpy5DProxy(normalized)
+
+    meta = {
+        "filename": os.path.basename(filepath),
+        "shape": normalized.shape,
+        "raw_shape": raw.shape,
+        "scale": (sz, sy, sx),  # ND2 voxel size is in microns.
+        "channels": channels,
+        "is_rgb": False,
+        "timestamps": timestamps,
+        "timestamp_seconds": rel_seconds,
+        "nd2_sizes": sizes,
+        "nd2_collapsed_dims": collapsed_dims,
+        "nd2_text_info": text_info,
+        "nd2_attributes": attributes,
+        "nd2_experiment": experiment,
+    }
+    if metadata_obj is not None:
+        meta["nd2_metadata"] = metadata_obj
+    if events is not None:
+        meta["nd2_events"] = events
+
+    return data_proxy, meta
+
+
 def load_image(filepath, use_memmap=True, dims=None):
     """
     Loads an image and normalizes it to (T, Z, C, Y, X).
@@ -778,6 +1095,8 @@ def load_image(filepath, use_memmap=True, dims=None):
 
     Supported formats:
         - .ims (Imaris)
+        - .nd2 (Nikon ND2)
+        - .czi (Zeiss CZI)
         - .tif, .tiff (TIFF)
         - .png, .jpg, .jpeg (standard images via matplotlib)
         - .zarr (Zarr arrays, including OME-Zarr)
@@ -836,6 +1155,10 @@ def load_image(filepath, use_memmap=True, dims=None):
             "timestamps": reader.timestamps,
         }
         return data, meta
+
+    # --- ND2 PATH ---
+    if ext == ".nd2":
+        return load_nd2(filepath)
 
     # --- STANDARD IMAGE PATH (PNG, JPEG) ---
     if ext in (".png", ".jpg", ".jpeg"):

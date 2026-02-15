@@ -58,6 +58,7 @@ volume = reader.read(c=0, t=0, z=None)
 ### Loading a 3D Timelapse
 
 To easily load a 3D timelapse, you can use the `load_image` function. The returned proxy object behaves like a 5D numpy array.
+Supported inputs include `.ims`, `.czi`, `.nd2`, TIFF, and standard image formats.
 
 ```python
 import numpy as np
