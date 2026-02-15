@@ -2,20 +2,23 @@ import os
 import heapq
 import sys
 from collections import OrderedDict
+from datetime import datetime
 
 import numpy as np
 from qtpy import API_NAME
-from qtpy.QtCore import Qt, Signal
+from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QAction,
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -157,6 +160,16 @@ class ImageWindow(QMainWindow):
         self.t_idx = 0
         self.z_idx = 0
         self.c_idx = 0  # Active channel index for Single mode
+
+        # Timelapse playback state
+        self._playback_fps = 5.0
+        self._playback_timer = QTimer(self)
+        self._playback_timer.setSingleShot(True)
+        self._playback_timer.timeout.connect(self._advance_playback_frame)
+        realtime_fps = self._estimate_realtime_fps()
+        if realtime_fps is not None:
+            self._playback_fps = realtime_fps
+
         self._init_overlay()
 
         self._setup_controls()
@@ -221,6 +234,8 @@ class ImageWindow(QMainWindow):
     def closeEvent(self, event):
         manager.unregister(self)
         self.window_closing.emit(self)
+
+        self._stop_playback()
 
         if hasattr(self, "overlay") and self.overlay is not None:
             self.overlay.remove()
@@ -393,6 +408,7 @@ class ImageWindow(QMainWindow):
             self.renderer.data = new_data
 
         self._sync_overlay_spacing()
+        self._refresh_realtime_fps_ui()
 
         # Sync sliders to clamped indices without emitting callbacks.
         c_slider = getattr(self, "c_slider", None)
@@ -1202,6 +1218,9 @@ class ImageWindow(QMainWindow):
         self.c_label = None
         self.t_slider = None
         self.t_label = None
+        self.play_button = None
+        self.playback_fps_spin = None
+        self.playback_realtime_btn = None
         self.z_slider = None
         self.z_label = None
         self.chk_proj = None
@@ -1265,15 +1284,41 @@ class ImageWindow(QMainWindow):
         if self.T > 1:
             row = QHBoxLayout()
             row.addWidget(QLabel("Time"))
+
             self.t_slider = QSlider(Qt.Horizontal)
             self.t_slider.setRange(0, self.T - 1)
             self.t_slider.setValue(self.t_idx)
             self.t_slider.valueChanged.connect(self.on_time_change)
             row.addWidget(self.t_slider)
+
             self.t_label = QLabel(str(self.t_idx))
             self.t_label.setFixedWidth(30)
             self.t_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             row.addWidget(self.t_label)
+
+            self.play_button = QPushButton("Play")
+            self.play_button.setCheckable(True)
+            self.play_button.toggled.connect(self.on_play_toggled)
+            row.addWidget(self.play_button)
+
+            self.playback_fps_spin = QDoubleSpinBox()
+            self.playback_fps_spin.setRange(0.01, 120.0)
+            self.playback_fps_spin.setDecimals(2)
+            self.playback_fps_spin.setSingleStep(0.25)
+            self.playback_fps_spin.setValue(self._playback_fps)
+            self.playback_fps_spin.setSuffix(" fps")
+            self.playback_fps_spin.valueChanged.connect(
+                self.on_playback_fps_changed
+            )
+            row.addWidget(self.playback_fps_spin)
+
+            self.playback_realtime_btn = QPushButton("Realtime")
+            self.playback_realtime_btn.clicked.connect(
+                self.set_playback_realtime_fps
+            )
+            row.addWidget(self.playback_realtime_btn)
+            self._refresh_realtime_fps_ui()
+
             self.controls_layout.addLayout(row)
 
         # -- Z Slider --
@@ -1346,7 +1391,158 @@ class ImageWindow(QMainWindow):
         self.t_idx = val
         if hasattr(self, "t_label") and self.t_label is not None:
             self.t_label.setText(str(val))
+        if self._is_playing():
+            self._schedule_next_playback_step()
         self.update_view()
+
+    def on_play_toggled(self, checked):
+        if checked:
+            self._start_playback()
+        else:
+            self._stop_playback()
+
+    def on_playback_fps_changed(self, fps):
+        self._playback_fps = max(0.01, float(fps))
+        if self._is_playing():
+            self._schedule_next_playback_step()
+
+    def set_playback_realtime_fps(self):
+        realtime_fps = self._estimate_realtime_fps()
+        if realtime_fps is None:
+            return
+        self._playback_fps = realtime_fps
+        if self.playback_fps_spin is not None:
+            self.playback_fps_spin.setValue(realtime_fps)
+
+    def _refresh_realtime_fps_ui(self):
+        realtime_fps = self._estimate_realtime_fps()
+        if self.playback_realtime_btn is not None:
+            self.playback_realtime_btn.setEnabled(realtime_fps is not None)
+            if realtime_fps is None:
+                self.playback_realtime_btn.setToolTip(
+                    "Realtime FPS unavailable (missing/invalid timestamps)"
+                )
+            else:
+                self.playback_realtime_btn.setToolTip(
+                    f"Set to realtime ({realtime_fps:.3g} fps)"
+                )
+
+    def _is_playing(self):
+        return self.play_button is not None and self.play_button.isChecked()
+
+    def _start_playback(self):
+        if self.T <= 1:
+            if self.play_button is not None:
+                self.play_button.blockSignals(True)
+                self.play_button.setChecked(False)
+                self.play_button.blockSignals(False)
+            return
+        if self.play_button is not None:
+            self.play_button.setText("Pause")
+        self._schedule_next_playback_step()
+
+    def _stop_playback(self):
+        self._playback_timer.stop()
+        if self.play_button is not None:
+            self.play_button.blockSignals(True)
+            self.play_button.setChecked(False)
+            self.play_button.setText("Play")
+            self.play_button.blockSignals(False)
+
+    def _advance_playback_frame(self):
+        if not self._is_playing() or self.T <= 1:
+            return
+
+        next_idx = (self.t_idx + 1) % self.T
+        if self.t_slider is not None:
+            self.t_slider.setValue(next_idx)
+        else:
+            self.on_time_change(next_idx)
+
+        self._schedule_next_playback_step()
+
+    def _schedule_next_playback_step(self):
+        self._playback_timer.stop()
+        if not self._is_playing() or self.T <= 1:
+            return
+
+        delay_ms = int(1000.0 / max(0.01, self._playback_fps))
+        self._playback_timer.start(max(1, delay_ms))
+
+    def _estimate_realtime_fps(self):
+        timestamps = self._parsed_timestamps()
+        if len(timestamps) < 2:
+            return None
+
+        deltas = []
+        for i in range(len(timestamps) - 1):
+            t0 = timestamps[i]
+            t1 = timestamps[i + 1]
+            if t0 is None or t1 is None:
+                continue
+            try:
+                dt = float((t1 - t0).total_seconds())
+            except Exception:
+                continue
+            if dt > 0:
+                deltas.append(dt)
+
+        if not deltas:
+            return None
+
+        mean_dt = float(np.mean(deltas))
+        if mean_dt <= 0:
+            return None
+
+        return max(0.01, min(120.0, 1.0 / mean_dt))
+
+    def _parsed_timestamps(self):
+        timestamps = self.meta.get("timestamps", [])
+        if not isinstance(timestamps, (list, tuple)):
+            return []
+
+        parsed = []
+        for item in timestamps:
+            if item is None:
+                parsed.append(None)
+                continue
+            if isinstance(item, datetime):
+                parsed.append(item)
+                continue
+            if isinstance(item, np.datetime64):
+                try:
+                    iso = np.datetime_as_string(item, unit="us")
+                    parsed.append(
+                        datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                    )
+                except Exception:
+                    parsed.append(None)
+                continue
+            if isinstance(item, str):
+                txt = item.strip()
+                dt = None
+                for fmt in (
+                    "%Y-%m-%d %H:%M:%S.%f",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%dT%H:%M:%S.%f",
+                    "%Y-%m-%dT%H:%M:%S",
+                ):
+                    try:
+                        dt = datetime.strptime(txt, fmt)
+                        break
+                    except ValueError:
+                        continue
+                if dt is None:
+                    try:
+                        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+                    except ValueError:
+                        dt = None
+                parsed.append(dt)
+                continue
+
+            parsed.append(None)
+
+        return parsed
 
     def toggle_z_projection(self, checked):
         self.z_slider.setVisible(not checked)
