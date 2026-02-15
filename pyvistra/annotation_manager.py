@@ -1,13 +1,15 @@
 """
-AnnotationManager - Unified widget for managing ROI groups and mask layers.
+AnnotationManager - Unified widget for managing ROI groups, mask layers, and track layers.
 
 Replaces ROIManager + LabelManager with a single widget that manages:
 - ROI groups: named collections of ROIs with show/hide
 - Mask layers: named SparseLabels instances with their own visuals
+- Track layers: named TrackTable instances with time-aware track rendering
 """
 
 import json
 import os
+import csv
 
 import numpy as np
 from qtpy.QtCore import Qt
@@ -45,11 +47,12 @@ from .rois import (
     LineROI,
     RectangleROI,
 )
+from .tracks import TrackTable
 
 
 class AnnotationManager(QWidget):
     """
-    Manages ROI groups and mask layers across multiple ImageWindows.
+    Manages ROI groups, mask layers, and track layers across multiple ImageWindows.
 
     Uses hide/show pattern (singleton). Provides the same `active_window`
     and `refresh_list()` interface that GelAnalyzer depends on.
@@ -112,6 +115,10 @@ class AnnotationManager(QWidget):
         btn_add_mask = QPushButton("+ Mask Layer")
         btn_add_mask.clicked.connect(self._add_mask_layer)
         group_btn_layout.addWidget(btn_add_mask)
+
+        btn_add_track = QPushButton("+ Track Layer")
+        btn_add_track.clicked.connect(self._add_track_layer)
+        group_btn_layout.addWidget(btn_add_track)
 
         btn_delete_group = QPushButton("Delete")
         btn_delete_group.clicked.connect(self._delete_selected_group)
@@ -192,6 +199,7 @@ class AnnotationManager(QWidget):
         self.btn_load = QPushButton("Load")
         load_menu = QMenu(self)
         load_menu.addAction("Load ROIs (JSON)...", self.load_rois)
+        load_menu.addAction("Load Tracks (CSV/JSON)...", self.load_tracks)
         load_menu.addAction("Load Mask (Zarr)...", self.load_mask_zarr)
         load_menu.addAction("Load Mask (NPZ)...", self.load_mask_npz)
         load_menu.addSeparator()
@@ -313,6 +321,10 @@ class AnnotationManager(QWidget):
             window.mask_layer_added.connect(self._on_mask_layer_added)
         if hasattr(window, "mask_layer_removed"):
             window.mask_layer_removed.connect(self._on_mask_layer_removed)
+        if hasattr(window, "track_layer_added"):
+            window.track_layer_added.connect(self._on_track_layer_added)
+        if hasattr(window, "track_layer_removed"):
+            window.track_layer_removed.connect(self._on_track_layer_removed)
 
         self._connected_windows.add(window)
 
@@ -334,6 +346,12 @@ class AnnotationManager(QWidget):
             if hasattr(window, "mask_layer_removed"):
                 window.mask_layer_removed.disconnect(
                     self._on_mask_layer_removed
+                )
+            if hasattr(window, "track_layer_added"):
+                window.track_layer_added.disconnect(self._on_track_layer_added)
+            if hasattr(window, "track_layer_removed"):
+                window.track_layer_removed.disconnect(
+                    self._on_track_layer_removed
                 )
         except (TypeError, RuntimeError):
             pass
@@ -383,6 +401,16 @@ class AnnotationManager(QWidget):
         self.refresh_list()
 
     def _on_mask_layer_removed(self, name):
+        if self._is_shutting_down:
+            return
+        self.refresh_list()
+
+    def _on_track_layer_added(self, name):
+        if self._is_shutting_down:
+            return
+        self.refresh_list()
+
+    def _on_track_layer_removed(self, name):
         if self._is_shutting_down:
             return
         self.refresh_list()
@@ -472,12 +500,15 @@ class AnnotationManager(QWidget):
         w = self.active_window
         roi_groups = w.get_roi_groups()
         mask_groups = set(w._mask_layers.keys())
+        track_groups = set(w._track_layers.keys())
 
         if self._selected_group is not None:
             gtype, gname = self._selected_group
             if gtype == "roi" and gname in roi_groups:
                 return
             if gtype == "mask" and gname in mask_groups:
+                return
+            if gtype == "track" and gname in track_groups:
                 return
 
         preferred_roi = getattr(w, "_active_roi_group", None)
@@ -491,6 +522,10 @@ class AnnotationManager(QWidget):
 
         if mask_groups:
             self._selected_group = ("mask", next(iter(mask_groups)))
+            return
+
+        if track_groups:
+            self._selected_group = ("track", next(iter(track_groups)))
             return
 
         self._selected_group = None
@@ -543,6 +578,25 @@ class AnnotationManager(QWidget):
             if self._selected_group == ("mask", name):
                 self.group_tree.setCurrentItem(item)
 
+        # Track layers
+        for name, entry in w._track_layers.items():
+            tracks = entry["tracks"]
+            n_tracks = tracks.n_tracks if tracks is not None else 0
+            visible = entry["visible"]
+            item = QTreeWidgetItem(
+                self.group_tree,
+                [f"[track] {name} ({n_tracks} tracks)"],
+            )
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.Checked if visible else Qt.Unchecked)
+            item.setData(0, Qt.UserRole, ("track", name))
+            if name == w._active_track_layer:
+                font = item.font(0)
+                font.setBold(True)
+                item.setFont(0, font)
+            if self._selected_group == ("track", name):
+                self.group_tree.setCurrentItem(item)
+
         self.group_tree.blockSignals(False)
 
     def _refresh_items(self):
@@ -578,6 +632,22 @@ class AnnotationManager(QWidget):
                             )
                             item.setBackground(qcolor)
                         self.item_list.addItem(item)
+        elif gtype == "track":
+            if gname in w._track_layers:
+                tracks = w._track_layers[gname]["tracks"]
+                if tracks is not None:
+                    for track_id in tracks.track_ids:
+                        track = tracks.get_track(int(track_id))
+                        if track is None:
+                            continue
+                        n_points = len(track["t"])
+                        t0 = int(track["t"][0]) if n_points else 0
+                        t1 = int(track["t"][-1]) if n_points else 0
+                        item = QListWidgetItem(
+                            f"Track {int(track_id)} ({n_points} pts, t={t0}-{t1})"
+                        )
+                        item.setData(Qt.UserRole, ("track", int(track_id)))
+                        self.item_list.addItem(item)
 
     # ---- Group Tree Interactions ----
 
@@ -596,6 +666,8 @@ class AnnotationManager(QWidget):
             self.active_window._active_roi_group = gname
         elif gtype == "mask":
             self.active_window.set_active_mask_layer(gname)
+        elif gtype == "track":
+            self.active_window.set_active_track_layer(gname)
 
         # Show/hide label controls
         is_mask = gtype == "mask"
@@ -631,6 +703,8 @@ class AnnotationManager(QWidget):
             self.active_window.set_group_visible(gname, visible)
         elif gtype == "mask":
             self.active_window.set_mask_layer_visible(gname, visible)
+        elif gtype == "track":
+            self.active_window.set_track_layer_visible(gname, visible)
 
     def _add_roi_group(self):
         if not self.active_window:
@@ -657,6 +731,22 @@ class AnnotationManager(QWidget):
             self.active_window.add_mask_layer(name)
             self.refresh_list()
 
+    def _add_track_layer(self):
+        if not self.active_window:
+            return
+        existing = set(self.active_window._track_layers.keys())
+        idx = 1
+        while f"Tracks-{idx}" in existing:
+            idx += 1
+        name = f"Tracks-{idx}"
+
+        name, ok = QInputDialog.getText(
+            self, "New Track Layer", "Layer name:", text=name
+        )
+        if ok and name:
+            self.active_window.add_track_layer(name)
+            self.refresh_list()
+
     def _delete_selected_group(self):
         if not self.active_window or not self._selected_group:
             return
@@ -666,6 +756,8 @@ class AnnotationManager(QWidget):
             self.active_window.remove_roi_group(gname)
         elif gtype == "mask":
             self.active_window.remove_mask_layer(gname)
+        elif gtype == "track":
+            self.active_window.remove_track_layer(gname)
 
         self._selected_group = None
         self.refresh_list()
@@ -730,6 +822,10 @@ class AnnotationManager(QWidget):
                         if visual:
                             visual.refresh()
                         self.active_window.label_changed.emit(labels)
+        elif item_type == "track":
+            if self._selected_group and self._selected_group[0] == "track":
+                _, gname = self._selected_group
+                self.active_window.remove_track_from_layer(gname, value)
 
         self.refresh_list()
         self.active_window.canvas.update()
@@ -989,6 +1085,137 @@ class AnnotationManager(QWidget):
             self._apply_loaded_mask(labels)
         except Exception as e:
             QMessageBox.critical(self, "Load Failed", str(e))
+
+    def load_tracks(self):
+        """Load tracks from CSV/JSON and apply to selected or new track layer."""
+        if not self.active_window:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Tracks",
+            self._get_default_dir(),
+            "Track Tables (*.csv *.json);;CSV Files (*.csv);;JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                tracks = self._load_tracks_from_csv(path)
+            elif path.lower().endswith(".json"):
+                tracks = self._load_tracks_from_json(path)
+            else:
+                raise ValueError(
+                    "Unsupported track format. Use .csv or .json."
+                )
+            self._apply_loaded_tracks(tracks)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Failed", str(e))
+
+    def _load_tracks_from_csv(self, path):
+        required = {"track_id", "t", "x", "y"}
+        track_id = []
+        t = []
+        x = []
+        y = []
+        z = []
+        has_z = False
+
+        with open(path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None:
+                raise ValueError("CSV has no header row")
+            missing = required - set(reader.fieldnames)
+            if missing:
+                raise ValueError(
+                    f"Missing required columns: {', '.join(sorted(missing))}"
+                )
+            has_z = "z" in reader.fieldnames
+            for row in reader:
+                track_id.append(int(row["track_id"]))
+                t.append(int(float(row["t"])))
+                x.append(float(row["x"]))
+                y.append(float(row["y"]))
+                if has_z:
+                    z_val = row.get("z", "")
+                    z.append(float(z_val) if z_val != "" else 0.0)
+
+        return TrackTable.from_arrays(
+            track_id=track_id,
+            t=t,
+            x=x,
+            y=y,
+            z=z if has_z else None,
+        )
+
+    def _load_tracks_from_json(self, path):
+        with open(path, "r") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            rows = data.get("tracks", data.get("rows", None))
+            if rows is None:
+                # Accept dict-of-columns style
+                if {"track_id", "t", "x", "y"}.issubset(data.keys()):
+                    return TrackTable.from_arrays(
+                        track_id=data["track_id"],
+                        t=data["t"],
+                        x=data["x"],
+                        y=data["y"],
+                        z=data.get("z"),
+                    )
+                raise ValueError(
+                    "JSON must be a list of rows or contain a 'tracks'/'rows' list"
+                )
+        elif isinstance(data, list):
+            rows = data
+        else:
+            raise ValueError("Invalid JSON track format")
+
+        if not rows:
+            return TrackTable.from_arrays(track_id=[], t=[], x=[], y=[])
+
+        required = {"track_id", "t", "x", "y"}
+        for key in required:
+            if key not in rows[0]:
+                raise ValueError(
+                    f"Missing required key '{key}' in JSON row records"
+                )
+
+        track_id = [int(r["track_id"]) for r in rows]
+        t = [int(float(r["t"])) for r in rows]
+        x = [float(r["x"]) for r in rows]
+        y = [float(r["y"]) for r in rows]
+        use_z = any("z" in r for r in rows)
+        z = [float(r.get("z", 0.0)) for r in rows] if use_z else None
+
+        return TrackTable.from_arrays(
+            track_id=track_id,
+            t=t,
+            x=x,
+            y=y,
+            z=z,
+        )
+
+    def _apply_loaded_tracks(self, tracks):
+        """Apply loaded tracks to selected track layer or create a new layer."""
+        w = self.active_window
+        if self._selected_group and self._selected_group[0] == "track":
+            _, gname = self._selected_group
+            if gname in w._track_layers:
+                w.set_track_layer_tracks(gname, tracks)
+                self.refresh_list()
+                w.canvas.update()
+                return
+
+        existing = set(w._track_layers.keys())
+        idx = 1
+        while f"Tracks-{idx}" in existing:
+            idx += 1
+        name = f"Tracks-{idx}"
+        w.add_track_layer(name, tracks=tracks)
+        self._selected_group = ("track", name)
+        self.refresh_list()
+        w.canvas.update()
 
     def _load_mask_from_path(self, path):
         try:
