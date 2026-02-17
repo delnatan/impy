@@ -22,14 +22,14 @@ class ScaleTimestampOverlay:
     """Draws a scale bar + timestamp indicator in a SceneView."""
 
     DEFAULT_CONFIG = {
-        "show_scale_bar": True,
+        "show_scale_bar": False,
         "scale_bar_length": 10.0,
         "scale_bar_unit": "um",
         "scale_anchor": "bottom-left",
         "scale_offset_x": 0.04,
         "scale_offset_y": 0.06,
         "scale_color": (1.0, 1.0, 1.0, 0.95),
-        "show_timestamp": True,
+        "show_timestamp": False,
         "timestamp_mode": "elapsed",  # elapsed | absolute | both
         "frame_interval_value": 1.0,
         "frame_interval_unit": "s",
@@ -126,7 +126,7 @@ class ScaleTimestampOverlay:
                 pass
 
     def _update_scale_bar(self, rect):
-        if not self.config.get("show_scale_bar", True):
+        if not self.config.get("show_scale_bar", False):
             self._line.visible = False
             self._scale_text.visible = False
             return
@@ -165,7 +165,7 @@ class ScaleTimestampOverlay:
         self._scale_text.visible = True
 
     def _update_timestamp(self, rect):
-        if not self.config.get("show_timestamp", True):
+        if not self.config.get("show_timestamp", False):
             self._time_text.visible = False
             return
 

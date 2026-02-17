@@ -25,7 +25,7 @@ class OverlaySettingsDialog(QDialog):
         layout.addLayout(form)
 
         self.chk_scale = QCheckBox()
-        self.chk_scale.setChecked(cfg.get("show_scale_bar", True))
+        self.chk_scale.setChecked(cfg.get("show_scale_bar", False))
         form.addRow("Show Scale Bar", self.chk_scale)
 
         self.scale_length = QDoubleSpinBox()
@@ -71,7 +71,7 @@ class OverlaySettingsDialog(QDialog):
         form.addRow("Scale Color", self.scale_color_btn)
 
         self.chk_time = QCheckBox()
-        self.chk_time.setChecked(cfg.get("show_timestamp", True))
+        self.chk_time.setChecked(cfg.get("show_timestamp", False))
         form.addRow("Show Timestamp", self.chk_time)
 
         self.time_mode = QComboBox()

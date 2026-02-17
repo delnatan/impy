@@ -1280,8 +1280,9 @@ class ImageWindow(QMainWindow):
             self.controls_layout.addWidget(self.channel_row_widget)
             self.channel_row_widget.setVisible(False)  # Default is Composite
 
-        # -- Time Slider --
-        if self.T > 1:
+        # -- Time Controls --
+        has_multiple_timepoints = self.T > 1
+        if has_multiple_timepoints:
             row = QHBoxLayout()
             row.addWidget(QLabel("Time"))
 
