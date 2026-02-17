@@ -211,7 +211,7 @@ class ImageOutputSelector(QWidget):
         # Save based on format
         if ext == ".tif":
             scale = metadata.get("scale", (1.0, 1.0, 1.0))
-            save_tiff(filepath, data, scale=scale)
+            save_tiff(filepath, data, scale=scale, metadata=metadata)
         elif ext == ".psf.zarr":
             save_psf(filepath, data, metadata)
         elif ext == ".ims":

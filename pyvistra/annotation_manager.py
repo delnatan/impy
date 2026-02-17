@@ -1119,6 +1119,16 @@ def get_annotation_manager():
     return _annotation_manager_instance
 
 
+def show_annotation_manager(window=None):
+    """Show AnnotationManager and optionally set the active window."""
+    mgr = get_annotation_manager()
+    mgr.show()
+    mgr.raise_()
+    if window is not None:
+        mgr.set_active_window(window)
+    return mgr
+
+
 def annotation_manager_exists():
     """Check if AnnotationManager singleton has been created."""
     return _annotation_manager_instance is not None

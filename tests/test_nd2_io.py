@@ -1,6 +1,12 @@
 import numpy as np
+import tifffile
 
-from pyvistra.io import _extract_nd2_channels, _normalize_nd2_to_5d
+from pyvistra.io import (
+    _extract_nd2_channels,
+    _normalize_nd2_to_5d,
+    load_image,
+    save_tiff,
+)
 
 
 def test_normalize_nd2_to_5d_reorders_tczyx():
@@ -45,3 +51,34 @@ def test_extract_nd2_channels_maps_common_fields():
     assert channels[0]["excitation_wavelength"] == 488.0
     assert channels[0]["exposure_time"] == 0.025
     assert channels[1]["name"] == "Channel 1"
+
+
+def test_save_tiff_writes_imagej_frame_interval_from_timestamp_seconds(
+    tmp_path,
+):
+    data = np.zeros((4, 1, 1, 8, 8), dtype=np.uint16)
+    meta = {"timestamp_seconds": [0.0, 2.0, 4.0, 6.0]}
+    out = tmp_path / "timelapse.tif"
+
+    save_tiff(str(out), data, metadata=meta)
+
+    with tifffile.TiffFile(str(out)) as tif:
+        ij = tif.imagej_metadata or {}
+
+    assert ij.get("finterval") == 2.0
+    assert ij.get("tunit") == "sec"
+    assert ij.get("fps") == 0.5
+
+
+def test_load_tiff_reads_imagej_frame_interval_seconds(tmp_path):
+    data = np.zeros((3, 1, 1, 8, 8), dtype=np.uint16)
+    out = tmp_path / "timelapse_roundtrip.tif"
+
+    save_tiff(
+        str(out),
+        data,
+        metadata={"timestamp_seconds": [0.0, 1.5, 3.0]},
+    )
+    _, meta = load_image(str(out), use_memmap=False)
+
+    assert meta["frame_interval_s"] == 1.5

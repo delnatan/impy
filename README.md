@@ -28,6 +28,16 @@ pyvistra
 python -m pyvistra
 ```
 
+## Documentation (MkDocs)
+
+Project documentation is in the `docs/` folder with configuration in `mkdocs.yml`.
+
+```bash
+mkdocs serve
+```
+
+Then open `http://127.0.0.1:8000`.
+
 ## Library Usage
 
 You can use `pyvistra` as a library to read and process images programmatically.

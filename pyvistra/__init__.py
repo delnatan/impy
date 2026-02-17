@@ -6,7 +6,11 @@ Based on vispy and PyQt (via qtpy)
 
 from ._version import __version__
 
-from .annotation_manager import AnnotationManager, get_annotation_manager
+from .annotation_manager import (
+    AnnotationManager,
+    get_annotation_manager,
+    show_annotation_manager,
+)
 from .colors import (
     DEFAULT_LABEL_PALETTE,
     SMART_LABEL_PALETTE,
@@ -86,6 +90,7 @@ __all__ = [
     # managers
     "AnnotationManager",
     "get_annotation_manager",
+    "show_annotation_manager",
     "WindowManager",
     "manager",
     # gel analysis

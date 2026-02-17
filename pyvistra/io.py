@@ -529,7 +529,9 @@ class ImageBuffer(RefCountMixin):
     def save_as(self, filepath):
         """Export buffer to OME-TIFF."""
         scale = self.metadata.get("scale", (1.0, 1.0, 1.0))
-        save_tiff(filepath, self._store[:], scale=scale)
+        save_tiff(
+            filepath, self._store[:], scale=scale, metadata=self.metadata
+        )
 
     def close(self):
         """Close and delete the temporary buffer file."""
@@ -1196,8 +1198,11 @@ def load_image(filepath, use_memmap=True, dims=None):
             # Z-spacing (ImageJ metadata)
             ij_meta = tif.imagej_metadata
             sz = 1.0
+            frame_interval_s = None
             if ij_meta and "spacing" in ij_meta:
                 sz = ij_meta["spacing"]
+            if ij_meta:
+                frame_interval_s = _parse_imagej_frame_interval_seconds(ij_meta)
 
             # XY-spacing (Tags)
             # Resolution is usually (numerator, denominator) or float
@@ -1241,6 +1246,7 @@ def load_image(filepath, use_memmap=True, dims=None):
 
     except Exception as e:
         print(f"Warning: Could not read TIFF metadata: {e}")
+        frame_interval_s = None
 
     # Use normalize_to_5d with RGB detection and optional dims override
     final_img = normalize_to_5d(img, dims=dims, rgb=detected_rgb).array
@@ -1254,11 +1260,102 @@ def load_image(filepath, use_memmap=True, dims=None):
         "raw_shape": img.shape,
         "scale": scale,
         "is_rgb": detected_rgb,
+        "frame_interval_s": frame_interval_s,
     }
 
 
+def _coerce_float_or_none(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_imagej_frame_interval_seconds(imagej_metadata):
+    """Parse ImageJ frame interval metadata and return seconds."""
+    finterval = _coerce_float_or_none(imagej_metadata.get("finterval"))
+    tunit = str(imagej_metadata.get("tunit", "sec")).lower()
+    if finterval is not None and finterval > 0:
+        if tunit in ("sec", "s", "second", "seconds"):
+            return finterval
+        if tunit in ("msec", "ms", "millisecond", "milliseconds"):
+            return finterval / 1000.0
+        if tunit in ("usec", "us", "microsecond", "microseconds"):
+            return finterval / 1_000_000.0
+        if tunit in ("min", "minute", "minutes"):
+            return finterval * 60.0
+        if tunit in ("hour", "hours", "h"):
+            return finterval * 3600.0
+        return finterval
+
+    fps = _coerce_float_or_none(imagej_metadata.get("fps"))
+    if fps is not None and fps > 0:
+        return 1.0 / fps
+    return None
+
+
+def _extract_frame_interval_seconds(metadata, t_size):
+    """Infer a single frame interval (seconds) from metadata."""
+    if not metadata or t_size < 2:
+        return None
+
+    for key in ("frame_interval_s", "frame_interval_seconds"):
+        interval = _coerce_float_or_none(metadata.get(key))
+        if interval is not None and interval > 0:
+            return interval
+
+    timestamp_seconds = metadata.get("timestamp_seconds")
+    if isinstance(timestamp_seconds, (list, tuple, np.ndarray)):
+        seconds = [_coerce_float_or_none(v) for v in timestamp_seconds]
+        diffs = [
+            b - a
+            for a, b in zip(seconds[:-1], seconds[1:])
+            if a is not None and b is not None and b > a
+        ]
+        if diffs:
+            return float(np.median(diffs))
+
+    timestamps = metadata.get("timestamps")
+    if isinstance(timestamps, (list, tuple)) and len(timestamps) >= 2:
+        rel_seconds = []
+        t0 = None
+        for ts in timestamps:
+            if ts is None:
+                rel_seconds.append(None)
+                continue
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except ValueError:
+                    rel_seconds.append(None)
+                    continue
+            if not hasattr(ts, "timestamp"):
+                rel_seconds.append(None)
+                continue
+            if t0 is None:
+                t0 = ts
+            rel_seconds.append((ts - t0).total_seconds())
+
+        diffs = [
+            b - a
+            for a, b in zip(rel_seconds[:-1], rel_seconds[1:])
+            if a is not None and b is not None and b > a
+        ]
+        if diffs:
+            return float(np.median(diffs))
+
+    return None
+
+
 def save_tiff(
-    filepath, data, scale=(1.0, 1.0, 1.0), axes="TZCYX", input_axes=None
+    filepath,
+    data,
+    scale=(1.0, 1.0, 1.0),
+    axes="TZCYX",
+    input_axes=None,
+    metadata=None,
 ):
     """
     Saves a 5D array to a TIFF file with metadata.
@@ -1271,6 +1368,10 @@ def save_tiff(
         input_axes (str): Optional axes string describing input data order (e.g., "YX",
                           "ZYX", "CZYX"). When provided, data is normalized to 5D before
                           saving. Case-insensitive.
+        metadata (dict): Optional acquisition metadata. If present, this can include
+                         time information (for example ``timestamp_seconds``,
+                         ``timestamps``, or ``frame_interval_s``) which will be written
+                         using ImageJ's ``finterval``/``fps`` fields.
 
     Examples:
         # Save a 2D image
@@ -1303,14 +1404,22 @@ def save_tiff(
     rx = 1.0 / sx if sx > 0 else 1.0
     ry = 1.0 / sy if sy > 0 else 1.0
 
-    metadata = {
+    ij_metadata = {
         "axes": axes,
         "spacing": sz,
         "unit": "um",
     }
+    frame_interval_s = _extract_frame_interval_seconds(
+        metadata or {}, image.shape[0]
+    )
+    if frame_interval_s is not None and frame_interval_s > 0:
+        # ImageJ convention for constant frame interval in TIFF metadata.
+        ij_metadata["finterval"] = frame_interval_s
+        ij_metadata["tunit"] = "sec"
+        ij_metadata["fps"] = 1.0 / frame_interval_s
 
     tifffile.imwrite(
-        filepath, image, imagej=True, resolution=(rx, ry), metadata=metadata
+        filepath, image, imagej=True, resolution=(rx, ry), metadata=ij_metadata
     )
 
 

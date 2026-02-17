@@ -1,0 +1,22 @@
+site_name: pyvistra
+site_description: Interactive image IO, visualization, and annotation workflows for microscopy data
+
+repo_name: pyvistra
+
+theme:
+  name: mkdocs
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Interactive Python: interactive-python.md
+  - Image IO and Conversion: io-and-conversion.md
+  - Annotations and Labels: annotations-and-labels.md
+  - GUI Scope: gui-scope.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - tables
+  - fenced_code

@@ -529,7 +529,7 @@ class ImageWindow(QMainWindow):
         scale = self.meta.get("scale", (1.0, 1.0, 1.0))
 
         if ext in (".tif", ".tiff"):
-            save_tiff(filepath, self.img_data, scale=scale)
+            save_tiff(filepath, self.img_data, scale=scale, metadata=self.meta)
             return
 
         if ext == ".ims":
@@ -1612,6 +1612,12 @@ class ImageWindow(QMainWindow):
         if dlg.exec_():
             self.overlay.set_config(dlg.get_config())
             self.canvas.update()
+
+    def show_annotation_manager(self):
+        """Open AnnotationManager focused on this window."""
+        from .annotation_manager import show_annotation_manager
+
+        return show_annotation_manager(self)
 
     def _map_event_to_image(self, event):
         tr = self.canvas.scene.node_transform(self.renderer.layers[0])
