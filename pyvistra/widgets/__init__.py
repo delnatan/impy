@@ -28,6 +28,7 @@ from .psf_dialog import PSFComputeDialog
 from .axes_dialog import AxesDialog
 from .line_profile import LineProfileDialog, get_line_profile_dialog, line_profile_dialog_exists
 from .denoise_dialog import Denoise2DTimelapseDialog
+from .z_projection_dialog import ZProjectionDialog
 from .processing_helper import BufferProcessingRunner
 from .overlay_settings import OverlaySettingsDialog
 
@@ -55,6 +56,7 @@ __all__ = [
     "PSFComputeDialog",
     "AxesDialog",
     "Denoise2DTimelapseDialog",
+    "ZProjectionDialog",
     "OverlaySettingsDialog",
     "BufferProcessingRunner",
     "LineProfileDialog",

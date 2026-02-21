@@ -25,9 +25,11 @@ from .io import (
     ImageBuffer,
     Imaris5DProxy,
     Numpy5DProxy,
+    build_z_projection_metadata,
     load_image,
     load_psf,
     load_sparse_labels,
+    project_z_max,
     normalize_to_5d,
     save_imaris,
     save_psf,
@@ -46,6 +48,7 @@ from .widgets import (
     Denoise2DTimelapseDialog,
     ImageOutputSelector,
     PSFComputeDialog,
+    ZProjectionDialog,
 )
 
 __all__ = [
@@ -59,6 +62,8 @@ __all__ = [
     "save_psf",
     "save_sparse_labels",
     "normalize_to_5d",
+    "project_z_max",
+    "build_z_projection_metadata",
     "Imaris5DProxy",
     "Numpy5DProxy",
     "CZI5DProxy",
@@ -72,6 +77,7 @@ __all__ = [
     "ImageOutputSelector",
     "PSFComputeDialog",
     "Denoise2DTimelapseDialog",
+    "ZProjectionDialog",
     # rois
     "ROI",
     "RectangleROI",

@@ -50,6 +50,7 @@ from .widgets import (
     MetadataDialog,
     OverlaySettingsDialog,
     TransformDialog,
+    ZProjectionDialog,
 )
 
 try:
@@ -179,6 +180,7 @@ class ImageWindow(QMainWindow):
         self.channel_panel = None
         self.transform_dialog = None
         self.denoise_dialog = None
+        self.z_projection_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
 
@@ -499,6 +501,10 @@ class ImageWindow(QMainWindow):
         denoise_action = QAction("Denoise 2D Timelapse...", self)
         denoise_action.triggered.connect(self.show_denoise_dialog)
         image_menu.addAction(denoise_action)
+
+        zproj_action = QAction("Z Projection...", self)
+        zproj_action.triggered.connect(self.show_z_projection_dialog)
+        image_menu.addAction(zproj_action)
 
         image_menu.addSeparator()
 
@@ -1122,6 +1128,12 @@ class ImageWindow(QMainWindow):
             )
         self.denoise_dialog.show()
         self.denoise_dialog.raise_()
+
+    def show_z_projection_dialog(self):
+        if self.z_projection_dialog is None:
+            self.z_projection_dialog = ZProjectionDialog(self, parent=self)
+        self.z_projection_dialog.show()
+        self.z_projection_dialog.raise_()
 
     def show_line_profile(self):
         """Show the line profile dialog."""

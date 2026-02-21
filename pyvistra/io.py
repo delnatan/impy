@@ -620,6 +620,224 @@ def apply_transform(
     return buffer
 
 
+def _parse_timestamp_value(value):
+    """Parse assorted timestamp representations into datetime or None."""
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, np.datetime64):
+        try:
+            iso = np.datetime_as_string(value, unit="us")
+            return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    if isinstance(value, str):
+        txt = value.strip()
+        if not txt:
+            return None
+
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+        ):
+            try:
+                return datetime.strptime(txt, fmt)
+            except ValueError:
+                continue
+
+        try:
+            return datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    return None
+
+
+def _normalize_timestamps_for_t(timestamps, t_size):
+    """Return a list of length t_size with datetime/None entries."""
+    out = [None] * max(0, int(t_size))
+    if not isinstance(timestamps, (list, tuple, np.ndarray)):
+        return out
+
+    for i, ts in enumerate(list(timestamps)[:t_size]):
+        out[i] = _parse_timestamp_value(ts)
+    return out
+
+
+def _normalize_time_seconds_for_t(timestamp_seconds, t_size):
+    """Normalize timestamp_seconds to length t_size, preserving None gaps."""
+    if not isinstance(timestamp_seconds, (list, tuple, np.ndarray)):
+        return None
+
+    out = []
+    for item in list(timestamp_seconds)[:t_size]:
+        if item is None:
+            out.append(None)
+            continue
+        try:
+            out.append(float(item))
+        except (TypeError, ValueError):
+            out.append(None)
+
+    if len(out) < t_size:
+        out.extend([None] * (t_size - len(out)))
+    return out
+
+
+def _coerce_scale_zyx(scale):
+    """Return a numeric (vz, vy, vx) tuple with safe defaults."""
+    if isinstance(scale, (list, tuple, np.ndarray)) and len(scale) >= 3:
+        try:
+            return (float(scale[0]), float(scale[1]), float(scale[2]))
+        except (TypeError, ValueError):
+            pass
+    return (1.0, 1.0, 1.0)
+
+
+def _normalize_z_range(z_range, z_size):
+    """Validate and normalize a Z range to inclusive integer bounds."""
+    if z_size <= 0:
+        raise ValueError("Z size must be positive")
+
+    if z_range is None:
+        return (0, z_size - 1)
+
+    if not isinstance(z_range, (list, tuple, np.ndarray)) or len(z_range) != 2:
+        raise ValueError("z_range must be a 2-item tuple/list (z_start, z_end)")
+
+    z0 = int(z_range[0])
+    z1 = int(z_range[1])
+
+    if z0 > z1:
+        z0, z1 = z1, z0
+
+    if z0 < 0 or z1 >= z_size:
+        raise ValueError(
+            f"z_range ({z0}, {z1}) is out of bounds for Z size {z_size}"
+        )
+
+    return (z0, z1)
+
+
+def build_z_projection_metadata(
+    metadata,
+    source_shape,
+    z_range=None,
+    method="max",
+):
+    """
+    Build output metadata for a Z projection while preserving time metadata.
+
+    Args:
+        metadata: Source metadata dict.
+        source_shape: Source shape in (T, Z, C, Y, X).
+        z_range: Inclusive (z_start, z_end). If None, uses full Z range.
+        method: Projection method name, stored in metadata for provenance.
+    """
+    if len(source_shape) != 5:
+        raise ValueError("source_shape must be 5D (T, Z, C, Y, X)")
+
+    T, Z, C, Y, X = [int(v) for v in source_shape]
+    z0, z1 = _normalize_z_range(z_range, Z)
+    z_depth = z1 - z0 + 1
+
+    out_meta = dict(metadata or {})
+    vz, vy, vx = _coerce_scale_zyx(out_meta.get("scale", (1.0, 1.0, 1.0)))
+
+    # Keep XY spacing, encode the projected slab thickness in singleton Z scale.
+    out_meta["scale"] = (vz * z_depth, vy, vx)
+    out_meta["shape"] = (T, 1, C, Y, X)
+    out_meta["timestamps"] = _normalize_timestamps_for_t(
+        out_meta.get("timestamps"), T
+    )
+
+    timestamp_seconds = _normalize_time_seconds_for_t(
+        out_meta.get("timestamp_seconds"), T
+    )
+    if timestamp_seconds is not None:
+        out_meta["timestamp_seconds"] = timestamp_seconds
+
+    out_meta["projection"] = {
+        "axis": "z",
+        "method": str(method).lower(),
+        "z_range": [z0, z1],
+    }
+
+    base_name = str(out_meta.get("filename", out_meta.get("name", "Image")))
+    suffix = f"_zproj_z{z0}-{z1}"
+    out_meta["filename"] = f"{base_name}{suffix}"
+    out_meta["name"] = f"{base_name}{suffix}"
+
+    return out_meta
+
+
+def project_z_max(source, z_range=None, metadata=None, progress_cb=None):
+    """
+    Max-project source data along Z into a singleton-Z ImageBuffer.
+
+    Args:
+        source: 5D array-like in (T, Z, C, Y, X) order.
+        z_range: Optional inclusive (z_start, z_end). Defaults to full Z.
+        metadata: Optional metadata override. Defaults to source.metadata if present.
+        progress_cb: Optional callback(progress_fraction).
+
+    Returns:
+        ImageBuffer with shape (T, 1, C, Y, X) and projection-aware metadata.
+    """
+    if not hasattr(source, "shape") or len(source.shape) != 5:
+        raise ValueError("source must be 5D (T, Z, C, Y, X)")
+
+    T, Z, C, Y, X = [int(v) for v in source.shape]
+    z0, z1 = _normalize_z_range(z_range, Z)
+
+    source_meta = metadata
+    if source_meta is None:
+        source_meta = getattr(source, "metadata", {})
+
+    out_meta = build_z_projection_metadata(
+        metadata=source_meta,
+        source_shape=(T, Z, C, Y, X),
+        z_range=(z0, z1),
+        method="max",
+    )
+
+    out_dtype = getattr(source, "dtype", None)
+    if out_dtype is None:
+        out_dtype = np.asarray(source[0, z0, 0, :, :]).dtype
+
+    out = ImageBuffer(
+        shape=(T, 1, C, Y, X),
+        dtype=np.dtype(out_dtype),
+        metadata=out_meta,
+    )
+
+    total = T * C
+    done = 0
+    if total == 0:
+        return out
+
+    for t in range(T):
+        for c in range(C):
+            stack = np.asarray(source[t, z0 : z1 + 1, c, :, :])
+            if stack.ndim == 2:
+                proj = stack
+            else:
+                proj = np.max(stack, axis=0)
+
+            out[t, 0, c, :, :] = np.asarray(proj, dtype=out.dtype)
+            done += 1
+            if progress_cb is not None:
+                progress_cb(done / total)
+
+    return out
+
+
 def normalize_to_5d(data, dims=None, rgb=None):
     """
     Normalizes a numpy array to (T, Z, C, Y, X) format.
