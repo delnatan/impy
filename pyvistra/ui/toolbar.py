@@ -18,12 +18,12 @@ from qtpy.QtWidgets import (
 )
 from vispy import app
 
-from ._version import get_version
+from .._version import get_version
 from .annotation_manager import (
     annotation_manager_exists,
     get_annotation_manager,
 )
-from .console import console_exists, get_console
+from ..apps.console import console_exists, get_console
 from .manager import manager
 
 
@@ -221,7 +221,7 @@ class Toolbar(QMainWindow):
 
     def _load_tool_icon(self, name, fallback_icon):
         """Load custom toolbar icon if available, otherwise use fallback."""
-        icon_dir = os.path.join(os.path.dirname(__file__), "data", "icons")
+        icon_dir = os.path.join(os.path.dirname(__file__), "..", "_resources", "icons")
         for ext in ("svg", "png"):
             path = os.path.join(icon_dir, f"{name}.{ext}")
             if os.path.exists(path):
@@ -255,7 +255,7 @@ class Toolbar(QMainWindow):
 
     def _show_psf_dialog(self):
         """Show the PSF computation dialog."""
-        from .widgets import PSFComputeDialog
+        from ..widgets import PSFComputeDialog
 
         if self._psf_dialog is None:
             self._psf_dialog = PSFComputeDialog(parent=self)
@@ -317,7 +317,7 @@ class Toolbar(QMainWindow):
 
         if len(image_files) > 1:
             # Multiple files -> TiledViewer
-            from .tiled_viewer import TiledViewer
+            from ..viewers import TiledViewer
 
             viewer = TiledViewer(image_files)
             viewer.show()
@@ -341,7 +341,7 @@ class Toolbar(QMainWindow):
                 pass
 
         # Signal Line Profile dialog to stop processing updates
-        from .widgets import (
+        from ..widgets import (
             get_line_profile_dialog,
             line_profile_dialog_exists,
         )
@@ -376,7 +376,7 @@ class Toolbar(QMainWindow):
         super().closeEvent(event)
 
     def spawn_viewer(self, filepath):
-        from .ui import ImageWindow
+        from .window import ImageWindow
 
         try:
             viewer = ImageWindow(filepath)

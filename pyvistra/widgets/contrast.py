@@ -175,7 +175,7 @@ class ContrastDialog(QDialog):
             data_max = self.hist_widget.data_max
             configure_spinbox_for_range(self.min_spin, data_min, data_max)
             configure_spinbox_for_range(self.max_spin, data_min, data_max)
-            dtype = getattr(self.viewer.img_data, "dtype", plane.dtype)
+            dtype = getattr(getattr(self.viewer, "img_data", None), "dtype", plane.dtype)
             hard_min, hard_max = get_safe_contrast_bounds(
                 dtype, data_min, data_max
             )

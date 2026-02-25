@@ -26,7 +26,7 @@ class AlignmentDialog(QDialog):
         self.resize(380, 320)
 
         # Import manager here to avoid circular imports
-        from pyvistra.manager import manager
+        from pyvistra.ui.manager import manager
 
         self.manager = manager
 

@@ -27,7 +27,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from .labels import SparseLabels
+from ..data.labels import SparseLabels
 from .manager import manager
 
 
@@ -746,10 +746,9 @@ class LabelManager(QWidget):
             if path.endswith(('.tif', '.tiff')):
                 dense_image = imread(path)
             else:
-                from matplotlib.pyplot import imread as mpl_imread
-                dense_image = mpl_imread(path)
+                from PIL import Image
+                dense_image = np.asarray(Image.open(path))
                 if dense_image.ndim == 3:
-                    # Convert RGB to grayscale labels
                     dense_image = dense_image[:, :, 0]
                 dense_image = dense_image.astype(np.uint16)
 

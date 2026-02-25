@@ -81,7 +81,7 @@ class ImageOutputSelector(QWidget):
         layout.addWidget(self._secondary)
 
         # Initial population
-        from pyvistra.manager import manager
+        from pyvistra.ui.manager import manager
 
         self._manager = manager
         self._manager.window_registered.connect(self.refresh_windows)
@@ -163,7 +163,7 @@ class ImageOutputSelector(QWidget):
             return self._send_to_existing(selection, data, metadata)
 
     def _send_to_existing(self, wid, data, metadata):
-        from pyvistra.manager import manager
+        from pyvistra.ui.manager import manager
 
         window = manager.get(wid)
         if window is None:

@@ -25,7 +25,7 @@ from qtpy.QtWidgets import (
 )
 
 from .histogram import WIDGET_BG, TEXT_COLOR
-from ..manager import manager
+from ..ui.manager import manager
 from ..rois import LineROI
 
 # Singleton instance

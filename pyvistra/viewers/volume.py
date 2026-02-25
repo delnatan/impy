@@ -3,6 +3,7 @@ from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QAction,
     QComboBox,
+    QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -13,7 +14,7 @@ from qtpy.QtWidgets import (
 from vispy import scene
 from vispy.visuals.transforms import STTransform
 
-from .visuals import COLORMAPS, DEFAULT_CHANNEL_COLORMAPS, get_colormap
+from ..visuals.image import COLORMAPS, DEFAULT_CHANNEL_COLORMAPS, get_colormap
 
 
 class VolumeRendererProxy:
@@ -184,6 +185,16 @@ class VolumeRendererProxy:
         for volume in self.volumes:
             volume.method = method
 
+    def set_attenuation(self, value):
+        """Set attenuation for attenuated_mip method."""
+        for volume in self.volumes:
+            volume.attenuation = value
+
+    def set_iso_threshold(self, value):
+        """Set threshold for iso method."""
+        for volume in self.volumes:
+            volume.threshold = value
+
     def update_volumes(self, data, time):
         """Update all volume data for a new time point."""
         for c, volume in enumerate(self.volumes):
@@ -206,7 +217,14 @@ class VolumeViewer(QMainWindow):
         "translucent",
         "additive",
         "average",
+        "iso",
     ]
+
+    # Methods that expose a tunable parameter in the UI
+    METHOD_PARAMS = {
+        "attenuated_mip": ("Attenuation", 0.1, 10.0, 1.0, 0.1),
+        "iso": ("Threshold", 0.0, 1.0, 0.5, 0.01),
+    }
 
     def __init__(
         self,
@@ -282,6 +300,10 @@ class VolumeViewer(QMainWindow):
         """Alias for C for compatibility."""
         return self.C
 
+    @property
+    def img_data(self):
+        return self.data
+
     def _reset_camera(self):
         """Reset camera to show full volume."""
         sz, sy, sx = self.scale
@@ -352,6 +374,22 @@ class VolumeViewer(QMainWindow):
         row_method.addStretch()
         self.controls_layout.addLayout(row_method)
 
+        # Row 2b: Method-specific parameter (shown only for methods that need it)
+        self.param_row_widget = QWidget()
+        param_layout = QHBoxLayout(self.param_row_widget)
+        param_layout.setContentsMargins(0, 0, 0, 0)
+        self.param_label = QLabel("Attenuation:")
+        param_layout.addWidget(self.param_label)
+        self.param_spinbox = QDoubleSpinBox()
+        self.param_spinbox.setDecimals(2)
+        self.param_spinbox.setSingleStep(0.1)
+        self.param_spinbox.setFixedWidth(80)
+        self.param_spinbox.valueChanged.connect(self._on_method_param_change)
+        param_layout.addWidget(self.param_spinbox)
+        param_layout.addStretch()
+        self.controls_layout.addWidget(self.param_row_widget)
+        self.param_row_widget.setVisible(False)
+
         # Row 3: Time slider (if time series)
         if self.T > 1:
             row_time = QHBoxLayout()
@@ -393,6 +431,31 @@ class VolumeViewer(QMainWindow):
     def _on_method_change(self, method):
         """Handle rendering method change."""
         self.renderer.set_render_method(method)
+
+        # Show/hide the parameter row and configure it for this method
+        if method in self.METHOD_PARAMS:
+            label, lo, hi, default, step = self.METHOD_PARAMS[method]
+            self.param_label.setText(f"{label}:")
+            self.param_spinbox.blockSignals(True)
+            self.param_spinbox.setRange(lo, hi)
+            self.param_spinbox.setSingleStep(step)
+            self.param_spinbox.setValue(default)
+            self.param_spinbox.blockSignals(False)
+            self.param_row_widget.setVisible(True)
+            # Apply default immediately
+            self._on_method_param_change(default)
+        else:
+            self.param_row_widget.setVisible(False)
+
+        self.canvas.update()
+
+    def _on_method_param_change(self, value):
+        """Handle method-specific parameter change."""
+        method = self.method_combo.currentText()
+        if method == "attenuated_mip":
+            self.renderer.set_attenuation(value)
+        elif method == "iso":
+            self.renderer.set_iso_threshold(value)
         self.canvas.update()
 
     def _on_time_change(self, value):
@@ -411,7 +474,7 @@ class VolumeViewer(QMainWindow):
 
     def show_contrast_dialog(self):
         """Show the Brightness/Contrast dialog."""
-        from .widgets import ContrastDialog
+        from ..widgets import ContrastDialog
 
         if self.contrast_dialog is None:
             self.contrast_dialog = ContrastDialog(self, parent=self)
@@ -421,7 +484,7 @@ class VolumeViewer(QMainWindow):
 
     def show_channel_panel(self):
         """Show the Channels panel."""
-        from .widgets import ChannelPanel
+        from ..widgets import ChannelPanel
 
         if self.channel_panel is None:
             self.channel_panel = ChannelPanel(self, parent=self)

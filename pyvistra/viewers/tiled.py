@@ -36,15 +36,15 @@ from qtpy.QtWidgets import (
 from superqt import QRangeSlider
 from vispy import scene
 
-from .io import load_image
-from .visuals import (
+from ..io import load_image
+from ..visuals.image import (
     COLORMAPS,
     DEFAULT_CHANNEL_COLORMAPS,
     CompositeImageVisual,
     get_colormap,
 )
-from .widgets import CompactHistogramWidget, ContrastDialog
-from .widgets.axes_dialog import AxesDialog
+from ..widgets import CompactHistogramWidget, ContrastDialog
+from ..widgets.axes_dialog import AxesDialog
 
 
 class TiledVisualProxy:
@@ -103,20 +103,6 @@ class TiledVisualProxy:
         _, display_color = get_colormap(cmap_name)
         if display_color and channel_idx < len(self._channel_colors):
             self._channel_colors[channel_idx] = display_color
-        elif not display_color:
-            # For matplotlib colormaps, sample a representative color
-            import matplotlib.cm as mpl_cm
-
-            spec = COLORMAPS.get(cmap_name)
-            if isinstance(spec, str) and spec.startswith("mpl:"):
-                mpl_name = spec[4:]
-                mpl_cmap = mpl_cm.get_cmap(mpl_name)
-                rgb = mpl_cmap(0.75)[:3]
-                hex_color = "#{:02x}{:02x}{:02x}".format(
-                    int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
-                )
-                if channel_idx < len(self._channel_colors):
-                    self._channel_colors[channel_idx] = hex_color
 
         # Apply to all tiles
         for renderer in self._get_tile_renderers():
@@ -995,6 +981,7 @@ class TileWidget(QFrame):
             def __init__(self, tile):
                 self.renderer = tile.renderer
                 self.canvas = tile.canvas
+                self.img_data = tile.data
                 self.C = tile.data.shape[2] if tile.data is not None else 1
                 self.meta = tile.meta or {}
 
@@ -1005,7 +992,7 @@ class TileWidget(QFrame):
     def _open_in_viewer(self):
         """Open this image in a full ImageWindow."""
         if self.file_path:
-            from .ui import ImageWindow
+            from ..ui import ImageWindow
 
             viewer = ImageWindow(self.file_path)
             viewer.show()
@@ -1013,7 +1000,7 @@ class TileWidget(QFrame):
     def _show_metadata(self):
         """Show metadata dialog."""
         if self.meta:
-            from .widgets import MetadataDialog
+            from ..widgets import MetadataDialog
 
             dlg = MetadataDialog(self.meta, parent=self)
             dlg.exec_()
@@ -1709,7 +1696,7 @@ def open_tiled_viewer(image_paths, tiles_per_page=50):
         app = QApplication(sys.argv)
 
     # Apply theme
-    from .theme import DARK_THEME
+    from ..theme import DARK_THEME
 
     app.setStyleSheet(DARK_THEME)
 

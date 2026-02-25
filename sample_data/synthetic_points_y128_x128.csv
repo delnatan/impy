@@ -1,0 +1,5 @@
+point_id,t,x,y,amplitude,background,index,kind
+1,0,20.5,24.5,420.0,78.0,0,maxima
+2,0,63.2,51.7,360.0,81.0,1,maxima
+3,0,92.9,89.4,390.0,79.0,2,maxima
+4,0,34.1,103.6,310.0,82.0,3,minima

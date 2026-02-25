@@ -1,11 +1,14 @@
 """
-AnnotationManager - Unified widget for managing ROI groups and mask layers.
+AnnotationManager - Unified widget for managing ROI groups, mask layers, track layers, and point layers.
 
 Replaces ROIManager + LabelManager with a single widget that manages:
 - ROI groups: named collections of ROIs with show/hide
 - Mask layers: named SparseLabels instances with their own visuals
+- Track layers: named TrackTable instances with time-aware track rendering
+- Point layers: named PointTable instances with time/z-aware point rendering
 """
 
+import csv
 import json
 import os
 
@@ -15,7 +18,6 @@ from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QAction,
     QCheckBox,
-    QColorDialog,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -36,20 +38,22 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from .labels import SparseLabels
+from ..data.labels import SparseLabels
 from .manager import manager
-from .rois import (
+from ..rois import (
     CircleROI,
     CoordinateROI,
     LaneROI,
     LineROI,
     RectangleROI,
 )
+from ..data.points import PointTable
+from ..data.tracks import TrackTable
 
 
 class AnnotationManager(QWidget):
     """
-    Manages ROI groups and mask layers across multiple ImageWindows.
+    Manages ROI groups, mask layers, track layers, and point layers across multiple ImageWindows.
 
     Uses hide/show pattern (singleton). Provides the same `active_window`
     and `refresh_list()` interface that GelAnalyzer depends on.
@@ -58,6 +62,7 @@ class AnnotationManager(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Annotation Manager")
+        self.setFixedWidth(320)
         self.resize(320, 550)
         self.active_window = None
         self._connected_windows = set()
@@ -74,7 +79,9 @@ class AnnotationManager(QWidget):
             self._connect_window(window)
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        root_layout = QHBoxLayout(self)
+        left_widget = QWidget(self)
+        layout = QVBoxLayout(left_widget)
         self._install_shortcuts()
 
         # Window Selection
@@ -105,13 +112,14 @@ class AnnotationManager(QWidget):
 
         # Group buttons
         group_btn_layout = QHBoxLayout()
-        btn_add_group = QPushButton("+ ROI Group")
-        btn_add_group.clicked.connect(self._add_roi_group)
-        group_btn_layout.addWidget(btn_add_group)
-
-        btn_add_mask = QPushButton("+ Mask Layer")
-        btn_add_mask.clicked.connect(self._add_mask_layer)
-        group_btn_layout.addWidget(btn_add_mask)
+        btn_add = QPushButton("+ Add")
+        add_menu = QMenu(btn_add)
+        add_menu.addAction("ROI Group", self._add_roi_group)
+        add_menu.addAction("Mask Layer", self._add_mask_layer)
+        add_menu.addAction("Track Layer", self._add_track_layer)
+        add_menu.addAction("Point Layer", self._add_point_layer)
+        btn_add.setMenu(add_menu)
+        group_btn_layout.addWidget(btn_add)
 
         btn_delete_group = QPushButton("Delete")
         btn_delete_group.clicked.connect(self._delete_selected_group)
@@ -192,6 +200,8 @@ class AnnotationManager(QWidget):
         self.btn_load = QPushButton("Load")
         load_menu = QMenu(self)
         load_menu.addAction("Load ROIs (JSON)...", self.load_rois)
+        load_menu.addAction("Load Tracks (CSV/JSON)...", self.load_tracks)
+        load_menu.addAction("Load Points (CSV/JSON)...", self.load_points)
         load_menu.addAction("Load Mask (Zarr)...", self.load_mask_zarr)
         load_menu.addAction("Load Mask (NPZ)...", self.load_mask_npz)
         load_menu.addSeparator()
@@ -201,12 +211,14 @@ class AnnotationManager(QWidget):
 
         layout.addLayout(btn_layout)
 
+        root_layout.addWidget(left_widget)
+
         # Menu Bar
         self.menu_bar = QMenuBar()
         layout.setMenuBar(self.menu_bar)
 
         # Analysis Menu (same as ROIManager)
-        from .analysis import crop_image, measure_intensity
+        from ..analysis import crop_image, measure_intensity
 
         analysis_menu = self.menu_bar.addMenu("Analysis")
 
@@ -226,14 +238,14 @@ class AnnotationManager(QWidget):
 
         analysis_menu.addSeparator()
 
-        from .gel_analyzer import show_gel_analyzer
+        from ..apps.gel_analyzer import show_gel_analyzer
 
         action_gel = QAction("Gel Analyzer...", self)
         action_gel.triggered.connect(lambda: show_gel_analyzer(self))
         analysis_menu.addAction(action_gel)
 
         # Lanes Menu
-        from .analysis import align_lanes
+        from ..analysis import align_lanes
 
         lanes_menu = self.menu_bar.addMenu("Lanes")
         action_align = QAction("Align Lanes", self)
@@ -313,6 +325,14 @@ class AnnotationManager(QWidget):
             window.mask_layer_added.connect(self._on_mask_layer_added)
         if hasattr(window, "mask_layer_removed"):
             window.mask_layer_removed.connect(self._on_mask_layer_removed)
+        if hasattr(window, "track_layer_added"):
+            window.track_layer_added.connect(self._on_track_layer_added)
+        if hasattr(window, "track_layer_removed"):
+            window.track_layer_removed.connect(self._on_track_layer_removed)
+        if hasattr(window, "point_layer_added"):
+            window.point_layer_added.connect(self._on_point_layer_added)
+        if hasattr(window, "point_layer_removed"):
+            window.point_layer_removed.connect(self._on_point_layer_removed)
 
         self._connected_windows.add(window)
 
@@ -334,6 +354,18 @@ class AnnotationManager(QWidget):
             if hasattr(window, "mask_layer_removed"):
                 window.mask_layer_removed.disconnect(
                     self._on_mask_layer_removed
+                )
+            if hasattr(window, "track_layer_added"):
+                window.track_layer_added.disconnect(self._on_track_layer_added)
+            if hasattr(window, "track_layer_removed"):
+                window.track_layer_removed.disconnect(
+                    self._on_track_layer_removed
+                )
+            if hasattr(window, "point_layer_added"):
+                window.point_layer_added.disconnect(self._on_point_layer_added)
+            if hasattr(window, "point_layer_removed"):
+                window.point_layer_removed.disconnect(
+                    self._on_point_layer_removed
                 )
         except (TypeError, RuntimeError):
             pass
@@ -383,6 +415,26 @@ class AnnotationManager(QWidget):
         self.refresh_list()
 
     def _on_mask_layer_removed(self, name):
+        if self._is_shutting_down:
+            return
+        self.refresh_list()
+
+    def _on_track_layer_added(self, name):
+        if self._is_shutting_down:
+            return
+        self.refresh_list()
+
+    def _on_track_layer_removed(self, name):
+        if self._is_shutting_down:
+            return
+        self.refresh_list()
+
+    def _on_point_layer_added(self, name):
+        if self._is_shutting_down:
+            return
+        self.refresh_list()
+
+    def _on_point_layer_removed(self, name):
         if self._is_shutting_down:
             return
         self.refresh_list()
@@ -472,12 +524,18 @@ class AnnotationManager(QWidget):
         w = self.active_window
         roi_groups = w.get_roi_groups()
         mask_groups = set(w._mask_layers.keys())
+        track_groups = set(w._track_layers.keys())
+        point_groups = set(w._point_layers.keys())
 
         if self._selected_group is not None:
             gtype, gname = self._selected_group
             if gtype == "roi" and gname in roi_groups:
                 return
             if gtype == "mask" and gname in mask_groups:
+                return
+            if gtype == "track" and gname in track_groups:
+                return
+            if gtype == "point" and gname in point_groups:
                 return
 
         preferred_roi = getattr(w, "_active_roi_group", None)
@@ -491,6 +549,14 @@ class AnnotationManager(QWidget):
 
         if mask_groups:
             self._selected_group = ("mask", next(iter(mask_groups)))
+            return
+
+        if track_groups:
+            self._selected_group = ("track", next(iter(track_groups)))
+            return
+
+        if point_groups:
+            self._selected_group = ("point", next(iter(point_groups)))
             return
 
         self._selected_group = None
@@ -543,6 +609,44 @@ class AnnotationManager(QWidget):
             if self._selected_group == ("mask", name):
                 self.group_tree.setCurrentItem(item)
 
+        # Track layers
+        for name, entry in w._track_layers.items():
+            tracks = entry["tracks"]
+            n_tracks = tracks.n_tracks if tracks is not None else 0
+            visible = entry["visible"]
+            item = QTreeWidgetItem(
+                self.group_tree,
+                [f"[track] {name} ({n_tracks} tracks)"],
+            )
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.Checked if visible else Qt.Unchecked)
+            item.setData(0, Qt.UserRole, ("track", name))
+            if name == w._active_track_layer:
+                font = item.font(0)
+                font.setBold(True)
+                item.setFont(0, font)
+            if self._selected_group == ("track", name):
+                self.group_tree.setCurrentItem(item)
+
+        # Point layers
+        for name, entry in w._point_layers.items():
+            points = entry["points"]
+            n_points = points.n_rows if points is not None else 0
+            visible = entry["visible"]
+            item = QTreeWidgetItem(
+                self.group_tree,
+                [f"[point] {name} ({n_points} points)"],
+            )
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.Checked if visible else Qt.Unchecked)
+            item.setData(0, Qt.UserRole, ("point", name))
+            if name == w._active_point_layer:
+                font = item.font(0)
+                font.setBold(True)
+                item.setFont(0, font)
+            if self._selected_group == ("point", name):
+                self.group_tree.setCurrentItem(item)
+
         self.group_tree.blockSignals(False)
 
     def _refresh_items(self):
@@ -578,6 +682,42 @@ class AnnotationManager(QWidget):
                             )
                             item.setBackground(qcolor)
                         self.item_list.addItem(item)
+        elif gtype == "track":
+            if gname in w._track_layers:
+                tracks = w._track_layers[gname]["tracks"]
+                if tracks is not None:
+                    for track_id in tracks.track_ids:
+                        track = tracks.get_track(int(track_id))
+                        if track is None:
+                            continue
+                        n_points = len(track["t"])
+                        t0 = int(track["t"][0]) if n_points else 0
+                        t1 = int(track["t"][-1]) if n_points else 0
+                        item = QListWidgetItem(
+                            f"Track {int(track_id)} ({n_points} pts, t={t0}-{t1})"
+                        )
+                        item.setData(Qt.UserRole, ("track", int(track_id)))
+                        self.item_list.addItem(item)
+        elif gtype == "point":
+            if gname in w._point_layers:
+                points = w._point_layers[gname]["points"]
+                if points is not None:
+                    for i in range(points.n_rows):
+                        z_text = (
+                            f"{points.z[i]:.2f}"
+                            if points.z is not None
+                            else "-"
+                        )
+                        item = QListWidgetItem(
+                            "Point "
+                            f"{int(points.point_id[i])} "
+                            f"(t={int(points.t[i])}, z={z_text}, "
+                            f"x={points.x[i]:.2f}, y={points.y[i]:.2f})"
+                        )
+                        item.setData(
+                            Qt.UserRole, ("point", int(points.point_id[i]))
+                        )
+                        self.item_list.addItem(item)
 
     # ---- Group Tree Interactions ----
 
@@ -596,6 +736,10 @@ class AnnotationManager(QWidget):
             self.active_window._active_roi_group = gname
         elif gtype == "mask":
             self.active_window.set_active_mask_layer(gname)
+        elif gtype == "track":
+            self.active_window.set_active_track_layer(gname)
+        elif gtype == "point":
+            self.active_window.set_active_point_layer(gname)
 
         # Show/hide label controls
         is_mask = gtype == "mask"
@@ -631,6 +775,10 @@ class AnnotationManager(QWidget):
             self.active_window.set_group_visible(gname, visible)
         elif gtype == "mask":
             self.active_window.set_mask_layer_visible(gname, visible)
+        elif gtype == "track":
+            self.active_window.set_track_layer_visible(gname, visible)
+        elif gtype == "point":
+            self.active_window.set_point_layer_visible(gname, visible)
 
     def _add_roi_group(self):
         if not self.active_window:
@@ -657,6 +805,38 @@ class AnnotationManager(QWidget):
             self.active_window.add_mask_layer(name)
             self.refresh_list()
 
+    def _add_track_layer(self):
+        if not self.active_window:
+            return
+        existing = set(self.active_window._track_layers.keys())
+        idx = 1
+        while f"Tracks-{idx}" in existing:
+            idx += 1
+        name = f"Tracks-{idx}"
+
+        name, ok = QInputDialog.getText(
+            self, "New Track Layer", "Layer name:", text=name
+        )
+        if ok and name:
+            self.active_window.add_track_layer(name)
+            self.refresh_list()
+
+    def _add_point_layer(self):
+        if not self.active_window:
+            return
+        existing = set(self.active_window._point_layers.keys())
+        idx = 1
+        while f"Points-{idx}" in existing:
+            idx += 1
+        name = f"Points-{idx}"
+
+        name, ok = QInputDialog.getText(
+            self, "New Point Layer", "Layer name:", text=name
+        )
+        if ok and name:
+            self.active_window.add_point_layer(name)
+            self.refresh_list()
+
     def _delete_selected_group(self):
         if not self.active_window or not self._selected_group:
             return
@@ -666,6 +846,10 @@ class AnnotationManager(QWidget):
             self.active_window.remove_roi_group(gname)
         elif gtype == "mask":
             self.active_window.remove_mask_layer(gname)
+        elif gtype == "track":
+            self.active_window.remove_track_layer(gname)
+        elif gtype == "point":
+            self.active_window.remove_point_layer(gname)
 
         self._selected_group = None
         self.refresh_list()
@@ -689,6 +873,16 @@ class AnnotationManager(QWidget):
         elif item_type == "label":
             # Set as active label
             self.active_label_spin.setValue(value)
+        elif item_type == "point":
+            if (
+                self._selected_group
+                and self._selected_group[0] == "point"
+                and self.active_window is not None
+            ):
+                _, layer_name = self._selected_group
+                self.active_window.select_points_in_layer(layer_name, {int(value)})
+                self.active_window.focus_point(layer_name, int(value))
+                self.active_window.canvas.update()
 
     def _select_roi_in_list(self, roi):
         """Sync list selection to match canvas selection."""
@@ -730,6 +924,14 @@ class AnnotationManager(QWidget):
                         if visual:
                             visual.refresh()
                         self.active_window.label_changed.emit(labels)
+        elif item_type == "track":
+            if self._selected_group and self._selected_group[0] == "track":
+                _, gname = self._selected_group
+                self.active_window.remove_track_from_layer(gname, value)
+        elif item_type == "point":
+            if self._selected_group and self._selected_group[0] == "point":
+                _, gname = self._selected_group
+                self.active_window.remove_point_from_layer(gname, value)
 
         self.refresh_list()
         self.active_window.canvas.update()
@@ -790,6 +992,8 @@ class AnnotationManager(QWidget):
                 self._save_roi_group(gname)
             elif gtype == "mask":
                 self._save_mask_layer(gname)
+            elif gtype == "point":
+                self._save_point_layer(gname)
         else:
             self._save_all_rois()
 
@@ -873,6 +1077,33 @@ class AnnotationManager(QWidget):
                     tifffile.imwrite(path, dense)
                 else:
                     labels.save(path)
+
+    def _save_point_layer(self, layer_name):
+        default_name = f"{self._get_base_name()}_{layer_name}.csv"
+        default_path = os.path.join(self._get_default_dir(), default_name)
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Point Layer",
+            default_path,
+            "Point Tables (*.csv *.json);;CSV Files (*.csv);;JSON Files (*.json)",
+        )
+        if not path:
+            return
+
+        w = self.active_window
+        if layer_name not in w._point_layers:
+            return
+        points = w._point_layers[layer_name]["points"]
+        if points is None:
+            return
+
+        if path.lower().endswith(".csv"):
+            self._save_points_to_csv(path, points)
+        else:
+            if not path.lower().endswith(".json"):
+                path += ".json"
+            self._save_points_to_json(path, points)
 
     def load_rois(self):
         """Load ROIs from JSON (backward compatible with old format)."""
@@ -978,9 +1209,8 @@ class AnnotationManager(QWidget):
             if path.endswith((".tif", ".tiff")):
                 dense_image = imread(path)
             else:
-                from matplotlib.pyplot import imread as mpl_imread
-
-                dense_image = mpl_imread(path)
+                from PIL import Image
+                dense_image = np.asarray(Image.open(path))
                 if dense_image.ndim == 3:
                     dense_image = dense_image[:, :, 0]
                 dense_image = dense_image.astype(np.uint16)
@@ -989,6 +1219,367 @@ class AnnotationManager(QWidget):
             self._apply_loaded_mask(labels)
         except Exception as e:
             QMessageBox.critical(self, "Load Failed", str(e))
+
+    def load_tracks(self):
+        """Load tracks from CSV/JSON and apply to selected or new track layer."""
+        if not self.active_window:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Tracks",
+            self._get_default_dir(),
+            "Track Tables (*.csv *.json);;CSV Files (*.csv);;JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                tracks = self._load_tracks_from_csv(path)
+            elif path.lower().endswith(".json"):
+                tracks = self._load_tracks_from_json(path)
+            else:
+                raise ValueError(
+                    "Unsupported track format. Use .csv or .json."
+                )
+            self._apply_loaded_tracks(tracks)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Failed", str(e))
+
+    def _load_tracks_from_csv(self, path):
+        required = {"track_id", "t", "x", "y"}
+        track_id = []
+        t = []
+        x = []
+        y = []
+        z = []
+        has_z = False
+
+        with open(path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None:
+                raise ValueError("CSV has no header row")
+            missing = required - set(reader.fieldnames)
+            if missing:
+                raise ValueError(
+                    f"Missing required columns: {', '.join(sorted(missing))}"
+                )
+            has_z = "z" in reader.fieldnames
+            for row in reader:
+                track_id.append(int(row["track_id"]))
+                t.append(int(float(row["t"])))
+                x.append(float(row["x"]))
+                y.append(float(row["y"]))
+                if has_z:
+                    z_val = row.get("z", "")
+                    z.append(float(z_val) if z_val != "" else 0.0)
+
+        return TrackTable.from_arrays(
+            track_id=track_id,
+            t=t,
+            x=x,
+            y=y,
+            z=z if has_z else None,
+        )
+
+    def _load_tracks_from_json(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            rows = data.get("tracks", data.get("rows", None))
+            if rows is None:
+                # Accept dict-of-columns style
+                if {"track_id", "t", "x", "y"}.issubset(data.keys()):
+                    return TrackTable.from_arrays(
+                        track_id=data["track_id"],
+                        t=data["t"],
+                        x=data["x"],
+                        y=data["y"],
+                        z=data.get("z"),
+                    )
+                raise ValueError(
+                    "JSON must be a list of rows or contain a 'tracks'/'rows' list"
+                )
+        elif isinstance(data, list):
+            rows = data
+        else:
+            raise ValueError("Invalid JSON track format")
+
+        if not rows:
+            return TrackTable.from_arrays(track_id=[], t=[], x=[], y=[])
+
+        required = {"track_id", "t", "x", "y"}
+        for key in required:
+            if key not in rows[0]:
+                raise ValueError(
+                    f"Missing required key '{key}' in JSON row records"
+                )
+
+        track_id = [int(r["track_id"]) for r in rows]
+        t = [int(float(r["t"])) for r in rows]
+        x = [float(r["x"]) for r in rows]
+        y = [float(r["y"]) for r in rows]
+        use_z = any("z" in r for r in rows)
+        z = [float(r.get("z", 0.0)) for r in rows] if use_z else None
+
+        return TrackTable.from_arrays(
+            track_id=track_id,
+            t=t,
+            x=x,
+            y=y,
+            z=z,
+        )
+
+    def _apply_loaded_tracks(self, tracks):
+        """Apply loaded tracks to selected track layer or create a new layer."""
+        w = self.active_window
+        if self._selected_group and self._selected_group[0] == "track":
+            _, gname = self._selected_group
+            if gname in w._track_layers:
+                w.set_track_layer_tracks(gname, tracks)
+                self.refresh_list()
+                w.canvas.update()
+                return
+
+        existing = set(w._track_layers.keys())
+        idx = 1
+        while f"Tracks-{idx}" in existing:
+            idx += 1
+        name = f"Tracks-{idx}"
+        w.add_track_layer(name, tracks=tracks)
+        self._selected_group = ("track", name)
+        self.refresh_list()
+        w.canvas.update()
+
+    def load_points(self):
+        """Load points from CSV/JSON and apply to selected or new point layer."""
+        if not self.active_window:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Points",
+            self._get_default_dir(),
+            "Point Tables (*.csv *.json);;CSV Files (*.csv);;JSON Files (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".csv"):
+                points = self._load_points_from_csv(path)
+            elif path.lower().endswith(".json"):
+                points = self._load_points_from_json(path)
+            else:
+                raise ValueError("Unsupported point format. Use .csv or .json.")
+            self._apply_loaded_points(points)
+        except Exception as e:
+            QMessageBox.critical(self, "Load Failed", str(e))
+
+    def _load_points_from_csv(self, path):
+        x = []
+        y = []
+        point_id = []
+        t = []
+        z = []
+        has_point_id = False
+        has_t = False
+        has_z = False
+        properties: dict[str, list] = {}
+
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None:
+                raise ValueError("CSV has no header row")
+            required = {"x", "y"}
+            missing = required - set(reader.fieldnames)
+            if missing:
+                raise ValueError(
+                    f"Missing required columns: {', '.join(sorted(missing))}"
+                )
+
+            has_point_id = "point_id" in reader.fieldnames
+            has_t = "t" in reader.fieldnames
+            has_z = "z" in reader.fieldnames
+
+            prop_cols = [
+                col
+                for col in reader.fieldnames
+                if col not in {"point_id", "t", "z", "x", "y"}
+            ]
+            properties = {col: [] for col in prop_cols}
+
+            for row in reader:
+                x.append(float(row["x"]))
+                y.append(float(row["y"]))
+                if has_point_id:
+                    point_id.append(int(float(row["point_id"])))
+                if has_t:
+                    t.append(int(float(row["t"])))
+                if has_z:
+                    z_val = row.get("z", "")
+                    z.append(float(z_val) if z_val != "" else 0.0)
+                for col in prop_cols:
+                    properties[col].append(
+                        self._coerce_csv_scalar(row.get(col, ""))
+                    )
+
+        return PointTable.from_arrays(
+            point_id=point_id if has_point_id else None,
+            t=t if has_t else None,
+            x=x,
+            y=y,
+            z=z if has_z else None,
+            properties=properties,
+        )
+
+    def _load_points_from_json(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if isinstance(data, dict):
+            rows = data.get("points", data.get("rows", None))
+            if rows is None:
+                # dict-of-columns
+                if {"x", "y"}.issubset(data.keys()):
+                    excluded = {"point_id", "t", "z", "x", "y"}
+                    props = {
+                        str(k): np.asarray(v)
+                        for k, v in data.items()
+                        if k not in excluded
+                    }
+                    return PointTable.from_arrays(
+                        point_id=data.get("point_id"),
+                        t=data.get("t"),
+                        x=data["x"],
+                        y=data["y"],
+                        z=data.get("z"),
+                        properties=props,
+                    )
+                raise ValueError(
+                    "JSON must be a list of rows or contain a 'points'/'rows' list"
+                )
+        elif isinstance(data, list):
+            rows = data
+        else:
+            raise ValueError("Invalid JSON point format")
+
+        if not rows:
+            return PointTable.from_arrays(x=[], y=[])
+
+        if "x" not in rows[0] or "y" not in rows[0]:
+            raise ValueError("Missing required keys 'x'/'y' in JSON row records")
+
+        excluded = {"point_id", "t", "z", "x", "y"}
+        prop_keys = sorted(
+            {key for row in rows for key in row.keys() if key not in excluded}
+        )
+
+        props = {key: [row.get(key) for row in rows] for key in prop_keys}
+        point_id = (
+            [int(float(r["point_id"])) for r in rows]
+            if all("point_id" in r for r in rows)
+            else None
+        )
+        t = (
+            [int(float(r["t"])) for r in rows]
+            if any("t" in r for r in rows)
+            else None
+        )
+        z = (
+            [float(r.get("z", 0.0)) for r in rows]
+            if any("z" in r for r in rows)
+            else None
+        )
+
+        return PointTable.from_arrays(
+            point_id=point_id,
+            t=t,
+            x=[float(r["x"]) for r in rows],
+            y=[float(r["y"]) for r in rows],
+            z=z,
+            properties=props,
+        )
+
+    def _apply_loaded_points(self, points):
+        """Apply loaded points to selected point layer or create a new layer."""
+        w = self.active_window
+        if self._selected_group and self._selected_group[0] == "point":
+            _, gname = self._selected_group
+            if gname in w._point_layers:
+                w.set_point_layer_points(gname, points)
+                self.refresh_list()
+                w.canvas.update()
+                return
+
+        existing = set(w._point_layers.keys())
+        idx = 1
+        while f"Points-{idx}" in existing:
+            idx += 1
+        name = f"Points-{idx}"
+        w.add_point_layer(name, points=points)
+        self._selected_group = ("point", name)
+        self.refresh_list()
+        w.canvas.update()
+
+    def _save_points_to_csv(self, path, points: PointTable):
+        fieldnames = ["point_id", "t", "x", "y"]
+        if points.z is not None:
+            fieldnames.append("z")
+        fieldnames.extend(sorted(points.properties.keys()))
+
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for i in range(points.n_rows):
+                row = {
+                    "point_id": int(points.point_id[i]),
+                    "t": int(points.t[i]),
+                    "x": float(points.x[i]),
+                    "y": float(points.y[i]),
+                }
+                if points.z is not None:
+                    row["z"] = float(points.z[i])
+                for key, arr in points.properties.items():
+                    value = arr[i]
+                    row[key] = value.item() if hasattr(value, "item") else value
+                writer.writerow(row)
+
+    def _save_points_to_json(self, path, points: PointTable):
+        rows = []
+        for i in range(points.n_rows):
+            row = {
+                "point_id": int(points.point_id[i]),
+                "t": int(points.t[i]),
+                "x": float(points.x[i]),
+                "y": float(points.y[i]),
+            }
+            if points.z is not None:
+                row["z"] = float(points.z[i])
+            for key, arr in points.properties.items():
+                value = arr[i]
+                row[key] = value.item() if hasattr(value, "item") else value
+            rows.append(row)
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"format": "pyvistra_points", "version": 1, "points": rows},
+                f,
+                indent=2,
+            )
+
+    @staticmethod
+    def _coerce_csv_scalar(value: str):
+        text = value.strip()
+        if text == "":
+            return ""
+        lower = text.lower()
+        if lower in {"true", "false"}:
+            return lower == "true"
+        try:
+            if "." not in text and "e" not in lower:
+                return int(text)
+            return float(text)
+        except ValueError:
+            return value
 
     def _load_mask_from_path(self, path):
         try:
@@ -1036,7 +1627,7 @@ class AnnotationManager(QWidget):
     # ---- Analysis ----
 
     def _run_analysis(self, func):
-        from .analysis import crop_image
+        from ..analysis import crop_image
 
         item = self.item_list.currentItem()
         if not item or not self.active_window:
@@ -1066,7 +1657,7 @@ class AnnotationManager(QWidget):
             func(data_2d, roi)
 
     def _show_line_profile_dialog(self):
-        from .widgets import get_line_profile_dialog
+        from ..widgets import get_line_profile_dialog
 
         dialog = get_line_profile_dialog()
         if self.active_window:
@@ -1080,7 +1671,7 @@ class AnnotationManager(QWidget):
                     break
 
     def _align_lanes_action(self):
-        from .analysis import align_lanes
+        from ..analysis import align_lanes
 
         if not self.active_window:
             return

@@ -5,21 +5,21 @@ Based on vispy and PyQt (via qtpy)
 """
 
 from ._version import __version__
+from . import colormaps
 
-from .annotation_manager import (
+from .ui.annotation_manager import (
     AnnotationManager,
     get_annotation_manager,
     show_annotation_manager,
 )
-from .colors import (
+from .data.colors import (
     DEFAULT_LABEL_PALETTE,
     SMART_LABEL_PALETTE,
     compute_adjacency_graph,
     compute_smart_colors,
 )
-from .gel_analyzer import GelAnalyzerWidget, get_gel_analyzer, show_gel_analyzer
-from .imaris_reader import ImarisReader
-from .imaris_writer import ImarisWriter
+from .apps.gel_analyzer import GelAnalyzerWidget, get_gel_analyzer, show_gel_analyzer
+from .readers import ImarisReader, ImarisWriter
 from .io import (
     CZI5DProxy,
     ImageBuffer,
@@ -36,14 +36,19 @@ from .io import (
     save_sparse_labels,
     save_tiff,
 )
-from .label_visual import LabelOverlayVisual
-from .labels import SparseLabels
-from .manager import WindowManager, manager
-from .ortho import OrthoViewer
+from .visuals.labels import LabelOverlayVisual
+from .data.labels import SparseLabels
+from .ui.manager import WindowManager, manager
+from .data.points import PointTable
+from .viewers import OrthoViewer, VolumeViewer
 from .rois import ROI, CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
-from .toolbar import Toolbar
-from .ui import ImageWindow, imshow, run_app
-from .volume import VolumeViewer
+from .ui.toolbar import Toolbar
+from .ui.layer_manager import LayerManager, get_layer_manager, show_layer_manager
+from .data.tracks import TrackTable
+from .data.shapes import ShapeData
+from .layers import Layer, LayerList, UndoStack
+from .ui.window import ImageWindow, imshow, run_app
+
 from .widgets import (
     Denoise2DTimelapseDialog,
     ImageOutputSelector,
@@ -53,6 +58,7 @@ from .widgets import (
 
 __all__ = [
     "__version__",
+    "colormaps",
     # io
     "load_image",
     "load_psf",
@@ -88,11 +94,23 @@ __all__ = [
     # labels/masks
     "SparseLabels",
     "LabelOverlayVisual",
+    # tracks
+    "TrackTable",
+    # points
+    "PointTable",
     # colors (smart coloring)
     "SMART_LABEL_PALETTE",
     "DEFAULT_LABEL_PALETTE",
     "compute_smart_colors",
     "compute_adjacency_graph",
+    # layers
+    "Layer",
+    "LayerList",
+    "UndoStack",
+    "ShapeData",
+    "LayerManager",
+    "get_layer_manager",
+    "show_layer_manager",
     # managers
     "AnnotationManager",
     "get_annotation_manager",

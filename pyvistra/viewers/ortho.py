@@ -14,9 +14,9 @@ from qtpy.QtWidgets import (
 from vispy import scene
 from vispy.visuals.transforms import STTransform
 
-from .overlays import ScaleTimestampOverlay
-from .visuals import CompositeImageVisual
-from .widgets import (
+from ..visuals.overlays import ScaleTimestampOverlay
+from ..visuals.image import CompositeImageVisual
+from ..widgets import (
     ChannelPanel,
     ContrastDialog,
     MetadataDialog,

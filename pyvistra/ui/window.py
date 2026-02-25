@@ -26,7 +26,7 @@ from qtpy.QtWidgets import (
 from superqt import QRangeSlider
 from vispy import app, scene
 
-from .io import (
+from ..io import (
     Imaris5DProxy,
     Numpy5DProxy,
     load_image,
@@ -34,14 +34,28 @@ from .io import (
     save_imaris,
     save_tiff,
 )
-from .label_visual import LabelOverlayVisual
-from .labels import SparseLabels
+from ..visuals.labels import LabelOverlayVisual
+from ..data.labels import SparseLabels
+from ..data.shapes import ShapeData, RECTANGLE, CIRCLE, LINE, AddShape, RemoveShape, MoveShape, AdjustHandle
+from ..layers.base import Layer, LayerList
 from .manager import manager
-from .overlays import ScaleTimestampOverlay
-from .ortho import OrthoViewer
-from .rois import CircleROI, CoordinateROI, LaneROI, LineROI, RectangleROI
-from .visuals import CompositeImageVisual
-from .widgets import (
+from ..visuals.overlays import ScaleTimestampOverlay
+from ..viewers import OrthoViewer
+from ..data.points import PointTable
+from ..visuals.points import PointLayerVisual
+from ..visuals.shapes import ShapeLayerVisual
+from ..rois import (
+    CircleROI,
+    CoordinateROI,
+    LaneROI,
+    LineROI,
+    PointROI,
+    RectangleROI,
+)
+from ..data.tracks import TrackTable
+from ..visuals.tracks import TrackLayerVisual
+from ..visuals.image import CompositeImageVisual
+from ..widgets import (
     AlignmentDialog,
     AxesDialog,
     ChannelPanel,
@@ -74,6 +88,15 @@ class ImageWindow(QMainWindow):
     label_changed = Signal(object)  # Emits SparseLabels when labels change
     mask_layer_added = Signal(str)  # Emits mask layer name when added
     mask_layer_removed = Signal(str)  # Emits mask layer name when removed
+    track_layer_added = Signal(str)  # Emits track layer name when added
+    track_layer_removed = Signal(str)  # Emits track layer name when removed
+    point_layer_added = Signal(str)  # Emits point layer name when added
+    point_layer_removed = Signal(str)  # Emits point layer name when removed
+    # New layer system signals
+    layer_added = Signal(object)  # Emits Layer when added
+    layer_removed = Signal(object)  # Emits Layer when removed
+    layer_data_changed = Signal(object)  # Emits Layer when data changes
+    active_layer_changed = Signal(object)  # Emits Layer when active layer changes
 
     def __init__(self, data_or_path, title="Image", meta=None):
         super().__init__()
@@ -162,6 +185,10 @@ class ImageWindow(QMainWindow):
         self.z_idx = 0
         self.c_idx = 0  # Active channel index for Single mode
 
+        # Control references are optional (depend on C/T/Z dimensionality).
+        # Initialize eagerly so playback/control methods are safe when T == 1.
+        self._init_control_refs()
+
         # Timelapse playback state
         self._playback_fps = 5.0
         self._playback_timer = QTimer(self)
@@ -214,7 +241,23 @@ class ImageWindow(QMainWindow):
         self._contour_max_dist = 0.0  # Max distance from contour start
         self._mask_propagate_z = False  # Fill all Z slices (cookie-cut)
 
-        # 10. Events
+        # 10. Track State (multiple named track layers)
+        self._track_layers = OrderedDict()  # name -> {"tracks": TrackTable, "visual": TrackLayerVisual, "visible": True}
+        self._active_track_layer = None
+
+        # 11. Point State (multiple named point layers)
+        self._point_layers = OrderedDict()  # name -> {"points": PointTable, "visual": PointLayerVisual, "visible": True}
+        self._active_point_layer = None
+        self._focused_point_layer = None
+        self._focused_point_id = None
+        self._focused_point_roi: PointROI | None = None
+
+        # 12. Unified Layer System
+        self.layers = LayerList()
+        self._drawing_shape_layer = None  # Layer being drawn into
+        self._drawing_shape_id = None  # Shape ID being drawn
+
+        # 13. Events
         self.canvas.events.mouse_move.connect(self.on_mouse_move)
         self.canvas.events.mouse_press.connect(self.on_mouse_press)
         self.canvas.events.mouse_release.connect(self.on_mouse_release)
@@ -241,6 +284,17 @@ class ImageWindow(QMainWindow):
 
         if hasattr(self, "overlay") and self.overlay is not None:
             self.overlay.remove()
+        for entry in self._track_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.remove()
+        for entry in self._point_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.remove()
+        if self._focused_point_roi is not None:
+            self._focused_point_roi.remove()
+            self._focused_point_roi = None
 
         # Cleanup data buffers/proxies (ImageBuffer, Imaris5DProxy)
         if hasattr(self.img_data, "release"):
@@ -281,7 +335,7 @@ class ImageWindow(QMainWindow):
                     break
         elif event.key() == Qt.Key_L:
             # Toggle ROI labels visibility
-            from .rois import ROI
+            from ..rois import ROI
 
             show = ROI.toggle_labels()
             # Update visibility for all ROIs in all windows
@@ -453,6 +507,16 @@ class ImageWindow(QMainWindow):
         save_ims_action.triggered.connect(self.save_as_imaris)
         file_menu.addAction(save_ims_action)
 
+        file_menu.addSeparator()
+
+        snapshot_action = QAction("Save Snapshot...", self)
+        snapshot_action.triggered.connect(self._save_snapshot_dialog)
+        file_menu.addAction(snapshot_action)
+
+        export_frames_action = QAction("Export Frames...", self)
+        export_frames_action.triggered.connect(self._export_frames_dialog)
+        file_menu.addAction(export_frames_action)
+
         # Adjust Menu
         adjust_menu = menubar.addMenu("Adjust")
         bc_action = QAction("Brightness/Contrast", self)
@@ -590,6 +654,113 @@ class ImageWindow(QMainWindow):
             file_filter="Imaris files (*.ims)",
         )
 
+    # ---- Snapshot & Frame Export ----
+
+    def snapshot(self, path=None, scale=1):
+        """Save or return a screenshot of the current canvas view.
+
+        Parameters
+        ----------
+        path : str or None
+            If given, save image to this path and return the path.
+            If None, return the RGBA array (H, W, 4) uint8.
+        scale : int
+            Upscale factor (e.g. 2 for 2× resolution). The canvas is
+            rendered at its native size and then resized with Lanczos.
+        """
+        from PIL import Image
+
+        rgba = self.canvas.render()
+        if scale > 1:
+            h, w = rgba.shape[:2]
+            img = Image.fromarray(rgba)
+            img = img.resize((w * scale, h * scale), Image.LANCZOS)
+            rgba = np.array(img)
+        if path is None:
+            return rgba
+        Image.fromarray(rgba).save(path)
+        return path
+
+    def export_frames(self, output_dir, prefix="frame", scale=1,
+                      frame_range=None, fmt="png"):
+        """Export frames as numbered image files.
+
+        For timelapse data (T > 1), iterates over timepoints.
+        For single-timepoint Z-stacks (T == 1, Z > 1), iterates over Z slices.
+
+        Parameters
+        ----------
+        output_dir : str
+            Directory to write frames into (created if needed).
+        prefix : str
+            Filename prefix. Files will be {prefix}_{NNNN}.{fmt}
+        scale : int
+            Render resolution multiplier.
+        frame_range : tuple(int, int) or None
+            (start, end) range, inclusive. Refers to T or Z depending on
+            the data shape. None = all frames.
+        fmt : str
+            Image format, "png" (default) or "tiff".
+        """
+        from PIL import Image
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Decide axis: Z-stack when there's no time dimension
+        animate_z = self.T == 1 and self.Z > 1
+        n_frames = self.Z if animate_z else self.T
+        axis_label = "Z" if animate_z else "T"
+
+        if frame_range is None:
+            f_start, f_end = 0, n_frames - 1
+        else:
+            f_start, f_end = int(frame_range[0]), int(frame_range[1])
+
+        ext = "tif" if fmt.lower() in ("tif", "tiff") else fmt.lower()
+        total = f_end - f_start + 1
+
+        for i, idx in enumerate(range(f_start, f_end + 1)):
+            if animate_z:
+                self.on_z_change(idx)
+            else:
+                self.on_time_change(idx)
+            QApplication.processEvents()
+            rgba = self.snapshot(scale=scale)
+            filename = f"{prefix}_{idx:04d}.{ext}"
+            filepath = os.path.join(output_dir, filename)
+            Image.fromarray(rgba).save(filepath)
+            print(
+                f"\r  Exported {axis_label}={idx} ({i + 1}/{total}): {filename}",
+                end="", flush=True,
+            )
+
+        print()
+        print(f"Frames saved to: {output_dir}")
+        print(f"To make a movie:")
+        print(
+            f"  ffmpeg -framerate 10 -i {output_dir}/{prefix}_%04d.{ext}"
+            f" -c:v libx264 -pix_fmt yuv420p output.mp4"
+        )
+
+    def _save_snapshot_dialog(self):
+        """Open file dialog and save a snapshot."""
+        default_path = self._default_save_path(".png")
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Snapshot", default_path,
+            "PNG files (*.png);;JPEG files (*.jpg *.jpeg);;TIFF files (*.tif *.tiff)",
+        )
+        if filepath:
+            self.snapshot(filepath)
+
+    def _export_frames_dialog(self):
+        """Open directory dialog and export timelapse frames."""
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory for Frames"
+        )
+        if not output_dir:
+            return
+        self.export_frames(output_dir)
+
     # ---- ROI ID Management ----
 
     def _get_next_roi_id(self):
@@ -708,6 +879,11 @@ class ImageWindow(QMainWindow):
         if self._active_mask_layer is None:
             self._active_mask_layer = name
         self.mask_layer_added.emit(name)
+        # Register in unified LayerList
+        if name not in self.layers:
+            layer = Layer(name=name, layer_type="labels", data=labels, visual=visual)
+            self.layers.add(layer)
+            self.layer_added.emit(layer)
 
     def remove_mask_layer(self, name):
         """Remove a named mask layer and clean up its visual."""
@@ -719,6 +895,10 @@ class ImageWindow(QMainWindow):
         if self._active_mask_layer == name:
             self._active_mask_layer = next(iter(self._mask_layers), None)
         self.mask_layer_removed.emit(name)
+        # Remove from unified LayerList
+        if name in self.layers:
+            removed = self.layers.remove(name)
+            self.layer_removed.emit(removed)
         self.canvas.update()
 
     def set_mask_layer_visible(self, name, visible):
@@ -735,6 +915,381 @@ class ImageWindow(QMainWindow):
         """Switch which mask layer receives painting."""
         if name in self._mask_layers:
             self._active_mask_layer = name
+
+    # ---- Multiple Track Layers API ----
+
+    def add_track_layer(self, name, tracks=None, trail_window=30):
+        """Create a named track layer with its own visual."""
+        if name in self._track_layers:
+            return
+
+        if tracks is None:
+            tracks = TrackTable.from_arrays(track_id=[], t=[], x=[], y=[])
+        elif not isinstance(tracks, TrackTable):
+            raise TypeError("tracks must be a TrackTable or None")
+
+        visual = TrackLayerVisual(
+            self.view,
+            trail_window=trail_window,
+        )
+        visual.set_tracks(tracks)
+        visual.set_time_z(self.t_idx, self.z_idx)
+        self._track_layers[name] = {
+            "tracks": tracks,
+            "visual": visual,
+            "visible": True,
+        }
+        if self._active_track_layer is None:
+            self._active_track_layer = name
+        self.track_layer_added.emit(name)
+        # Register in unified LayerList
+        if name not in self.layers:
+            layer = Layer(name=name, layer_type="tracks", data=tracks, visual=visual)
+            self.layers.add(layer)
+            self.layer_added.emit(layer)
+        self.canvas.update()
+
+    def set_track_layer_tracks(self, name, tracks):
+        """Replace data for a specific track layer."""
+        if name not in self._track_layers:
+            return
+        if not isinstance(tracks, TrackTable):
+            raise TypeError("tracks must be a TrackTable")
+
+        self._track_layers[name]["tracks"] = tracks
+        visual = self._track_layers[name]["visual"]
+        if visual is not None:
+            visual.set_tracks(tracks)
+            visual.set_time_z(self.t_idx, self.z_idx)
+        self.canvas.update()
+
+    def remove_track_layer(self, name):
+        """Remove a named track layer and clean up its visual."""
+        if name not in self._track_layers:
+            return
+        entry = self._track_layers.pop(name)
+        if entry["visual"] is not None:
+            entry["visual"].remove()
+        if self._active_track_layer == name:
+            self._active_track_layer = next(iter(self._track_layers), None)
+        self.track_layer_removed.emit(name)
+        # Remove from unified LayerList
+        if name in self.layers:
+            removed = self.layers.remove(name)
+            self.layer_removed.emit(removed)
+        self.canvas.update()
+
+    def set_track_layer_visible(self, name, visible):
+        """Toggle visibility of a specific track layer."""
+        if name not in self._track_layers:
+            return
+        self._track_layers[name]["visible"] = bool(visible)
+        visual = self._track_layers[name]["visual"]
+        if visual is not None:
+            visual.visible = bool(visible)
+        self.canvas.update()
+
+    def set_active_track_layer(self, name):
+        """Switch which track layer is active in the annotation manager."""
+        if name in self._track_layers:
+            self._active_track_layer = name
+
+    def remove_track_from_layer(self, layer_name, track_id):
+        """Remove a single trajectory from a track layer by track ID."""
+        if layer_name not in self._track_layers:
+            return
+        tracks = self._track_layers[layer_name]["tracks"]
+        updated = tracks.remove_track(track_id)
+        self.set_track_layer_tracks(layer_name, updated)
+
+    # ---- Multiple Point Layers API ----
+
+    def add_point_layer(self, name, points=None):
+        """Create a named point layer with its own visual."""
+        if name in self._point_layers:
+            return
+
+        if points is None:
+            points = PointTable.from_arrays(x=[], y=[])
+        elif not isinstance(points, PointTable):
+            raise TypeError("points must be a PointTable or None")
+
+        style = {
+            "size": 9.0,
+            "min_screen_px": 3.0,
+            "max_screen_px": 80.0,
+            "edge_width": 1.2,
+            "layer_color": (1.0, 1.0, 0.0, 1.0),
+            "selected_color": (1.0, 0.3, 0.3, 1.0),
+            "show_circle": False,
+            "circle_radius_px": 4.0,
+            "z_tolerance": 0.5,
+            "label_visible": False,
+            "label_template": "{point_id}",
+            "label_font_size": 9,
+            "dense_label_threshold": 2000,
+        }
+        visual = PointLayerVisual(self.view, **style)
+        visual.set_points(points)
+        visual.set_time_z(self.t_idx, self.z_idx)
+        self._point_layers[name] = {
+            "points": points,
+            "visual": visual,
+            "visible": True,
+            "selected_ids": set(),
+            "style": style,
+        }
+        if self._active_point_layer is None:
+            self._active_point_layer = name
+        self.point_layer_added.emit(name)
+        # Register in unified LayerList
+        if name not in self.layers:
+            layer = Layer(name=name, layer_type="points", data=points, visual=visual,
+                          style=style)
+            self.layers.add(layer)
+            self.layer_added.emit(layer)
+        self.canvas.update()
+
+    def set_point_layer_points(self, name, points):
+        """Replace data for a specific point layer."""
+        if name not in self._point_layers:
+            return
+        if not isinstance(points, PointTable):
+            raise TypeError("points must be a PointTable")
+
+        self._point_layers[name]["points"] = points
+        visual = self._point_layers[name]["visual"]
+        if visual is not None:
+            visual.set_points(points)
+            visual.set_time_z(self.t_idx, self.z_idx)
+            visual.set_selected_point_ids(self._point_layers[name]["selected_ids"])
+        self.canvas.update()
+
+    def remove_point_layer(self, name):
+        """Remove a named point layer and clean up its visual."""
+        if name not in self._point_layers:
+            return
+        entry = self._point_layers.pop(name)
+        if entry["visual"] is not None:
+            entry["visual"].remove()
+        if self._active_point_layer == name:
+            self._active_point_layer = next(iter(self._point_layers), None)
+        if self._focused_point_layer == name:
+            self.clear_focused_point()
+        self.point_layer_removed.emit(name)
+        # Remove from unified LayerList
+        if name in self.layers:
+            removed = self.layers.remove(name)
+            self.layer_removed.emit(removed)
+        self.canvas.update()
+
+    def set_point_layer_visible(self, name, visible):
+        """Toggle visibility of a specific point layer."""
+        if name not in self._point_layers:
+            return
+        self._point_layers[name]["visible"] = bool(visible)
+        visual = self._point_layers[name]["visual"]
+        if visual is not None:
+            visual.visible = bool(visible)
+        self.canvas.update()
+
+    def set_active_point_layer(self, name):
+        """Switch which point layer is active in the annotation manager."""
+        if name in self._point_layers:
+            self._active_point_layer = name
+            self.canvas.update()
+
+    def remove_point_from_layer(self, layer_name, point_id):
+        """Remove a single point from a point layer by point ID."""
+        if layer_name not in self._point_layers:
+            return
+        points = self._point_layers[layer_name]["points"]
+        updated = points.remove_point(point_id)
+        self.set_point_layer_points(layer_name, updated)
+        if self._focused_point_layer == layer_name and int(self._focused_point_id or -1) == int(point_id):
+            self.clear_focused_point()
+
+    def set_point_layer_style(self, name, **style):
+        """Update style for a specific point layer."""
+        if name not in self._point_layers:
+            return
+        entry = self._point_layers[name]
+        visual = entry["visual"]
+        if visual is None:
+            return
+        visual.set_style(**style)
+        entry["style"].update(style)
+        if self._focused_point_layer == name and self._focused_point_id is not None:
+            self.focus_point(name, self._focused_point_id)
+        self.canvas.update()
+
+    def select_points_in_layer(self, name, point_ids):
+        """Select a set of point IDs in a point layer."""
+        if name not in self._point_layers:
+            return
+        ids = {int(v) for v in point_ids}
+        entry = self._point_layers[name]
+        entry["selected_ids"] = ids
+        visual = entry["visual"]
+        if visual is not None:
+            visual.set_selected_point_ids(ids)
+        self.canvas.update()
+
+    # ------------------------------------------------------------------
+    # Shape layer methods (new unified layer system)
+    # ------------------------------------------------------------------
+
+    def add_shape_layer(self, name, data=None):
+        """Create a named shape layer using the unified layer system.
+
+        Parameters
+        ----------
+        name : str
+            Unique layer name.
+        data : ShapeData, optional
+            Pre-populated shape data. If None, an empty ShapeData is created.
+        """
+        if name in self.layers:
+            return
+        if data is None:
+            data = ShapeData()
+        visual = ShapeLayerVisual(self.view.scene)
+        layer = Layer(name=name, layer_type="shapes", data=data, visual=visual)
+        self.layers.add(layer)
+        visual.update(data, layer.selected_ids, self.t_idx, self.z_idx)
+        self.layer_added.emit(layer)
+        self.canvas.update()
+        return layer
+
+    def remove_shape_layer(self, name):
+        """Remove a shape layer by name."""
+        if name not in self.layers:
+            return
+        layer = self.layers.remove(name)
+        if layer.visual is not None:
+            layer.visual.remove()
+        self.layer_removed.emit(layer)
+        self.canvas.update()
+
+    def _refresh_shape_layers(self):
+        """Rebuild visuals for all shape layers at current time/z."""
+        for layer in self.layers.by_type("shapes"):
+            if layer.visual is not None:
+                layer.visual.update(
+                    layer.data, layer.selected_ids, self.t_idx, self.z_idx
+                )
+
+    def _active_shape_layer(self):
+        """Get the currently active shape layer, or None."""
+        return self.layers.active("shapes")
+
+    def clear_focused_point(self):
+        if self._focused_point_roi is not None:
+            self._focused_point_roi.remove()
+            self._focused_point_roi = None
+        self._focused_point_layer = None
+        self._focused_point_id = None
+        self.canvas.update()
+
+    def focus_point(self, layer_name, point_id):
+        """Create/update transient PointROI for focused point editing."""
+        if layer_name not in self._point_layers:
+            self.clear_focused_point()
+            return
+        entry = self._point_layers[layer_name]
+        points = entry["points"]
+        if points is None:
+            self.clear_focused_point()
+            return
+        row = points.get_point(int(point_id))
+        if row is None:
+            self.clear_focused_point()
+            return
+
+        self._focused_point_layer = layer_name
+        self._focused_point_id = int(point_id)
+        self.select_points_in_layer(layer_name, {int(point_id)})
+
+        if self._focused_point_roi is None:
+            self._focused_point_roi = PointROI(
+                self.view,
+                name=f"point:{int(point_id)}",
+                point_id=int(point_id),
+                on_change=self._on_focused_point_roi_changed,
+            )
+            self._focused_point_roi.group = "_point_focus"
+
+        style = entry.get("style", {})
+        box_size_data = float(style.get("box_size_data", 9.0))
+        self._focused_point_roi.point_id = int(point_id)
+        self._focused_point_roi.set_name(f"Point {int(point_id)}")
+        self._focused_point_roi.set_from_point(row["x"], row["y"], box_size_data)
+        self._focused_point_roi.select(True)
+        self.canvas.update()
+
+    def _on_focused_point_roi_changed(self, state):
+        if self._focused_point_layer is None or self._focused_point_id is None:
+            return
+        if self._focused_point_layer not in self._point_layers:
+            return
+        entry = self._point_layers[self._focused_point_layer]
+        points = entry["points"]
+        updated = points.update_point(
+            int(self._focused_point_id),
+            x=state.get("x"),
+            y=state.get("y"),
+        )
+        entry["points"] = updated
+        box_size = float(state.get("box_size_data", entry["style"].get("box_size_data", 9.0)))
+        entry["style"]["box_size_data"] = box_size
+        visual = entry["visual"]
+        if visual is not None:
+            visual.set_points(updated)
+            visual.set_style(box_size_data=box_size)
+            visual.set_selected_point_ids(entry["selected_ids"])
+            visual.set_time_z(self.t_idx, self.z_idx)
+        self.canvas.update()
+
+    def _get_point_row(self, layer_name: str, point_id: int):
+        if layer_name not in self._point_layers:
+            return None
+        points = self._point_layers[layer_name]["points"]
+        if points is None:
+            return None
+        return points.get_point(int(point_id))
+
+    def _nearest_point(self, x: float, y: float, *, radius_px=8.0):
+        if self._active_point_layer is None:
+            return None
+        if self._active_point_layer not in self._point_layers:
+            return None
+        entry = self._point_layers[self._active_point_layer]
+        points = entry["points"]
+        if points is None or points.n_rows == 0:
+            return None
+        s = points.get_time_slice(self.t_idx)
+        if s is None:
+            return None
+        px_per_data = 1.0
+        visual = entry.get("visual")
+        if visual is not None and hasattr(visual, "_px_per_data"):
+            px_per_data = max(float(visual._px_per_data()), 1e-6)
+        best = None
+        best_px = float("inf")
+        for i in range(s.start, s.stop):
+            if points.z is not None:
+                ztol = float(entry["style"].get("z_tolerance", 0.5))
+                if abs(float(points.z[i]) - float(self.z_idx)) > ztol:
+                    continue
+            dx = float(points.x[i]) - float(x)
+            dy = float(points.y[i]) - float(y)
+            dpx = (dx * dx + dy * dy) ** 0.5 * px_per_data
+            if dpx < best_px:
+                best_px = dpx
+                best = int(points.point_id[i])
+        if best is None or best_px > float(radius_px):
+            return None
+        return {"layer": self._active_point_layer, "point_id": best, "distance_px": best_px}
 
     def _get_brush_coords(self, cx, cy):
         """
@@ -1065,7 +1620,7 @@ class ImageWindow(QMainWindow):
 
     def show_volume_view(self):
         """Open 3D volume rendering view."""
-        from .volume import VolumeViewer
+        from ..viewers import VolumeViewer
 
         # Copy colormap settings from current renderer
         colormaps = {}
@@ -1137,7 +1692,7 @@ class ImageWindow(QMainWindow):
 
     def show_line_profile(self):
         """Show the line profile dialog."""
-        from .widgets import get_line_profile_dialog
+        from ..widgets import get_line_profile_dialog
 
         dialog = get_line_profile_dialog()
         dialog.active_window = self
@@ -1224,6 +1779,29 @@ class ImageWindow(QMainWindow):
                         sub.widget().deleteLater()
 
         # Reset widget references
+        self._init_control_refs()
+
+        # Rebuild controls
+        self._setup_controls()
+
+    def set_tool(self, tool_name):
+        """
+        Set the active tool (e.g. 'pointer', 'rect', 'circle', 'line', 'coordinate').
+        """
+        valid_tools = ["pointer", "coordinate", "rect", "circle", "line",
+                       "shape_rect", "shape_circle", "shape_line"]
+        if tool_name not in valid_tools:
+            print(f"Invalid tool: {tool_name}. Valid tools: {valid_tools}")
+            return
+
+        manager.set_active_tool(tool_name)
+
+        # Update cursors in all windows
+        for w in manager.get_all().values():
+            w.update_cursor()
+
+    def _init_control_refs(self):
+        """Initialize dynamic control references to safe defaults."""
         self.mode_combo = None
         self.channel_row_widget = None
         self.c_slider = None
@@ -1240,24 +1818,6 @@ class ImageWindow(QMainWindow):
         self.z_range_slider_widget = None
         self.z_range_slider_min_label = None
         self.z_range_slider_max_label = None
-
-        # Rebuild controls
-        self._setup_controls()
-
-    def set_tool(self, tool_name):
-        """
-        Set the active tool (e.g. 'pointer', 'rect', 'circle', 'line', 'coordinate').
-        """
-        valid_tools = ["pointer", "coordinate", "rect", "circle", "line"]
-        if tool_name not in valid_tools:
-            print(f"Invalid tool: {tool_name}. Valid tools: {valid_tools}")
-            return
-
-        manager.set_active_tool(tool_name)
-
-        # Update cursors in all windows
-        for w in manager.get_all().values():
-            w.update_cursor()
 
     def _setup_controls(self):
         # -- Mode Selector (Only if Multi-channel) --
@@ -1586,6 +2146,15 @@ class ImageWindow(QMainWindow):
         for entry in self._mask_layers.values():
             if entry["visual"] and entry["labels"] and entry["labels"].ndim == 3:
                 entry["visual"].update_slice(self.z_idx)
+        for entry in self._track_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.set_time_z(self.t_idx, self.z_idx)
+        for entry in self._point_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.set_time_z(self.t_idx, self.z_idx)
+        self._sync_focused_point_visibility()
 
         if self.overlay is not None:
             self.overlay.update()
@@ -1595,6 +2164,28 @@ class ImageWindow(QMainWindow):
         if self.channel_panel and self.channel_panel.isVisible():
             self.channel_panel.refresh_ui()
         self.view_changed.emit(self)
+
+    def _sync_focused_point_visibility(self):
+        if self._focused_point_roi is None:
+            return
+        if self._focused_point_id is None:
+            return
+        if self._focused_point_layer not in self._point_layers:
+            self.clear_focused_point()
+            return
+        row = self._get_point_row(self._focused_point_layer, self._focused_point_id)
+        if row is None:
+            self.clear_focused_point()
+            return
+        show = int(row.get("t", 0)) == int(self.t_idx)
+        if "z" in row:
+            ztol = float(
+                self._point_layers[self._focused_point_layer]["style"].get(
+                    "z_tolerance", 0.5
+                )
+            )
+            show = show and abs(float(row["z"]) - float(self.z_idx)) <= ztol
+        self._focused_point_roi.set_visible(show)
 
     def _init_overlay(self):
         _, _, sx = self.meta.get("scale", (1.0, 1.0, 1.0))
@@ -1613,6 +2204,10 @@ class ImageWindow(QMainWindow):
         self.overlay.set_axis_spacing_um(sx)
 
     def _on_view_transform_event(self, _event):
+        for entry in self._point_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.refresh()
         if self.overlay is not None:
             self.overlay.update()
             self.canvas.update()
@@ -1669,6 +2264,18 @@ class ImageWindow(QMainWindow):
                     hit_roi = roi
                     hit_handle = res
                     break
+            if hit_roi is None and self._focused_point_roi is not None:
+                res = self._focused_point_roi.hit_test((x, y))
+                if res:
+                    hit_roi = self._focused_point_roi
+                    hit_handle = res
+
+            if hit_roi is None:
+                near = self._nearest_point(x, y, radius_px=10.0)
+                if near is not None:
+                    self.focus_point(near["layer"], near["point_id"])
+                    hit_roi = self._focused_point_roi
+                    hit_handle = "center"
 
             # Handle modifier clicks on LaneROIs
             if isinstance(hit_roi, LaneROI):
@@ -1707,6 +2314,8 @@ class ImageWindow(QMainWindow):
             # Update Selection
             for roi in self.rois:
                 roi.select(roi is hit_roi)
+            if self._focused_point_roi is not None:
+                self._focused_point_roi.select(self._focused_point_roi is hit_roi)
 
             # Notify about selection change
             self.roi_selection_changed.emit(hit_roi)
@@ -1719,6 +2328,7 @@ class ImageWindow(QMainWindow):
                 self.view.camera.interactive = False
                 self.canvas.update()
             else:
+                self.clear_focused_point()
                 self.canvas.update()
             return
 
@@ -1783,6 +2393,31 @@ class ImageWindow(QMainWindow):
                 self.view.camera.interactive = False
                 self.canvas.update()
 
+        # Handle shape layer tools (shape_rect, shape_circle, shape_line)
+        if tool in ("shape_rect", "shape_circle", "shape_line"):
+            layer = self._active_shape_layer()
+            if layer is None:
+                layer = self.add_shape_layer("Shapes")
+            shape_type = {
+                "shape_rect": RECTANGLE,
+                "shape_circle": CIRCLE,
+                "shape_line": LINE,
+            }[tool]
+            self.start_pos = (x, y)
+            cmd = AddShape(
+                shape_type,
+                [x, y, x, y],
+                t=self.t_idx,
+                z=self.z_idx,
+                properties={"name": f"Shape {len(layer.data)}"},
+            )
+            layer.undo_stack.push(cmd, layer.data)
+            self._drawing_shape_layer = layer
+            self._drawing_shape_id = cmd.shape_id
+            layer.visual.update(layer.data, layer.selected_ids, self.t_idx, self.z_idx)
+            self.view.camera.interactive = False
+            self.canvas.update()
+
     def on_mouse_move(self, event):
         # 1. Update Info Label (always)
         if self.renderer.layers:
@@ -1804,6 +2439,18 @@ class ImageWindow(QMainWindow):
                         lid = self.label_overlay.label_at(iy, ix)
                         if lid > 0:
                             info_text += f"  Label: {lid}"
+                    near = self._nearest_point(x, y, radius_px=10.0)
+                    if near is not None:
+                        row = self._get_point_row(near["layer"], near["point_id"])
+                        if row is not None:
+                            info_text += f"  Point: {row.get('point_id')}"
+                            if "amplitude" in row:
+                                info_text += f" amp={row.get('amplitude')}"
+                            self.info_label.setToolTip(str(row))
+                        else:
+                            self.info_label.setToolTip("")
+                    else:
+                        self.info_label.setToolTip("")
                     self.info_label.setText(info_text)
             else:
                 self.info_label.setText("")
@@ -1873,6 +2520,15 @@ class ImageWindow(QMainWindow):
             self.drawing_roi.update(self.start_pos, end_pos)
             self.canvas.update()
 
+        # 5. Shape Layer Drawing Update
+        if self._drawing_shape_layer is not None and self._drawing_shape_id is not None and event.button == 1:
+            x, y = self._map_event_to_image(event)
+            layer = self._drawing_shape_layer
+            sx, sy = self.start_pos
+            layer.data.update(self._drawing_shape_id, [sx, sy, x, y])
+            layer.visual.update(layer.data, layer.selected_ids, self.t_idx, self.z_idx)
+            self.canvas.update()
+
     def on_mouse_release(self, event):
         # Contour mode is handled by mouse movement, not release
         # (auto-closes when returning to start marker)
@@ -1904,6 +2560,15 @@ class ImageWindow(QMainWindow):
             self.drawing_roi = None
             self.start_pos = None
             # Re-enable camera after drawing
+            self.view.camera.interactive = False  # Keep disabled for draw tools
+
+        # Shape layer drawing finalization
+        if self._drawing_shape_layer is not None:
+            layer = self._drawing_shape_layer
+            self.layer_data_changed.emit(layer)
+            self._drawing_shape_layer = None
+            self._drawing_shape_id = None
+            self.start_pos = None
             self.view.camera.interactive = False  # Keep disabled for draw tools
 
 
@@ -1966,7 +2631,7 @@ def imshow(
         app = QApplication(sys.argv)
 
     # Apply Theme
-    from .theme import DARK_THEME
+    from ..theme import DARK_THEME
 
     app.setStyleSheet(DARK_THEME)
 
@@ -2033,7 +2698,7 @@ def run_app():
     """
     app = QApplication.instance()
     if app:
-        from .theme import DARK_THEME
+        from ..theme import DARK_THEME
 
         app.setStyleSheet(DARK_THEME)
         app.exec_()

@@ -1,45 +1,13 @@
-import matplotlib.cm as mpl_cm
 import numpy as np
 from vispy import scene
-from vispy.color import Colormap
-from vispy.visuals.transforms.chain import ChainTransform
 from vispy.visuals.transforms.linear import MatrixTransform, STTransform
 
+from .. import colormaps as _colormaps
 
-def mpl_to_vispy_colormap(name, n_colors=256):
-    """Convert a matplotlib colormap to a vispy Colormap."""
-    mpl_cmap = mpl_cm.get_cmap(name)
-    colors = mpl_cmap(np.linspace(0, 1, n_colors))
-    return Colormap(colors)
-
-
-# Available colormaps organized by category
-COLORMAPS = {
-    # Single-color colormaps (black to color) for additive blending
-    "Orange": ["black", "#ffb100"],
-    "Green": ["black", "#49FF49"],
-    "Cyan": ["black", "#5BD6FF"],
-    "Magenta": ["black", "magenta"],
-    "Yellow": ["black", "yellow"],
-    "White": ["black", "white"],
-    # Standard RGB for RGB images
-    "Red": ["black", "red"],
-    "Pure Green": ["black", "#00FF00"],
-    "Blue": ["black", "blue"],
-    # Matplotlib colormaps (perceptually uniform)
-    "viridis": "mpl:viridis",
-    "plasma": "mpl:plasma",
-    "magma": "mpl:magma",
-    "inferno": "mpl:inferno",
-    "cividis": "mpl:cividis",
-    # Other useful matplotlib colormaps
-    "hot": "mpl:hot",
-    "cool": "mpl:cool",
-    "coolwarm": "mpl:coolwarm",
-    "turbo": "mpl:turbo",
-    "gray": "mpl:gray",
-    "gray_r": "mpl:gray_r",
-}
+# COLORMAPS is kept as a name→None dict for backward compatibility.
+# Code that needs to list colormaps (dropdowns) uses COLORMAPS.keys();
+# code that needs to fetch a colormap uses get_colormap().
+COLORMAPS = {name: None for name in _colormaps.names()}
 
 # Default channel colormaps (original microscope colors)
 DEFAULT_CHANNEL_COLORMAPS = [
@@ -56,19 +24,8 @@ RGB_COLORMAPS = ["Red", "Pure Green", "Blue"]
 
 
 def get_colormap(name):
-    """Get a vispy Colormap by name from COLORMAPS dictionary."""
-    if name not in COLORMAPS:
-        # Fallback to white if unknown
-        return Colormap(["black", "white"]), "white"
-
-    spec = COLORMAPS[name]
-    if isinstance(spec, str) and spec.startswith("mpl:"):
-        # Matplotlib colormap
-        mpl_name = spec[4:]  # Remove "mpl:" prefix
-        return mpl_to_vispy_colormap(mpl_name), None
-    else:
-        # Simple two-color colormap
-        return Colormap(spec), spec[1]  # Return colormap and end color
+    """Get a vispy Colormap by name. Returns (Colormap, display_color_or_None)."""
+    return _colormaps.get(name)
 
 
 class CompositeImageVisual:
@@ -266,32 +223,12 @@ class CompositeImageVisual:
         if channel_idx >= len(self.layers):
             return
 
-        if cmap_name not in COLORMAPS:
-            print(f"Unknown colormap: {cmap_name}")
-            return
-
         cmap, display_color = get_colormap(cmap_name)
         self.layers[channel_idx].cmap = cmap
         self.channel_colormaps[channel_idx] = cmap_name
 
-        # Update legacy color for histogram display
-        if display_color:
-            if channel_idx < len(self.channel_colors):
-                self.channel_colors[channel_idx] = display_color
-        else:
-            # For matplotlib colormaps, use a representative color
-            # Sample the colormap at 75% to get a bright representative color
-            if cmap_name in COLORMAPS:
-                spec = COLORMAPS[cmap_name]
-                if isinstance(spec, str) and spec.startswith("mpl:"):
-                    mpl_name = spec[4:]
-                    mpl_cmap = mpl_cm.get_cmap(mpl_name)
-                    rgb = mpl_cmap(0.75)[:3]
-                    hex_color = "#{:02x}{:02x}{:02x}".format(
-                        int(rgb[0] * 255), int(rgb[1] * 255), int(rgb[2] * 255)
-                    )
-                    if channel_idx < len(self.channel_colors):
-                        self.channel_colors[channel_idx] = hex_color
+        if display_color and channel_idx < len(self.channel_colors):
+            self.channel_colors[channel_idx] = display_color
 
     def get_colormap_name(self, channel_idx):
         """Get the current colormap name for a channel."""

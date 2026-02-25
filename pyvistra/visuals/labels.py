@@ -8,7 +8,7 @@ coloring for improved visual distinction between neighboring labels.
 import numpy as np
 from vispy import scene
 
-from .colors import DEFAULT_LABEL_PALETTE, compute_smart_colors
+from ..data.colors import DEFAULT_LABEL_PALETTE, compute_smart_colors
 
 
 class LabelOverlayVisual:

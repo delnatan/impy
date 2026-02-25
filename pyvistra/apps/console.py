@@ -286,11 +286,11 @@ class PythonConsole(QWidget):
 
     def _update_namespace(self):
         """Update namespace with current pyvistra state."""
-        from .annotation_manager import (
+        from ..ui.annotation_manager import (
             annotation_manager_exists,
             get_annotation_manager,
         )
-        from .manager import manager
+        from ..ui.manager import manager
 
         self.namespace["manager"] = manager
         self.namespace["windows"] = manager.get_all()
@@ -320,12 +320,12 @@ class PythonConsole(QWidget):
         self.namespace["aw"] = get_active_window  # Short alias
 
         # Add imshow for convenience
-        from .ui import imshow
+        from ..ui import imshow
 
         self.namespace["imshow"] = imshow
 
         # Add io functions
-        from .io import load_image, save_tiff
+        from ..io import load_image, save_tiff
 
         self.namespace["load_image"] = load_image
         self.namespace["save_tiff"] = save_tiff
@@ -338,7 +338,7 @@ class PythonConsole(QWidget):
             Reload a module by name or reference.
 
             Usage:
-                reload('lab')           # Reload pyvistra.lab
+                reload('my_module')     # Reload from pyvistra.* or sys.path
                 reload('mymodule')      # Reload mymodule from cwd
                 reload(some_module)     # Reload a module object
 
@@ -363,12 +363,7 @@ class PythonConsole(QWidget):
 
         self.namespace["reload"] = reload
 
-        # Try to import lab module if it exists
-        try:
-            from . import lab
-            self.namespace["lab"] = lab
-        except ImportError:
-            pass
+        # lab scratch module removed; users can import their own modules
 
         # Add clear function (closure over self)
         def clear():
@@ -393,15 +388,14 @@ Available objects:
   save_tiff() - Save as TIFF
 
 Prototyping:
-  lab         - Lab module (pyvistra/lab.py) for experiments
-  reload()    - Hot-reload a module: reload('lab')
+  reload()    - Hot-reload a module: reload('my_module')
   clear()     - Clear console output
 
 Example:
   >>> w = aw()          # Get active window
   >>> data = w.img_data # Access 5D data (T,Z,C,Y,X)
   >>> w.rois            # List of ROIs
-  >>> reload('lab')     # Reload after editing lab.py
+  >>> reload('my_module')
 """
         self.output.append_text(welcome, "#888888")
 

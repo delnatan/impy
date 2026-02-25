@@ -7,7 +7,7 @@ Uses LaneROI to define lanes with integrated peak markers.
 """
 
 import json
-import os
+from pathlib import Path
 
 import numpy as np
 from qtpy.QtCore import Qt
@@ -27,13 +27,12 @@ from qtpy.QtWidgets import (
 )
 from scipy.signal import find_peaks
 
-from .manager import manager
-from .rois import LaneROI, RectangleROI
+from ..rois import LaneROI, RectangleROI
 
 
 def get_builtin_ladders_path():
     """Return path to the built-in ladders.json file."""
-    return os.path.join(os.path.dirname(__file__), "data", "ladders.json")
+    return Path(__file__).resolve().parents[1] / "_resources" / "ladders.json"
 
 
 def load_ladders(path=None):
@@ -41,7 +40,7 @@ def load_ladders(path=None):
     if path is None:
         path = get_builtin_ladders_path()
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data.get("ladders", [])
     except (FileNotFoundError, json.JSONDecodeError) as e:

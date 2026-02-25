@@ -60,6 +60,39 @@ Supported extensions:
 - `.sparse.zarr`
 - `.sparse.npz`
 
+## Point annotations
+
+Use `PointTable` to store per-point localization data (position + properties):
+
+```python
+from pyvistra.points import PointTable
+
+points = PointTable.from_arrays(
+    x=[32.4, 80.1],
+    y=[19.2, 47.8],
+    t=[0, 0],
+    properties={
+        "amplitude": [1250.0, 980.0],
+        "background": [55.0, 42.0],
+        "index": [1, 2],
+    },
+)
+
+viewer.add_point_layer("Peaks", points=points)
+```
+
+Point layers can also be loaded/saved from the Annotation Manager as CSV/JSON.
+
+### Point layer styling and metadata
+
+- `size_mode="image"` makes boxes scale with zoom (data-space size).
+- `size_mode="screen"` keeps boxes fixed in display pixels.
+- Use the Annotation Manager inspector to change:
+  - layer and selected-point colors
+  - box size, edge width, cross visibility
+  - canvas labels (`label_template`) vs tooltip-only mode
+- Use **Promote to PointROI** for focused handle-based adjustment of a selected point.
+
 ## Practical reminder
 
 When exporting image data that should stay spatially/temporally meaningful, reuse the original `meta` dict with `save_tiff(..., metadata=meta)`.

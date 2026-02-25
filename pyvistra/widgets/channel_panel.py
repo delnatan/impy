@@ -293,7 +293,8 @@ class ChannelPanel(QDialog):
                 c % len(self.viewer.renderer.channel_colors)
             ]
 
-            row = ChannelRow(c, ch_name, color, data_dtype=self.viewer.img_data.dtype)
+            img_data = getattr(self.viewer, "img_data", None)
+            row = ChannelRow(c, ch_name, color, data_dtype=getattr(img_data, "dtype", None))
             row.visibilityChanged.connect(self._on_visibility_changed)
             row.climChanged.connect(self._on_clim_changed)
             row.colormapChanged.connect(self._on_colormap_changed)
