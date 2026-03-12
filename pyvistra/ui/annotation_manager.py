@@ -130,6 +130,7 @@ class AnnotationManager(QWidget):
         layout.addWidget(QLabel("Items:"))
         self.item_list = QListWidget()
         self.item_list.itemClicked.connect(self._on_item_clicked)
+        self.item_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self.item_list)
 
         # Label controls (for mask layers)
@@ -869,6 +870,7 @@ class AnnotationManager(QWidget):
             # Select this ROI, deselect others
             for r in self.active_window.rois:
                 r.select(r is value)
+            self.active_window.roi_selection_changed.emit(value)
             self.active_window.canvas.update()
         elif item_type == "label":
             # Set as active label
@@ -898,6 +900,27 @@ class AnnotationManager(QWidget):
         if not found:
             self.item_list.clearSelection()
         self.item_list.blockSignals(False)
+
+    def _on_item_double_clicked(self, item):
+        """Rename an ROI by double-clicking its list entry."""
+        if not self.active_window:
+            return
+        data = item.data(Qt.UserRole)
+        if data is None:
+            return
+        item_type, value = data
+        if item_type != "roi":
+            return
+
+        new_name, ok = QInputDialog.getText(
+            self, "Rename ROI", "Name:", text=value.name
+        )
+        if not ok or not new_name or new_name == value.name:
+            return
+
+        value.set_name(new_name)
+        item.setText(f"{new_name} ({value.__class__.__name__})")
+        self.active_window.canvas.update()
 
     def delete_selected_item(self):
         item = self.item_list.currentItem()

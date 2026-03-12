@@ -42,7 +42,7 @@ from .manager import manager
 from ..visuals.overlays import ScaleTimestampOverlay
 from ..viewers import OrthoViewer
 from ..data.points import PointTable
-from ..visuals.points import PointLayerVisual
+from ..visuals.points import DEFAULT_STYLE as POINT_DEFAULT_STYLE, PointLayerVisual
 from ..visuals.shapes import ShapeLayerVisual
 from ..rois import (
     CircleROI,
@@ -265,6 +265,25 @@ class ImageWindow(QMainWindow):
         self.canvas.events.mouse_release.connect(self._on_view_transform_event)
         self.canvas.events.mouse_wheel.connect(self._on_view_transform_event)
         self.canvas.events.resize.connect(self._on_view_transform_event)
+
+        # 14. Hover tooltip (on-canvas Text visual for point info)
+        self._hover_label = scene.visuals.Text(
+            text="",
+            pos=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            color=(1.0, 1.0, 1.0, 0.95),
+            font_size=9,
+            anchor_x="left",
+            anchor_y="bottom",
+            parent=self.view.scene,
+        )
+        self._hover_label.order = 10_100
+        self._hover_label.set_gl_state(
+            preset="translucent",
+            blend=True,
+            blend_func=("src_alpha", "one_minus_src_alpha"),
+            depth_test=False,
+        )
+        self._hover_label.visible = False
 
         # Focus policy
         self.setFocusPolicy(Qt.StrongFocus)
@@ -1014,21 +1033,7 @@ class ImageWindow(QMainWindow):
         elif not isinstance(points, PointTable):
             raise TypeError("points must be a PointTable or None")
 
-        style = {
-            "size": 9.0,
-            "min_screen_px": 3.0,
-            "max_screen_px": 80.0,
-            "edge_width": 1.2,
-            "layer_color": (1.0, 1.0, 0.0, 1.0),
-            "selected_color": (1.0, 0.3, 0.3, 1.0),
-            "show_circle": False,
-            "circle_radius_px": 4.0,
-            "z_tolerance": 0.5,
-            "label_visible": False,
-            "label_template": "{point_id}",
-            "label_font_size": 9,
-            "dense_label_threshold": 2000,
-        }
+        style = dict(POINT_DEFAULT_STYLE)
         visual = PointLayerVisual(self.view, **style)
         visual.set_points(points)
         visual.set_time_z(self.t_idx, self.z_idx)
@@ -1257,6 +1262,12 @@ class ImageWindow(QMainWindow):
         if points is None:
             return None
         return points.get_point(int(point_id))
+
+    def _format_hover_text(self, row: dict, template: str) -> str:
+        try:
+            return template.format(**row)
+        except Exception:
+            return str(row.get("point_id", ""))
 
     def _nearest_point(self, x: float, y: float, *, radius_px=8.0):
         if self._active_point_layer is None:
@@ -2447,13 +2458,27 @@ class ImageWindow(QMainWindow):
                             if "amplitude" in row:
                                 info_text += f" amp={row.get('amplitude')}"
                             self.info_label.setToolTip(str(row))
+                            # On-canvas hover tooltip
+                            entry = self._point_layers.get(near["layer"])
+                            visual = entry["visual"] if entry else None
+                            template = visual.label_template if visual else "{point_id}"
+                            hover_text = self._format_hover_text(row, template)
+                            offset = 5.0 / max(visual._px_per_data(), 1e-6) if visual else 5.0
+                            self._hover_label.text = hover_text
+                            self._hover_label.pos = np.array(
+                                [[x + offset, y - offset, 0.0]], dtype=np.float32
+                            )
+                            self._hover_label.visible = True
                         else:
                             self.info_label.setToolTip("")
+                            self._hover_label.visible = False
                     else:
                         self.info_label.setToolTip("")
+                        self._hover_label.visible = False
                     self.info_label.setText(info_text)
             else:
                 self.info_label.setText("")
+                self._hover_label.visible = False
 
         # 2. Contour Fill Mode (no button held - just mouse movement)
         if self._contour_mode:

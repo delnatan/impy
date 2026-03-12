@@ -5,6 +5,22 @@ from vispy import scene
 
 from ..data.points import PointTable
 
+DEFAULT_STYLE = {
+    "size": 9.0,
+    "min_screen_px": 3.0,
+    "max_screen_px": 80.0,
+    "edge_width": 1.2,
+    "layer_color": (1.0, 1.0, 0.0, 1.0),
+    "selected_color": (1.0, 0.3, 0.3, 1.0),
+    "show_circle": False,
+    "circle_radius_px": 4.0,
+    "z_tolerance": 0.5,
+    "label_visible": False,
+    "label_template": "{point_id}",
+    "label_font_size": 9,
+    "dense_label_threshold": 2000,
+}
+
 
 class PointLayerVisual:
     """Renders localization-style points with crosshair markers and optional circle."""
@@ -64,8 +80,6 @@ class PointLayerVisual:
             parent=self.view.scene,
         )
         self._labels = scene.visuals.Text(
-            text=[],
-            pos=np.zeros((0, 3), dtype=np.float32),
             color=(1.0, 1.0, 1.0, 0.9),
             font_size=self._label_font_size,
             anchor_x="left",
@@ -113,6 +127,10 @@ class PointLayerVisual:
             "label_font_size": self._label_font_size,
             "dense_label_threshold": self._dense_label_threshold,
         }
+
+    @property
+    def label_template(self) -> str:
+        return self._label_template
 
     def set_points(self, points: PointTable | None):
         self._points = points
@@ -177,8 +195,6 @@ class PointLayerVisual:
     def _clear(self):
         self._clear_line(self._cross_line)
         self._clear_line(self._circle_line)
-        self._labels.text = []
-        self._labels.pos = np.zeros((0, 3), dtype=np.float32)
         self._labels.visible = False
 
     def _px_per_data(self) -> float:
@@ -316,8 +332,6 @@ class PointLayerVisual:
             self._labels.pos = lpos
             self._labels.visible = True
         else:
-            self._labels.text = []
-            self._labels.pos = np.zeros((0, 3), dtype=np.float32)
             self._labels.visible = False
 
         show = bool(self._visible)

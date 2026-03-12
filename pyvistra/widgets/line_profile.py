@@ -11,6 +11,7 @@ import numpy as np
 from qtpy.QtCore import Qt, QPointF
 from qtpy.QtGui import QColor, QPainter, QPen, QFont, QPolygonF
 from qtpy.QtWidgets import (
+    QCheckBox,
     QFileDialog,
     QDialog,
     QHBoxLayout,
@@ -344,7 +345,11 @@ class LineProfileDialog(QDialog):
         layout.addWidget(self.series_list, 0)
 
         channel_row = QHBoxLayout()
-        channel_row.addWidget(QLabel("Selected series channel:"))
+        self.all_channels_cb = QCheckBox("All Channels")
+        self.all_channels_cb.setChecked(False)
+        self.all_channels_cb.toggled.connect(self._on_all_channels_toggled)
+        channel_row.addWidget(self.all_channels_cb)
+        channel_row.addWidget(QLabel("Channel:"))
         self.series_channel_spin = QSpinBox()
         self.series_channel_spin.setRange(1, 1)
         self.series_channel_spin.setEnabled(False)
@@ -560,11 +565,15 @@ class LineProfileDialog(QDialog):
         self.series_list.blockSignals(True)
         self.series_list.clear()
 
+        all_ch = self.all_channels_cb.isChecked()
         for wid, cfg in self.series_config.items():
-            ch = int(cfg.get("channel", 0)) + 1
             label = cfg.get("label", f"[{wid}] Window")
-            color = cfg.get("color", "#FFFFFF")
-            item = QListWidgetItem(f"{label} | Ch{ch} | {color}")
+            if all_ch:
+                n_ch = self._num_channels(cfg.get("window")) if cfg.get("window") else 1
+                ch_text = f"All ({n_ch}ch)"
+            else:
+                ch_text = f"Ch{int(cfg.get('channel', 0)) + 1}"
+            item = QListWidgetItem(f"{label} | {ch_text}")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             item.setCheckState(Qt.Checked if cfg.get("visible", True) else Qt.Unchecked)
             item.setData(Qt.UserRole, wid)
@@ -612,7 +621,14 @@ class LineProfileDialog(QDialog):
         self.series_channel_spin.setRange(1, max(1, n_channels))
         self.series_channel_spin.setValue(int(np.clip(ch, 1, max(1, n_channels))))
         self.series_channel_spin.blockSignals(False)
-        self.series_channel_spin.setEnabled(n_channels > 1)
+        self.series_channel_spin.setEnabled(
+            n_channels > 1 and not self.all_channels_cb.isChecked()
+        )
+
+    def _on_all_channels_toggled(self, checked):
+        self.series_channel_spin.setEnabled(not checked and self.series_list.currentItem() is not None)
+        self._refresh_series_list()
+        self._refresh_profiles()
 
     def _on_selected_channel_changed(self, value):
         item = self.series_list.currentItem()
@@ -653,53 +669,71 @@ class LineProfileDialog(QDialog):
         if length_um is not None:
             distances_um = np.linspace(0.0, length_um, num_points)
 
+        all_channels = self.all_channels_cb.isChecked()
         plot_series = []
         computed_series = []
         stale_wids = []
+        color_idx = 0
 
-        for i, (wid, cfg) in enumerate(self.series_config.items()):
+        for wid, cfg in self.series_config.items():
             window = cfg.get("window")
             if window is None:
                 stale_wids.append(wid)
                 continue
 
-            channel = int(cfg.get("channel", 0))
-            profile, channel_used = self._sample_profile(window, p1, p2, num_points, channel)
-            if profile is None:
-                continue
-
-            color = self._get_window_channel_color(window, channel_used, i)
+            visible = bool(cfg.get("visible", True))
             label = f"[{window.window_id}] {window.windowTitle()}"
             cfg["label"] = label
-            cfg["color"] = color
-            cfg["channel"] = channel_used
 
-            plot_series.append(
-                {
-                    "label": label,
-                    "color": color,
-                    "distances": distances_px,
-                    "values": profile,
-                    "visible": bool(cfg.get("visible", True)),
-                }
-            )
+            if all_channels:
+                n_ch = self._num_channels(window)
+                channels = range(n_ch)
+            else:
+                channels = [int(cfg.get("channel", 0))]
 
-            computed_series.append(
-                {
-                    "window_id": window.window_id,
-                    "window_title": window.windowTitle(),
-                    "channel": channel_used,
-                    "color": color,
-                    "visible": bool(cfg.get("visible", True)),
-                    "distances_px": distances_px,
-                    "distances_um": distances_um,
-                    "values": profile,
-                    "p1": p1,
-                    "p2": p2,
-                    "t_idx": getattr(window, "t_idx", None),
-                    "z_idx": getattr(window, "z_idx", None),
-                }
-            )
+            for ch in channels:
+                profile, ch_used = self._sample_profile(
+                    window, p1, p2, num_points, ch
+                )
+                if profile is None:
+                    continue
+
+                color = self._get_window_channel_color(window, ch_used, color_idx)
+                color_idx += 1
+                ch_label = f"{label} Ch{ch_used + 1}"
+
+                plot_series.append(
+                    {
+                        "label": ch_label,
+                        "color": color,
+                        "distances": distances_px,
+                        "values": profile,
+                        "visible": visible,
+                    }
+                )
+
+                computed_series.append(
+                    {
+                        "window_id": window.window_id,
+                        "window_title": window.windowTitle(),
+                        "channel": ch_used,
+                        "color": color,
+                        "visible": visible,
+                        "distances_px": distances_px,
+                        "distances_um": distances_um,
+                        "values": profile,
+                        "p1": p1,
+                        "p2": p2,
+                        "t_idx": getattr(window, "t_idx", None),
+                        "z_idx": getattr(window, "z_idx", None),
+                    }
+                )
+
+            if not all_channels and channels:
+                cfg["color"] = self._get_window_channel_color(
+                    window, channels[0], 0
+                )
+                cfg["channel"] = channels[0]
 
         for wid in stale_wids:
             self.series_config.pop(wid, None)
@@ -769,6 +803,13 @@ class LineProfileDialog(QDialog):
         )
         return profile, channel_used
 
+    @staticmethod
+    def _num_channels(window):
+        cache = window.renderer.current_slice_cache
+        if cache is not None and cache.ndim == 3:
+            return cache.shape[0]
+        return int(getattr(window, "C", 1))
+
     def _get_window_channel_color(self, window, channel_idx, fallback_idx):
         colors = getattr(window.renderer, "channel_colors", [])
         if channel_idx < len(colors):
@@ -776,7 +817,8 @@ class LineProfileDialog(QDialog):
         return FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)]
 
     def _export_profiles(self):
-        if not self._computed_series:
+        visible = [s for s in self._computed_series if s.get("visible", True)]
+        if not visible:
             self.status_label.setText("No profile data to export")
             return
 
@@ -784,7 +826,7 @@ class LineProfileDialog(QDialog):
             self,
             "Export Line Profiles",
             "line_profiles.csv",
-            "CSV Files (*.csv);;TSV Files (*.tsv);;Text Files (*.txt)",
+            "CSV Files (*.csv);;TSV Files (*.tsv)",
         )
         if not path:
             return
@@ -794,66 +836,57 @@ class LineProfileDialog(QDialog):
         else:
             delimiter = ","
 
-        header = [
-            "series_label",
-            "window_id",
-            "window_title",
-            "channel",
-            "distance_px",
-            "distance_um",
-            "intensity",
-            "p1_x",
-            "p1_y",
-            "p2_x",
-            "p2_y",
-            "t_idx",
-            "z_idx",
-        ]
+        p1 = visible[0].get("p1", (0, 0))
+        p2 = visible[0].get("p2", (0, 0))
+        distances_px = np.asarray(visible[0]["distances_px"], dtype=float)
+        distances_um = visible[0].get("distances_um")
+        has_um = distances_um is not None
+        if has_um:
+            distances_um = np.asarray(distances_um, dtype=float)
+
+        scale = getattr(self.source_window, "meta", {}).get("scale") if self.source_window else None
 
         try:
             with open(path, "w", newline="") as f:
+                f.write(f"# Line Profile\n")
+                f.write(f"# p1_xy: ({p1[0]:.2f}, {p1[1]:.2f})\n")
+                f.write(f"# p2_xy: ({p2[0]:.2f}, {p2[1]:.2f})\n")
+                if scale is not None and len(scale) >= 3:
+                    f.write(f"# pixel_size_yx: ({float(scale[1]):.6g}, {float(scale[2]):.6g}) um\n")
+                f.write(f"# line_length_px: {float(distances_px[-1]):.2f}\n")
+                if has_um:
+                    f.write(f"# line_length_um: {float(distances_um[-1]):.4f}\n")
+                f.write(f"# all_channels: {self.all_channels_cb.isChecked()}\n")
+                f.write(f"#\n")
+
+                col_labels = []
+                for s in visible:
+                    col_labels.append(
+                        f"[{s['window_id']}] {s['window_title']} Ch{s['channel'] + 1}"
+                    )
+
+                header = ["distance_px"]
+                if has_um:
+                    header.append("distance_um")
+                header.extend(col_labels)
+
                 writer = csv.writer(f, delimiter=delimiter)
                 writer.writerow(header)
 
-                for series in self._computed_series:
-                    if not series.get("visible", True):
-                        continue
+                for i in range(len(distances_px)):
+                    row = [f"{float(distances_px[i]):.4f}"]
+                    if has_um:
+                        row.append(f"{float(distances_um[i]):.6f}")
+                    for s in visible:
+                        vals = np.asarray(s["values"], dtype=float)
+                        row.append(f"{float(vals[i]):.6g}")
+                    writer.writerow(row)
 
-                    distances_px = np.asarray(series["distances_px"], dtype=float)
-                    values = np.asarray(series["values"], dtype=float)
-                    distances_um = series.get("distances_um")
-                    if distances_um is not None:
-                        distances_um = np.asarray(distances_um, dtype=float)
-
-                    p1 = series.get("p1", (None, None))
-                    p2 = series.get("p2", (None, None))
-
-                    for i in range(len(values)):
-                        d_um = ""
-                        if distances_um is not None and i < len(distances_um):
-                            d_um = float(distances_um[i])
-                        writer.writerow(
-                            [
-                                f"[{series['window_id']}] {series['window_title']} Ch{series['channel'] + 1}",
-                                series["window_id"],
-                                series["window_title"],
-                                series["channel"],
-                                float(distances_px[i]),
-                                d_um,
-                                float(values[i]),
-                                p1[0],
-                                p1[1],
-                                p2[0],
-                                p2[1],
-                                series.get("t_idx"),
-                                series.get("z_idx"),
-                            ]
-                        )
         except Exception as e:
             self.status_label.setText(f"Export failed: {e}")
             return
 
-        self.status_label.setText(f"Exported {len(self._computed_series)} series to {path}")
+        self.status_label.setText(f"Exported {len(visible)} series to {path}")
 
     def showEvent(self, event):
         super().showEvent(event)
