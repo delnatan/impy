@@ -400,3 +400,14 @@ class CompositeImageVisual:
         self._translate_x = 0.0
         self._translate_y = 0.0
         self._apply_transform_to_layers()
+
+    def close(self):
+        """Detach GPU layers from the scene and release data references."""
+        for layer in self.layers:
+            try:
+                layer.parent = None
+            except Exception:
+                pass
+        self.layers.clear()
+        self.data = None
+        self.current_slice_cache = None
