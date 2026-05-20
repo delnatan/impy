@@ -184,12 +184,23 @@ class ImageWindow(QMainWindow):
         manager.unregister(self)
         self.window_closing.emit(self)
 
-        # Cleanup data buffers/proxies (ImageBuffer, Imaris5DProxy)
-        if hasattr(self.img_data, "close"):
+        # Break viewer back-references in dialogs to unblock cyclic GC
+        for attr in ('contrast_dialog', 'channel_panel', 'transform_dialog'):
+            dlg = getattr(self, attr, None)
+            if dlg is not None:
+                dlg.viewer = None
+                setattr(self, attr, None)
+
+        # Release GPU textures and the renderer's data reference
+        self.renderer.close()
+
+        # Close and release the image data proxy
+        if hasattr(self.img_data, 'close'):
             try:
                 self.img_data.close()
             except Exception:
                 pass
+        self.img_data = None
 
         super().closeEvent(event)
 

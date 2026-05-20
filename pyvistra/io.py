@@ -204,6 +204,10 @@ class Numpy5DProxy:
         self.dtype = array.dtype
         self.ndim = 5
 
+    def close(self):
+        """Release the underlying array (and any memmap file handle it holds)."""
+        self.array = None
+
     def __getitem__(self, key):
         # Ensure key is a tuple
         if not isinstance(key, tuple):
