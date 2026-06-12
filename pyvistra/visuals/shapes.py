@@ -147,7 +147,7 @@ class ShapeLayerVisual:
         # Update label positions and text
         for i, rec in enumerate(shapes):
             lbl = self._labels[i]
-            name = rec.properties.get("name", f"Shape {rec.shape_id}")
+            name = rec.label or rec.properties.get("name") or f"Shape {rec.shape_id}"
             lbl.text = name
             lbl.visible = self._visible
             # Position label above the shape

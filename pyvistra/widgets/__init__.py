@@ -18,17 +18,27 @@ from .histogram import (
 )
 
 # Dialog widgets
-from .contrast import ContrastDialog
 from .channel_panel import ChannelPanel, ChannelRow
 from .metadata import MetadataDialog
 from .transform import TransformDialog
 from .alignment import AlignmentDialog
 from .output_selector import ImageOutputSelector
+from .region_selector import RegionSelector
 from .psf_dialog import PSFComputeDialog
+from .pupil_dialog import PupilComputeDialog
 from .axes_dialog import AxesDialog
 from .line_profile import LineProfileDialog, get_line_profile_dialog, line_profile_dialog_exists
-from .denoise_dialog import Denoise2DTimelapseDialog
+from .convergence_plot import (
+    ConvergencePlotDialog,
+    ConvergencePlotWidget,
+    get_convergence_comparison_dialog,
+)
 from .z_projection_dialog import ZProjectionDialog
+from .deconvolution_dialog import DeconvolutionDialog
+from .deconvolution_worker import (
+    MemDeconvolutionWorker,
+    RLDeconvolutionWorker,
+)
 from .processing_helper import BufferProcessingRunner
 from .overlay_settings import OverlaySettingsDialog
 
@@ -46,20 +56,26 @@ __all__ = [
     "HistogramWidget",
     "CompactHistogramWidget",
     # Dialog widgets
-    "ContrastDialog",
     "ChannelRow",
     "ChannelPanel",
     "MetadataDialog",
     "TransformDialog",
     "AlignmentDialog",
     "ImageOutputSelector",
+    "RegionSelector",
     "PSFComputeDialog",
+    "PupilComputeDialog",
     "AxesDialog",
-    "Denoise2DTimelapseDialog",
     "ZProjectionDialog",
+    "DeconvolutionDialog",
+    "MemDeconvolutionWorker",
+    "RLDeconvolutionWorker",
     "OverlaySettingsDialog",
     "BufferProcessingRunner",
     "LineProfileDialog",
     "get_line_profile_dialog",
     "line_profile_dialog_exists",
+    "ConvergencePlotWidget",
+    "ConvergencePlotDialog",
+    "get_convergence_comparison_dialog",
 ]

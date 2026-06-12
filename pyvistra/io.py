@@ -1,5 +1,4 @@
 import os
-import shutil
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -815,19 +814,18 @@ def load_image(filepath, use_memmap=True, dims=None):
         - .nd2 (Nikon ND2)
         - .czi (Zeiss CZI)
         - .tif, .tiff (TIFF)
-        - .png, .jpg, .jpeg (standard images via matplotlib)
+        - .png, .jpg, .jpeg (standard images via Pillow)
         - .zarr (Zarr arrays, including OME-Zarr)
-        - .psf.zarr (PSF files)
+        - .psf.h5, .pupil.h5 (deconlib PSF / pupil files)
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    # Handle PSF zarr files (check before general .zarr)
-    # .psf.zarr is a directory, .psf may be a legacy file format
-    if filepath.endswith(".psf.zarr/") and os.path.isdir(filepath):
-        return load_psf(filepath)
-    if filepath.endswith(".psf"):
-        return load_psf(filepath)
+    # Handle deconlib PSF / pupil files (HDF5-backed).
+    if filepath.endswith(".psf.h5"):
+        return _load_psf_h5(filepath)
+    if filepath.endswith(".pupil.h5"):
+        return _load_pupil_h5(filepath)
 
     # Handle general zarr directories
     if filepath.endswith(".zarr/") and os.path.isdir(filepath):
@@ -1164,100 +1162,101 @@ def save_imaris(
     )
 
 
-def save_psf(filepath, psf_data, metadata):
+def _build_psf_from_pyvistra_meta(data, metadata):
+    """Translate the pyvistra 5D + metadata convention into a deconlib ``Psf``.
+
+    pyvistra dialogs hand savers ``data`` as 5D ``(T, Z, C, Y, X)`` and a
+    metadata dict shaped like ``psf_dialog._build_metadata`` produces
+    (``parameters.{wavelength|wavelength_em, na, ni, ns}``, ``spacing``).
+    Squeezes T/C to yield the 3D PSF deconlib expects.
     """
-    Save PSF to .psf.zarr format.
+    from deconlib import Optics, Psf
 
-    Args:
-        filepath: Path ending in .psf.zarr
-        psf_data: 3D array (Nz, Ny, Nx) or 5D ImageBuffer/array
-        metadata: dict with PSF parameters
-    """
-    import json
-    from datetime import datetime
+    arr = np.asarray(data[:] if hasattr(data, "__getitem__") else data)
+    if arr.ndim == 5:
+        if arr.shape[0] != 1 or arr.shape[2] != 1:
+            raise ValueError(
+                f"PSF must have singleton T and C axes, got shape {arr.shape}"
+            )
+        arr = arr[0, :, 0, :, :]
+    elif arr.ndim != 3:
+        raise ValueError(f"PSF data must be 3D or 5D, got {arr.ndim}D")
 
-    # Ensure .psf.zarr extension
-    filepath = str(filepath)
-    if not filepath.endswith(".psf.zarr"):
-        filepath += ".psf.zarr"
+    params = (metadata or {}).get("parameters", {})
+    wavelength = params.get("wavelength") or params.get("wavelength_em")
+    if wavelength is None:
+        raise ValueError("PSF metadata missing wavelength")
 
-    # Get data as numpy array
-    if hasattr(psf_data, "__getitem__"):
-        data = np.asarray(psf_data[:])
-    else:
-        data = np.asarray(psf_data)
-
-    # Normalize to 5D if needed (3D -> 5D)
-    if data.ndim == 3:
-        # (Nz, Ny, Nx) -> (1, Nz, 1, Ny, Nx)
-        data = data[np.newaxis, :, np.newaxis, :, :]
-    elif data.ndim != 5:
-        raise ValueError(f"PSF data must be 3D or 5D, got {data.ndim}D")
-
-    # Remove existing directory if it exists
-    filepath_path = Path(filepath)
-    if filepath_path.exists():
-        shutil.rmtree(filepath_path)
-
-    # Create zarr array
-    store = zarr.open(
-        filepath,
-        mode="w",
-        shape=data.shape,
-        dtype=data.dtype,
-        chunks=(
-            1,
-            min(16, data.shape[1]),
-            data.shape[2],
-            min(512, data.shape[3]),
-            min(512, data.shape[4]),
-        ),
+    optics = Optics(
+        wavelength=float(wavelength),
+        na=float(params["na"]),
+        ni=float(params["ni"]),
+        ns=float(params.get("ns", params["ni"])),
+    )
+    spacing = tuple(float(s) for s in metadata["spacing"])
+    return Psf(
+        psf=arr.astype(np.float32, copy=False),
+        optics=optics,
+        pixel_size=spacing,
+        source=metadata.get("psf_source", "theoretical"),
     )
 
-    # Write data
-    store[:] = data
 
-    # Write metadata to .zattrs
-    # Zarr stores attrs in a separate file
-    store.attrs.update(metadata)
+def _load_psf_h5(filepath):
+    """Load a ``.psf.h5`` artifact as a (Numpy5DProxy, metadata) pair."""
+    from deconlib import load_psf as _decon_load_psf
+
+    psf_obj = _decon_load_psf(filepath)
+    arr5d = psf_obj.psf[np.newaxis, :, np.newaxis, :, :] if psf_obj.psf.ndim == 3 \
+        else psf_obj.psf[np.newaxis, np.newaxis, np.newaxis, :, :]
+    proxy = Numpy5DProxy(arr5d)
+    meta = {
+        "filename": os.path.basename(filepath),
+        "shape": arr5d.shape,
+        "is_rgb": False,
+        "scale": tuple(psf_obj.pixel_size),
+        "spacing": list(psf_obj.pixel_size),
+        "parameters": {
+            "wavelength": psf_obj.optics.wavelength,
+            "na": psf_obj.optics.na,
+            "ni": psf_obj.optics.ni,
+            "ns": psf_obj.optics.ns,
+        },
+        "psf_source": psf_obj.source,
+    }
+    if psf_obj.pupil_ref:
+        meta["pupil_ref"] = psf_obj.pupil_ref
+    return proxy, meta
 
 
-def load_psf(filepath):
+def _load_pupil_h5(filepath):
+    """Load a ``.pupil.h5`` artifact for image-viewer display.
+
+    Returns the complex pupil amplitude as a single-channel 5D float32
+    image plus a metadata dict that retains the Pupil dataclass under
+    ``"pupil"`` for downstream consumers.
     """
-    Load PSF from .psf.zarr format.
+    from deconlib import load_pupil as _decon_load_pupil
 
-    Args:
-        filepath: Path to .psf.zarr directory
-
-    Returns:
-        tuple: (Numpy5DProxy, metadata_dict)
-    """
-    filepath = str(filepath)
-
-    if not os.path.exists(filepath):
-        raise FileNotFoundError(f"PSF file not found: {filepath}")
-
-    # Open zarr store
-    store = zarr.open(filepath, mode="r")
-
-    # Read data into memory and wrap in proxy
-    data = np.asarray(store[:])
-    proxy = Numpy5DProxy(data)
-
-    # Read metadata from .zattrs
-    metadata = dict(store.attrs)
-
-    # Add filename to metadata
-    metadata["filename"] = os.path.basename(filepath)
-    metadata["shape"] = data.shape
-    metadata["is_rgb"] = False
-
-    # Extract scale from spacing if available
-    if "spacing" in metadata:
-        spacing = metadata["spacing"]
-        metadata["scale"] = tuple(spacing)
-
-    return proxy, metadata
+    pupil_obj = _decon_load_pupil(filepath)
+    amp = np.abs(pupil_obj.pupil).astype(np.float32)
+    arr5d = amp[np.newaxis, np.newaxis, np.newaxis, :, :]
+    proxy = Numpy5DProxy(arr5d)
+    meta = {
+        "filename": os.path.basename(filepath),
+        "shape": arr5d.shape,
+        "is_rgb": False,
+        "scale": (1.0, 1.0, 1.0),
+        "pupil": pupil_obj,
+        "pupil_source": pupil_obj.source,
+        "parameters": {
+            "wavelength": pupil_obj.optics.wavelength,
+            "na": pupil_obj.optics.na,
+            "ni": pupil_obj.optics.ni,
+            "ns": pupil_obj.optics.ns,
+        },
+    }
+    return proxy, meta
 
 
 # ---- Sparse Labels I/O ----
@@ -1287,3 +1286,86 @@ def save_sparse_labels(path, labels):
         labels: SparseLabels instance
     """
     labels.save(path)
+
+
+# ---------------------------------------------------------------------------
+# Output format registry
+# ---------------------------------------------------------------------------
+#
+# Maps extension → (display label, saver). Savers must accept the uniform
+# signature ``(filepath: str, data, metadata: dict) -> None`` where *data*
+# is 5D ``(T, Z, C, Y, X)`` array-like. Extra parameters (e.g. ``scale``)
+# are pulled from *metadata* inside the saver wrapper.
+#
+# ``ImageOutputSelector`` looks up labels and savers here, so adding a new
+# output format is one ``register_output_format(...)`` call from anywhere.
+
+_OUTPUT_FORMATS: "dict[str, tuple[str, callable]]" = {}
+
+
+def register_output_format(extension, label, saver):
+    """Register an output format for ``ImageOutputSelector``.
+
+    Args:
+        extension: File extension including leading dot (e.g. ``".tif"``,
+            ``".psf.h5"``).
+        label: Human-readable name shown in the UI (e.g. ``"TIFF"``).
+        saver: Callable ``(filepath, data, metadata) -> None``. *data* is
+            5D ``(T, Z, C, Y, X)``; *metadata* is a plain dict.
+    """
+    _OUTPUT_FORMATS[extension] = (label, saver)
+
+
+def get_output_format(extension):
+    """Look up a registered format. Returns ``(label, saver)`` or ``None``."""
+    return _OUTPUT_FORMATS.get(extension)
+
+
+def available_output_formats():
+    """All registered formats as ``[(label, extension), ...]``."""
+    return [(label, ext) for ext, (label, _) in _OUTPUT_FORMATS.items()]
+
+
+def _save_tiff_default(filepath, data, metadata):
+    scale = (metadata or {}).get("scale", (1.0, 1.0, 1.0))
+    save_tiff(filepath, data, scale=scale, metadata=metadata)
+
+
+def _save_imaris_default(filepath, data, metadata):
+    save_imaris(filepath, data, metadata=metadata)
+
+
+def _save_psf_h5_default(filepath, data, metadata):
+    """Saver for ``.psf.h5`` — wraps deconlib's :func:`save_psf`.
+
+    Translates pyvistra's 5D-array + dict-metadata convention into a
+    :class:`deconlib.Psf` and writes via deconlib's HDF5 I/O.
+    """
+    from deconlib import save_psf as _decon_save_psf
+
+    psf = _build_psf_from_pyvistra_meta(data, metadata)
+    _decon_save_psf(filepath, psf, metadata=metadata)
+
+
+def _save_pupil_h5_default(filepath, data, metadata):
+    """Saver for ``.pupil.h5`` — expects a :class:`deconlib.Pupil` in metadata.
+
+    The streaming/buffer-routing convention can't construct a Pupil from a
+    5D array alone (it's complex and carries optics). Dialogs that want to
+    save a pupil pass the ``Pupil`` instance under ``metadata["pupil"]``.
+    """
+    from deconlib import save_pupil as _decon_save_pupil
+
+    pupil = (metadata or {}).get("pupil")
+    if pupil is None:
+        raise ValueError(
+            "save .pupil.h5: metadata must include a 'pupil' key holding a "
+            "deconlib.Pupil instance"
+        )
+    _decon_save_pupil(filepath, pupil, metadata=metadata)
+
+
+register_output_format(".tif", "TIFF", _save_tiff_default)
+register_output_format(".ims", "Imaris", _save_imaris_default)
+register_output_format(".psf.h5", "PSF (HDF5)", _save_psf_h5_default)
+register_output_format(".pupil.h5", "Pupil (HDF5)", _save_pupil_h5_default)

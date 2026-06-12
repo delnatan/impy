@@ -294,6 +294,12 @@ class LineProfileDialog(QDialog):
         self.current_roi = None
         self.current_line_data = None  # {p1: (x,y), p2: (x,y)}
 
+        # When the profile source is a shape-layer record, we subscribe to
+        # the layer's data so handle/body edits refresh the profile live.
+        self._source_shape_layer = None
+        self._source_shape_id = None
+        self._source_shape_unsub = None
+
         # wid -> {window, channel, visible, label, color}
         self.series_config = OrderedDict()
         self._computed_series = []
@@ -428,6 +434,7 @@ class LineProfileDialog(QDialog):
         if window == self.source_window:
             self.source_window = None
             self.current_roi = None
+            self._unsubscribe_from_shape_source()
 
     def _on_roi_selection_changed(self, roi):
         if self._is_shutting_down:
@@ -440,6 +447,97 @@ class LineProfileDialog(QDialog):
             return
 
         self._update_profile(roi)
+
+    def set_shape_source(self, window, layer, shape_id):
+        """Use a shape-layer LINE/POLYLINE record as the profile source.
+
+        Equivalent to selecting a legacy ``LineROI`` in the source window,
+        but driven by the unified shape layer system. The dialog refreshes
+        immediately and adds the source window's series if not present, and
+        subscribes to the layer so the profile updates live as the shape is
+        edited (handle drag, body move, vertex insert/remove).
+        """
+        if shape_id not in layer.data:
+            return
+        if not self._extract_shape_line_data(layer, shape_id):
+            return
+
+        self.source_window = window
+        self.active_window = window
+        self.current_roi = None
+
+        self._subscribe_to_shape_source(layer, shape_id)
+        self._ensure_source_series()
+        self._refresh_profiles()
+
+    def _extract_shape_line_data(self, layer, shape_id):
+        """Populate ``self.current_line_data`` from a shape record.
+
+        Returns True if the shape is a LINE/POLYLINE and data was set.
+        """
+        from ..data.shapes import LINE as _LINE, POLYLINE as _POLYLINE
+        if shape_id not in layer.data:
+            return False
+        rec = layer.data.get(shape_id)
+        if rec.shape_type == _LINE:
+            p = rec.params
+            self.current_line_data = {
+                "p1": (float(p[0]), float(p[1])),
+                "p2": (float(p[2]), float(p[3])),
+                "path": None,
+            }
+            return True
+        if rec.shape_type == _POLYLINE and rec.vertices is not None:
+            from .kymograph_dialog import _sample_coords, _raw_pixel_length
+
+            length = max(2.0, _raw_pixel_length(rec))
+            path = _sample_coords(rec, max(2, int(np.ceil(length))))
+            self.current_line_data = {
+                "p1": (float(path[0, 0]), float(path[0, 1])),
+                "p2": (float(path[-1, 0]), float(path[-1, 1])),
+                "path": np.asarray(path, dtype=float),
+            }
+            return True
+        return False
+
+    def _subscribe_to_shape_source(self, layer, shape_id):
+        """Subscribe to ``layer.data`` so edits to ``shape_id`` refresh the
+        profile. Replaces any previous subscription.
+        """
+        from ..data.shapes import EVT_EDITED, EVT_REMOVED, EVT_BULK
+
+        self._unsubscribe_from_shape_source()
+        self._source_shape_layer = layer
+        self._source_shape_id = shape_id
+
+        def _on_shape_event(event_kind, sid):
+            if self._is_shutting_down:
+                return
+            if sid != self._source_shape_id and event_kind != EVT_BULK:
+                return
+            if event_kind == EVT_REMOVED:
+                self._unsubscribe_from_shape_source()
+                self.current_line_data = None
+                self.profile_widget.clear()
+                self.status_label.setText("Select a LineROI to start")
+                return
+            if event_kind in (EVT_EDITED, EVT_BULK):
+                if self._extract_shape_line_data(
+                    self._source_shape_layer, self._source_shape_id
+                ):
+                    self._refresh_profiles()
+
+        self._source_shape_unsub = layer.data.subscribe(_on_shape_event)
+
+    def _unsubscribe_from_shape_source(self):
+        if self._source_shape_unsub is not None:
+            try:
+                self._source_shape_unsub()
+            except Exception:
+                pass
+        self._source_shape_unsub = None
+        self._source_shape_layer = None
+        self._source_shape_id = None
 
     def _on_roi_modified(self, roi):
         if self._is_shutting_down:
@@ -462,11 +560,16 @@ class LineProfileDialog(QDialog):
         if self.active_window is not None:
             self.source_window = self.active_window
 
+        # A legacy LineROI took over as the source; drop any shape-layer
+        # subscription so its edits don't fight ours.
+        self._unsubscribe_from_shape_source()
+
         p1 = roi.data.get("p1", (0, 0))
         p2 = roi.data.get("p2", (0, 0))
         self.current_line_data = {
             "p1": (float(p1[0]), float(p1[1])),
             "p2": (float(p2[0]), float(p2[1])),
+            "path": None,
         }
 
         self._ensure_source_series()
@@ -551,6 +654,7 @@ class LineProfileDialog(QDialog):
         self.current_roi = None
         self.current_line_data = None
         self.source_window = None
+        self._unsubscribe_from_shape_source()
 
         self._refresh_series_list()
         self.profile_widget.clear()
@@ -659,15 +763,33 @@ class LineProfileDialog(QDialog):
 
         p1 = self.current_line_data["p1"]
         p2 = self.current_line_data["p2"]
+        path = self.current_line_data.get("path")
 
-        length_px = float(np.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2))
-        num_points = max(2, int(np.ceil(length_px)))
-        distances_px = np.linspace(0.0, length_px, num_points)
+        if path is not None and len(path) >= 2:
+            seg = np.diff(path, axis=0)
+            seg_len = np.hypot(seg[:, 0], seg[:, 1])
+            cum = np.concatenate([[0.0], np.cumsum(seg_len)])
+            length_px = float(cum[-1])
+            num_points = max(2, len(path))
+            distances_px = cum
+        else:
+            length_px = float(
+                np.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
+            )
+            num_points = max(2, int(np.ceil(length_px)))
+            distances_px = np.linspace(0.0, length_px, num_points)
 
         length_um = self._line_length_um_from_source(p1, p2)
+        if path is not None and length_um is not None:
+            # Re-derive length_um from arc length: avg of sx, sy applied to
+            # cumulative px distance.
+            scale = getattr(self.source_window, "meta", {}).get("scale")
+            if scale is not None and len(scale) >= 3:
+                sx, sy = float(scale[2]), float(scale[1])
+                length_um = length_px * 0.5 * (sx + sy)
         distances_um = None
-        if length_um is not None:
-            distances_um = np.linspace(0.0, length_um, num_points)
+        if length_um is not None and length_px > 0:
+            distances_um = distances_px * (length_um / length_px)
 
         all_channels = self.all_channels_cb.isChecked()
         plot_series = []
@@ -693,7 +815,7 @@ class LineProfileDialog(QDialog):
 
             for ch in channels:
                 profile, ch_used = self._sample_profile(
-                    window, p1, p2, num_points, ch
+                    window, p1, p2, num_points, ch, path=path
                 )
                 if profile is None:
                     continue
@@ -772,7 +894,7 @@ class LineProfileDialog(QDialog):
         dy = float(p2[1] - p1[1])
         return float(np.sqrt((dx * sx) ** 2 + (dy * sy) ** 2))
 
-    def _sample_profile(self, window, p1, p2, num_points, channel_idx):
+    def _sample_profile(self, window, p1, p2, num_points, channel_idx, *, path=None):
         cache = window.renderer.current_slice_cache
         if cache is None:
             return None, channel_idx
@@ -788,11 +910,14 @@ class LineProfileDialog(QDialog):
 
         from scipy.ndimage import map_coordinates
 
-        x1, y1 = p1
-        x2, y2 = p2
-
-        xs = np.linspace(x1, x2, num_points)
-        ys = np.linspace(y1, y2, num_points)
+        if path is not None and len(path) >= 2:
+            xs = np.asarray(path[:, 0], dtype=float)
+            ys = np.asarray(path[:, 1], dtype=float)
+        else:
+            x1, y1 = p1
+            x2, y2 = p2
+            xs = np.linspace(x1, x2, num_points)
+            ys = np.linspace(y1, y2, num_points)
         coords = np.array([ys, xs], dtype=float)
 
         profile = map_coordinates(
@@ -917,6 +1042,7 @@ class LineProfileDialog(QDialog):
         for window in list(self._connected_windows):
             self._disconnect_window(window)
 
+        self._unsubscribe_from_shape_source()
         self.active_window = None
         self.source_window = None
         self.current_roi = None

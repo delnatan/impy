@@ -27,12 +27,10 @@ from .io import (
     Numpy5DProxy,
     build_z_projection_metadata,
     load_image,
-    load_psf,
     load_sparse_labels,
     project_z_max,
     normalize_to_5d,
     save_imaris,
-    save_psf,
     save_sparse_labels,
     save_tiff,
 )
@@ -50,9 +48,9 @@ from .layers import Layer, LayerList, UndoStack
 from .ui.window import ImageWindow, imshow, run_app
 
 from .widgets import (
-    Denoise2DTimelapseDialog,
     ImageOutputSelector,
     PSFComputeDialog,
+    PupilComputeDialog,
     ZProjectionDialog,
 )
 
@@ -61,11 +59,9 @@ __all__ = [
     "colormaps",
     # io
     "load_image",
-    "load_psf",
     "load_sparse_labels",
     "save_tiff",
     "save_imaris",
-    "save_psf",
     "save_sparse_labels",
     "normalize_to_5d",
     "project_z_max",
@@ -82,7 +78,7 @@ __all__ = [
     # widgets
     "ImageOutputSelector",
     "PSFComputeDialog",
-    "Denoise2DTimelapseDialog",
+    "PupilComputeDialog",
     "ZProjectionDialog",
     # rois
     "ROI",

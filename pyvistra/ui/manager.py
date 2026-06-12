@@ -53,5 +53,30 @@ class WindowManager(QObject):
         return self.windows
 
 
+def compatible_windows(src):
+    """Return open windows whose YX shape matches ``src``'s.
+
+    Used by cross-window shape-copy and by analysis dialogs that need to
+    sample matching pixel grids in several windows.
+
+    Excludes ``src`` itself. Only considers windows that expose an
+    ``img_data`` attribute with at least 2 spatial dims.
+    """
+    src_data = getattr(src, "img_data", None)
+    if src_data is None or len(src_data.shape) < 2:
+        return []
+    src_yx = tuple(src_data.shape[-2:])
+    out = []
+    for w in manager.get_all().values():
+        if w is src:
+            continue
+        data = getattr(w, "img_data", None)
+        if data is None or len(data.shape) < 2:
+            continue
+        if tuple(data.shape[-2:]) == src_yx:
+            out.append(w)
+    return out
+
+
 # Global singleton instance
 manager = WindowManager()

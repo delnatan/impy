@@ -13,6 +13,12 @@ The intended workflow is::
     # Meanwhile the UI can display buf live:
     win = imshow(buf, title="Processing…")
 
+Live updates are wired automatically: ``ImageWindow`` subscribes to the
+buffer via ``subscribe(callback)`` and refreshes the view whenever a write
+touches the currently displayed (t, z) slice.  Callbacks fire on the
+writer's thread; consumers that need GUI-thread execution should marshal
+via a queued Qt signal (the ``ImageWindow`` integration does this).
+
 After processing, ``buf`` can be saved or kept in memory.  The underlying
 zarr store is a temporary directory in ``~/.pyvistra/buffers/`` that is
 deleted when ``buf.close()`` is called (or when the object is garbage-
@@ -34,7 +40,8 @@ BUFFER_DIR = Path.home() / ".pyvistra" / "buffers"
 class ImageBuffer(RefCountMixin):
     """
     Zarr-backed 5D array with the same read interface as the proxies plus
-    write support via ``__setitem__``.
+    write support via ``__setitem__`` and change notifications via
+    ``subscribe()``.
 
     Shape must be 5D ``(T, Z, C, Y, X)``.
     """
@@ -57,6 +64,7 @@ class ImageBuffer(RefCountMixin):
 
         self.metadata = metadata or {}
         self.ndim = 5
+        self._listeners = []
         self._init_refcount()
 
     @property
@@ -72,6 +80,30 @@ class ImageBuffer(RefCountMixin):
 
     def __setitem__(self, key, value):
         self._store[key] = value
+        if self._listeners:
+            for cb in list(self._listeners):
+                try:
+                    cb(key)
+                except Exception:
+                    pass
+
+    def subscribe(self, callback):
+        """Register *callback(key)* fired on every ``__setitem__``.
+
+        *key* is the slicing tuple as passed to ``__setitem__`` (not
+        normalised). Callbacks run on the writer's thread.
+
+        Returns a zero-arg unsubscribe function.
+        """
+        self._listeners.append(callback)
+
+        def _unsubscribe():
+            try:
+                self._listeners.remove(callback)
+            except ValueError:
+                pass
+
+        return _unsubscribe
 
     def save_as(self, filepath):
         """Export buffer contents to OME-TIFF."""

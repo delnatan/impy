@@ -134,7 +134,55 @@ slice_2d = data[0, 5, 1, :, :]  # loads only this slice from disk
 Reader/Proxy → (compute in thread) → ImageBuffer → ImageWindow
 ```
 
-`ImageBuffer` has the same read interface as proxies (`.shape`, `.__getitem__`) plus write support (`.__setitem__`). Pass an `ImageBuffer` to `imshow()` to watch computation in real time.
+`ImageBuffer` has the same read interface as proxies (`.shape`, `.__getitem__`) plus write support (`.__setitem__`).
+
+**Change notifications.** `ImageBuffer.subscribe(callback)` registers a `callback(key)` invoked on every `__setitem__`, where `key` is the slicing tuple as passed to the writer. Callbacks fire on the writer's thread; Qt consumers must marshal to the GUI thread (the buffer module itself stays Qt-free per the `data/` dependency rule).
+
+`ImageWindow` does this marshalling internally:
+
+1. When given an `ImageBuffer`, it calls `subscribe()` and stores the unsubscribe handle.
+2. The callback emits a queued internal Qt signal (`_buffer_dirty`).
+3. The handler checks whether the write touches the currently displayed `(t, z)` and either calls `update_view()` or just `canvas.update()`.
+4. On `set_data()` it re-subscribes; on `closeEvent()` it unsubscribes.
+
+This means processing workers do **not** need per-slice signals like the old `plane_done` — they just write into the buffer:
+
+```python
+def run(self):
+    for t in range(T):
+        result = heavy_computation(self._source[t, ...])
+        self._buffer[t, ...] = result   # window refreshes automatically
+        self.progress.emit(t + 1, T)
+    self.finished.emit()
+```
+
+Pass an `ImageBuffer` to `imshow()` to watch computation in real time.
+
+### 5D Data Contracts (Protocols)
+
+`data/protocols.py` defines structural-typing contracts that all 5D data sources satisfy:
+
+- **`Readable5D`** — `.shape`, `.dtype`, `.ndim`, `__getitem__`. Implemented by every proxy and by `ImageBuffer`.
+- **`Writable5D`** — adds `__setitem__`. Implemented by `ImageBuffer`.
+- **`ObservableBuffer`** — adds `subscribe(callback) -> unsubscribe`. Implemented by `ImageBuffer`.
+
+These are `typing.Protocol` classes (runtime-checkable, no inheritance required). They exist so external libraries (e.g. `deconlib`, `memsolve`) can type-annotate against pyvistra without importing concrete classes:
+
+```python
+def deconvolve(src: Readable5D, dst: Writable5D, psf, params): ...
+```
+
+Worker signatures and `BufferProcessingRunner.prepare_output()` use these annotations as the canonical contract.
+
+### Refcounting (`acquire` / `release`)
+
+Every 5D proxy and `ImageBuffer` extends `RefCountMixin` (`data/proxies.py`). The contract:
+
+- `acquire()` increments the count and returns `self` (for chaining: `buf.acquire()`).
+- `release()` decrements and calls `close()` at zero.
+- `close()` does whatever cleanup is needed (close file handle, delete temp dir, no-op for in-memory arrays).
+
+Consumers that hold a reference across thread boundaries or hand-offs (e.g. `BufferProcessingRunner` passing data to a worker and a viewer) call `acquire()` to bump the count and `release()` when done. There is no `hasattr(x, "acquire")` check anywhere — every 5D source has it.
 
 ### Colormap System
 
@@ -144,13 +192,40 @@ Reader/Proxy → (compute in thread) → ImageBuffer → ImageWindow
 import pyvistra.colormaps as cmap
 
 # Built-in named colormaps (delegated to vispy):
-cmap.get('viridis')   # returns vispy.color.Colormap
+cmap.get('viridis')   # returns (vispy.color.Colormap, display_color_or_None)
 cmap.get('Green')     # simple black→#49FF49
+
+cmap.names()          # list of every registered name (built-in + custom)
 
 # Register a custom colormap:
 cmap.register('MyLUT', [(0,0,0,1), (0.5,0,1,1), (1,1,1,1)])
 cmap.register('MyArray', my_256x4_lut_array)
 ```
+
+### Per-Channel Display State
+
+Every multi-channel renderer (`CompositeImageVisual`, `VolumeRendererProxy`, `TiledVisualProxy`, `OrthoVisualProxy` via its primary view) owns a `ChannelDisplayList` at `renderer.display` (defined in `data/channel_state.py`). Each entry is a `ChannelDisplayState` dataclass with `clim`, `gamma`, `colormap_name`, `visible` — plus a derived `display_color()` that consults the colormap registry.
+
+- **Mutations**: `display.set_clim(c, lo, hi)`, `set_gamma`, `set_colormap_name`, `set_visible`.
+- **Notifications**: `display.subscribe(callback)` registers `callback(channel_idx, field)` fired on every mutation. Returns an unsubscribe function.
+- **Renderer mirror**: each renderer subscribes to its own `display` to push state changes into the underlying vispy layers (image/volume). UI widgets don't touch vispy.
+
+This is the same pattern as `ImageBuffer.subscribe()` — pure-data list, callback-based notifications, no Qt in `data/`.
+
+The renderer methods `set_clim`/`set_gamma`/`set_colormap`/`set_channel_visible` (and getters) are thin delegations to `self.display`. Code that needs the swatch color list uses the derived `renderer.channel_colors` property.
+
+### Channels & Contrast Panel
+
+One unified `ChannelPanel` (in `widgets/channel_panel.py`) handles all per-channel visual adjustment: colormap, contrast (min/max + compact histogram), gamma, visibility. Header buttons drive panel-wide actions ("Auto Contrast All", `+`/`-` percentile tighten/loosen — those use `pyvistra.contrast.compute_percentile_clim`).
+
+The panel:
+1. Writes user input through `renderer.display.set_*` (the renderer mirrors to vispy).
+2. Subscribes to `renderer.display` to update rows when state changes from any source.
+3. Subscribes to `viewer.view_changed` (when available) to refresh histograms on slice navigation.
+
+There is no separate "ContrastDialog" — it was folded in. The panel is the single entry point for all visual adjustments and is wired to the "Channels && Contrast..." menu action (Shift+C) on every viewer.
+
+The shared `ChannelRow` widget is the unit of UI per channel and is reused by `TiledChannelPanel` for the tiled viewer's global controls.
 
 ### Layer System
 
@@ -251,10 +326,35 @@ colormaps.register('MyGradient', my_256x4_array)
 2. Add proxy class in `data/proxies.py` extending `File5DProxy` if lazy loading needed
 3. Update `load_image()` in `io.py` with extension detection
 4. Ensure output is 5D `(T, Z, C, Y, X)`
+5. For *write* support: define `save_myformat(filepath, data, metadata)` and register it once at module load:
+   ```python
+   from pyvistra.io import register_output_format
+   register_output_format(".myext", "MyFormat", save_myformat)
+   ```
+   Every dialog that lists `".myext"` in its `ImageOutputSelector(formats=...)` picks it up automatically. No widget code edits required.
 
-### Adding Analysis Functions
-1. Create function in `analysis.py` with `@magicgui` decorator
-2. Register in `AnnotationManager._setup_ui()`
+### I/O Routing Contract
+
+All processor results — whether streamed, one-shot, or saved — flow through `ImageOutputSelector.send(data, metadata)`. The selector dispatches to one of three destinations:
+
+- **Existing window**: `window.set_data(data, metadata)`.
+- **New window**: constructs and shows an `ImageWindow`.
+- **File**: looks up the saver in the format registry (`pyvistra.io.register_output_format`) and writes it.
+
+This means dialogs do **not** decide where their output goes — the user does, via the selector combo. Adding new formats is a one-line `register_output_format(...)` call from anywhere (including downstream libraries like deconlib).
+
+Two upstream paths reach the selector:
+
+- **Streaming** (long-running, threaded): use `BufferProcessingRunner` — it owns the worker thread, source/buffer refcounts, and routes via `output_selector.send(buffer.acquire(), metadata)` automatically.
+- **Synchronous** (one-shot, GUI-thread compute): construct an `ImageBuffer`, fill it, and call `output_selector.send(buffer, metadata)` directly. PSF computation (`widgets/psf_dialog.py`) is the canonical example.
+
+### Adding a Streaming Image Processor
+Follow the pattern in `widgets/z_projection_dialog.py` + `widgets/processing_helper.py`:
+
+1. Subclass `QObject` for the worker. Required signals: `progress(done, total)`, `finished()`, `cancelled()`, `error(str)`. Implement `run(self)` and `cancel(self)`. **Do not emit per-slice signals** — write into the output `ImageBuffer` and the destination window refreshes automatically via `ImageBuffer.subscribe()`.
+2. Type-annotate `run` as `(source: Readable5D, buffer: Writable5D, params)`.
+3. In the dialog, instantiate `ImageOutputSelector` + `BufferProcessingRunner`; call `runner.prepare_output(...)` to get `(source, buffer)`, then `runner.start_worker(...)`.
+4. The same dialog works for "reuse window / new window / save to file" — that's the `ImageOutputSelector` contract.
 
 ### Adding a Standalone Application
 Place in `apps/` — not in core. Apps can import from core freely; core must not import from apps.
@@ -273,4 +373,4 @@ Place in `apps/` — not in core. Apps can import from core freely; core must no
 
 ---
 
-*Last Updated: 2026-02-24*
+*Last Updated: 2026-06-04 (Stage V — visual adjustment refactor)*

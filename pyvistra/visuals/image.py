@@ -3,11 +3,7 @@ from vispy import scene
 from vispy.visuals.transforms.linear import MatrixTransform, STTransform
 
 from .. import colormaps as _colormaps
-
-# COLORMAPS is kept as a name→None dict for backward compatibility.
-# Code that needs to list colormaps (dropdowns) uses COLORMAPS.keys();
-# code that needs to fetch a colormap uses get_colormap().
-COLORMAPS = {name: None for name in _colormaps.names()}
+from ..data.channel_state import ChannelDisplayList, ChannelDisplayState
 
 # Default channel colormaps (original microscope colors)
 DEFAULT_CHANNEL_COLORMAPS = [
@@ -22,16 +18,45 @@ DEFAULT_CHANNEL_COLORMAPS = [
 # Standard RGB colormaps for RGB images
 RGB_COLORMAPS = ["Red", "Pure Green", "Blue"]
 
+# Fallback swatch color for multi-color colormaps (viridis, etc.)
+_NEUTRAL_SWATCH = "#888888"
+
 
 def get_colormap(name):
     """Get a vispy Colormap by name. Returns (Colormap, display_color_or_None)."""
     return _colormaps.get(name)
 
 
+def default_clim_for_dtype(dtype):
+    """Return a reasonable default ``(vmin, vmax)`` for *dtype*."""
+    if dtype == np.uint16:
+        return (0.0, 65535.0)
+    if dtype.kind == "f":
+        return (0.0, 1.0)
+    return (0.0, 255.0)
+
+
+def default_channel_colormap(channel_idx, n_channels, is_rgb=False):
+    """Pick a default colormap name for *channel_idx*."""
+    if n_channels == 1:
+        return "White"
+    if is_rgb and channel_idx < 3:
+        return RGB_COLORMAPS[channel_idx]
+    return DEFAULT_CHANNEL_COLORMAPS[
+        channel_idx % len(DEFAULT_CHANNEL_COLORMAPS)
+    ]
+
+
 class CompositeImageVisual:
     """
     Manages multiple Vispy Image visuals to create a composite
     multi-channel rendering using additive blending.
+
+    Per-channel display state (clim, gamma, colormap name, visibility)
+    lives in :attr:`display`, a :class:`ChannelDisplayList`. UI widgets
+    should call ``display.subscribe(callback)`` to react to changes
+    rather than polling. The renderer keeps vispy state in sync by
+    subscribing itself.
     """
 
     def __init__(self, view, image_data, scale=(1.0, 1.0), is_rgb=False):
@@ -41,66 +66,36 @@ class CompositeImageVisual:
         self.layers = []
         self.is_rgb = is_rgb  # True for RGB color images
         self.num_channels = self.data.shape[2]
-        # State
+        # Mode state
         self.mode = "composite"
         self.active_channel_idx = 0
 
         self.current_slice_cache = None
-        self.channel_clims = {}
-        self.channel_gammas = {}
-        self.channel_colormaps = {}  # Maps channel index to colormap name
-        self.channel_visibility = {}  # Maps channel index to visibility (True/False)
 
         # Transform state (rotation/translation for image alignment)
         self._rotation_deg = 0.0
         self._translate_x = 0.0
         self._translate_y = 0.0
 
-        # Legacy color list for histogram display (derived from colormap)
-        self.channel_colors = [
-            "#ffb100",
-            "#49FF49",
-            "#5BD6FF",
-            "magenta",
-            "cyan",
-            "yellow",
-        ]
+        # Per-channel display state (clim/gamma/colormap/visible).
+        default_clim = default_clim_for_dtype(self.data.dtype)
+        self.display = ChannelDisplayList(self.num_channels)
+        for c in range(self.num_channels):
+            self.display.set_clim(c, *default_clim)
+            self.display.set_colormap_name(
+                c,
+                default_channel_colormap(c, self.num_channels, self.is_rgb),
+            )
 
         self._setup_layers()
 
+        # Mirror display-state changes into the underlying vispy layers.
+        self.display.subscribe(self._on_display_changed)
+
     def _setup_layers(self):
-        n_channels = self.data.shape[2]
-
-        # 1. Determine decent default limits based on dtype
-        # This prevents the "squashed handles" look on the slider
-        dtype = self.data.dtype
-        default_clim = (0, 255)
-
-        if dtype == np.uint16:
-            default_clim = (0, 65535)
-        elif dtype.kind == "f":
-            # For float, we assume 0.0-1.0 until we see data
-            default_clim = (0.0, 1.0)
-
-        for c in range(n_channels):
-            if n_channels == 1:
-                cmap_name = "White"
-            elif self.is_rgb and c < 3:
-                # Use RGB colormaps for RGB images
-                cmap_name = RGB_COLORMAPS[c]
-            else:
-                cmap_name = DEFAULT_CHANNEL_COLORMAPS[
-                    c % len(DEFAULT_CHANNEL_COLORMAPS)
-                ]
-
-            # Get colormap and associated display color
-            cmap, display_color = get_colormap(cmap_name)
-            self.channel_colormaps[c] = cmap_name
-
-            # Update legacy color list for histogram display
-            if display_color:
-                if c < len(self.channel_colors):
-                    self.channel_colors[c] = display_color
+        for c in range(self.num_channels):
+            state = self.display[c]
+            cmap, _ = get_colormap(state.colormap_name)
 
             image_visual = scene.visuals.Image(
                 cmap=cmap,
@@ -108,24 +103,45 @@ class CompositeImageVisual:
                 method="auto",
                 interpolation="nearest",
             )
-
-            # Apply combined transform (scale + rotation + translation)
+            image_visual.clim = state.clim
+            image_visual.gamma = state.gamma
             image_visual.transform = self._build_transform()
-
-            # Force Additive Blending
             image_visual.set_gl_state(
                 preset="translucent",
                 blend=True,
                 blend_func=("one", "one"),
                 depth_test=False,
             )
-
             image_visual.order = -c
             self.layers.append(image_visual)
 
-            self.channel_clims[c] = default_clim
-            self.channel_gammas[c] = 1.0
-            self.channel_visibility[c] = True
+    def _on_display_changed(self, idx, field):
+        """Apply a ChannelDisplayList mutation to the underlying vispy layer."""
+        if idx >= len(self.layers):
+            return
+        state = self.display[idx]
+        layer = self.layers[idx]
+        if field == "clim":
+            layer.clim = state.clim
+        elif field == "gamma":
+            layer.gamma = state.gamma
+        elif field == "colormap_name":
+            cmap, _ = get_colormap(state.colormap_name)
+            layer.cmap = cmap
+        elif field == "visible":
+            self._update_visibility()
+
+    @property
+    def channel_colors(self):
+        """Derived list of per-channel swatch colors.
+
+        Computed from each channel's colormap. Multi-color colormaps
+        (viridis, plasma, etc.) get a neutral grey swatch.
+        """
+        return [
+            state.display_color() or _NEUTRAL_SWATCH
+            for state in (self.display[c] for c in range(len(self.display)))
+        ]
 
     def set_mode(self, mode):
         self.mode = mode
@@ -138,8 +154,7 @@ class CompositeImageVisual:
     def _update_visibility(self):
         for i, layer in enumerate(self.layers):
             if self.mode == "composite":
-                # In composite mode, respect per-channel visibility toggle
-                layer.visible = self.channel_visibility.get(i, True)
+                layer.visible = self.display[i].visible
                 layer.set_gl_state(
                     blend=True,
                     blend_func=("one", "one"),
@@ -164,7 +179,6 @@ class CompositeImageVisual:
         elif volume_slice.ndim == 3 and isinstance(
             z_idx, slice
         ):  # (Z, Y, X) -> (Y, X)
-            # Ambiguous if C=Z? But if z_idx is slice, dim 0 is Z.
             volume_slice = np.max(volume_slice, axis=0)
 
         if volume_slice.ndim == 2:
@@ -174,75 +188,62 @@ class CompositeImageVisual:
 
         for c, layer in enumerate(self.layers):
             if c < volume_slice.shape[0]:
-                plane = volume_slice[c]
-                layer.set_data(plane)
-
-                # Auto-Contrast Logic (Refinement)
-                # If we are strictly at default (e.g. 0-65535) and the actual data
-                # is tiny (e.g. max 400), we tighten it.
-                current_clim = self.channel_clims[c]
-                dtype = self.data.dtype
-
-                # Check for "Suspiciously Default" limits vs "Real Data"
-                if dtype == np.uint16 and current_clim == (0, 65535):
-                    # Use percentiles for robustness against outliers
-                    # Ignore zeros (background/padding) for more accurate contrast
-                    valid_data = plane[plane > 0]
-                    if valid_data.size > 0:
-                        mn, mx = np.nanpercentile(valid_data, (0.1, 99.9))
-                        # If data uses less than 10% of dynamic range, auto-scale
-                        if mx < 6000:
-                            self.set_clim(c, mn, max(mx, 1))
-
-                elif dtype.kind == "f" and current_clim == (0.0, 1.0):
-                    valid_data = plane[plane > 0]
-                    if valid_data.size > 0:
-                        mn, mx = np.nanpercentile(valid_data, (0.1, 99.9))
-                        self.set_clim(c, mn, mx)
+                layer.set_data(volume_slice[c])
 
         self._update_visibility()
 
+    def auto_contrast(self, pct_low=0.1, pct_high=99.9):
+        """One-shot percentile-based auto-contrast for every channel.
+
+        Operates on the currently cached slice. Intended to be called
+        once after the first slice loads (or on user request), not on
+        every slice update.
+        """
+        from ..contrast import compute_percentile_clim
+
+        cache = self.current_slice_cache
+        if cache is None:
+            return
+        for c in range(cache.shape[0]):
+            if c < len(self.layers):
+                mn, mx = compute_percentile_clim(cache[c], pct_low, pct_high)
+                self.set_clim(c, mn, mx)
+
+    # Channel state — thin delegations to self.display. The display
+    # list's subscribe() machinery propagates changes to the vispy
+    # layers via _on_display_changed.
+
     def set_clim(self, channel_idx, vmin, vmax):
-        if channel_idx < len(self.layers):
-            self.layers[channel_idx].clim = (vmin, vmax)
-            self.channel_clims[channel_idx] = (vmin, vmax)
+        self.display.set_clim(channel_idx, vmin, vmax)
 
     def get_clim(self, channel_idx):
-        return self.channel_clims.get(channel_idx, (0, 255))
+        if channel_idx < len(self.display):
+            return self.display[channel_idx].clim
+        return (0.0, 255.0)
 
     def set_gamma(self, channel_idx, gamma):
-        if channel_idx < len(self.layers):
-            self.layers[channel_idx].gamma = gamma
-            self.channel_gammas[channel_idx] = gamma
+        self.display.set_gamma(channel_idx, gamma)
 
     def get_gamma(self, channel_idx):
-        return self.channel_gammas.get(channel_idx, 1.0)
+        if channel_idx < len(self.display):
+            return self.display[channel_idx].gamma
+        return 1.0
 
     def set_colormap(self, channel_idx, cmap_name):
-        """Set the colormap for a specific channel by name."""
-        if channel_idx >= len(self.layers):
-            return
-
-        cmap, display_color = get_colormap(cmap_name)
-        self.layers[channel_idx].cmap = cmap
-        self.channel_colormaps[channel_idx] = cmap_name
-
-        if display_color and channel_idx < len(self.channel_colors):
-            self.channel_colors[channel_idx] = display_color
+        self.display.set_colormap_name(channel_idx, cmap_name)
 
     def get_colormap_name(self, channel_idx):
-        """Get the current colormap name for a channel."""
-        return self.channel_colormaps.get(channel_idx, "White")
+        if channel_idx < len(self.display):
+            return self.display[channel_idx].colormap_name
+        return "White"
 
     def set_channel_visible(self, channel_idx, visible):
-        """Set visibility for a specific channel in composite mode."""
-        if channel_idx < len(self.layers):
-            self.channel_visibility[channel_idx] = visible
-            self._update_visibility()
+        self.display.set_visible(channel_idx, visible)
 
     def get_channel_visible(self, channel_idx):
-        """Get visibility state for a specific channel."""
-        return self.channel_visibility.get(channel_idx, True)
+        if channel_idx < len(self.display):
+            return self.display[channel_idx].visible
+        return True
 
     def reset_camera(self, shape):
         _, _, _, Y, X = shape

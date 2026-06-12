@@ -1,5 +1,5 @@
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
     QAction,
     QComboBox,
@@ -18,7 +18,6 @@ from ..visuals.overlays import ScaleTimestampOverlay
 from ..visuals.image import CompositeImageVisual
 from ..widgets import (
     ChannelPanel,
-    ContrastDialog,
     MetadataDialog,
     OverlaySettingsDialog,
 )
@@ -27,7 +26,7 @@ from ..widgets import (
 class OrthoVisualProxy:
     """
     Proxies calls to multiple CompositeImageVisual instances to keep them in sync.
-    Used by ContrastDialog to control all 3 views simultaneously.
+    Used by ChannelPanel to control all 3 views simultaneously.
     """
 
     def __init__(self, visuals):
@@ -48,9 +47,28 @@ class OrthoVisualProxy:
     def channel_colors(self):
         return self.primary.channel_colors
 
+    @property
+    def display(self):
+        """Shared :class:`ChannelDisplayList` (the primary view's).
+
+        Panels should subscribe here. The other two views are kept in
+        sync by this proxy's broadcast setters.
+        """
+        return self.primary.display
+
     def set_clim(self, channel_idx, vmin, vmax):
         for v in self.visuals:
             v.set_clim(channel_idx, vmin, vmax)
+            # Re-push the cached plane so vispy's CPU-scaled texture is
+            # rebuilt with the new clim; without this the uniform-only
+            # update path doesn't reliably redraw all three ortho views.
+            cache = v.current_slice_cache
+            if (
+                cache is not None
+                and channel_idx < cache.shape[0]
+                and channel_idx < len(v.layers)
+            ):
+                v.layers[channel_idx].set_data(cache[channel_idx])
 
     def get_clim(self, channel_idx):
         return self.primary.get_clim(channel_idx)
@@ -149,6 +167,11 @@ class TransposedProxy:
 
 
 class OrthoViewer(QMainWindow):
+    # Emitted whenever the displayed orthoslice triplet changes (crosshair
+    # move, time step, set_data, …). ChannelPanel & line-profile widgets
+    # listen for this to refresh per-channel histograms / profiles.
+    view_changed = Signal(object)
+
     def __init__(self, data, meta=None, title="Ortho View", channel_colormaps=None):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -443,13 +466,8 @@ class OrthoViewer(QMainWindow):
 
         # Adjust
         adjust_menu = menubar.addMenu("Adjust")
-        bc_action = QAction("Brightness/Contrast", self)
-        bc_action.setShortcut("Shift+C")
-        bc_action.triggered.connect(self.show_contrast_dialog)
-        adjust_menu.addAction(bc_action)
-
-        channels_action = QAction("Channels...", self)
-        channels_action.setShortcut("Shift+H")
+        channels_action = QAction("Channels && Contrast...", self)
+        channels_action.setShortcut("Shift+C")
         channels_action.triggered.connect(self.show_channel_panel)
         adjust_menu.addAction(channels_action)
 
@@ -687,19 +705,10 @@ class OrthoViewer(QMainWindow):
         self.canvas_zy.update()
         self.canvas_zx.update()
 
-        # Refresh dialogs if visible
-        if (
-            hasattr(self, "contrast_dialog")
-            and self.contrast_dialog
-            and self.contrast_dialog.isVisible()
-        ):
-            self.contrast_dialog.refresh_ui()
-        if (
-            hasattr(self, "channel_panel")
-            and self.channel_panel
-            and self.channel_panel.isVisible()
-        ):
-            self.channel_panel.refresh_ui()
+        # Notify subscribers (ChannelPanel, line-profile, …) that the
+        # displayed slices changed so they can re-pull from
+        # renderer.current_slice_cache.
+        self.view_changed.emit(self)
 
     def reset_cameras(self):
         sx, sy, sz = self.scale[2], self.scale[1], self.scale[0]
@@ -865,21 +874,6 @@ class OrthoViewer(QMainWindow):
         self.canvas_zy.update()
         self.canvas_zx.update()
 
-        if (
-            hasattr(self, "contrast_dialog")
-            and self.contrast_dialog.isVisible()
-        ):
-            self.contrast_dialog.combo.setCurrentIndex(val)
-            self.contrast_dialog.refresh_ui()
-
-    def show_contrast_dialog(self):
-        if not hasattr(self, "contrast_dialog"):
-            self.contrast_dialog = ContrastDialog(self, parent=self)
-
-        self.contrast_dialog.show()
-        self.contrast_dialog.raise_()
-        self.contrast_dialog.refresh_ui()
-
     def show_channel_panel(self):
         if not hasattr(self, "channel_panel") or self.channel_panel is None:
             self.channel_panel = ChannelPanel(self, parent=self)
@@ -902,7 +896,7 @@ class OrthoViewer(QMainWindow):
 
     @property
     def canvas(self):
-        # ContrastDialog calls viewer.canvas.update()
+        # ChannelPanel calls viewer.canvas.update()
         # We return the YX canvas as a proxy.
         # Ideally, we should update ALL canvases.
         # We can wrap this in a dummy object or just return one canvas

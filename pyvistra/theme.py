@@ -80,6 +80,7 @@ QComboBox QAbstractItemView {
 /* Lists & Trees */
 QListWidget, QTreeWidget, QTableWidget {
     background-color: #1f2937;
+    alternate-background-color: #273549;
     border: 1px solid #4b5563;
     border-radius: 4px;
     color: #ffffff;
@@ -226,6 +227,35 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 
 /* Labels */
 QLabel {
+    color: #e5e7eb;
+}
+
+/* Tab Widget */
+QTabWidget::pane {
+    border: 1px solid #4b5563;
+    border-radius: 4px;
+    background-color: #2b2b2b;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: #374151;
+    color: #9ca3af;
+    border: 1px solid #4b5563;
+    border-bottom: none;
+    padding: 5px 12px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background-color: #2b2b2b;
+    color: #ffffff;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #4b5563;
     color: #e5e7eb;
 }
 

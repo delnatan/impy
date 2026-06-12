@@ -40,10 +40,37 @@ _TWO_COLOR = {
 }
 
 # Vispy built-in catalog (perceptually uniform and other named colormaps).
+# Grouped by use: sequential, diverging (good for signed data with both
+# positive and negative peaks — pair with a symmetric auto-contrast), and
+# cyclic (good for phase, orientation, and any wrap-around quantity).
 _VISPY_NAMED = [
+    # Sequential
     "viridis", "plasma", "magma", "inferno", "cividis",
-    "hot", "cool", "coolwarm", "turbo", "gray", "gray_r",
+    "hot", "cool", "turbo", "gray", "gray_r",
+    # Diverging
+    "RdBu", "coolwarm", "diverging", "GrBu", "PuGr", "HiLo",
+    # Cyclic
+    "hsl", "husl",
 ]
+
+# Names that produce a meaningful display only with a symmetric clim.
+# Channel state may use this hint to anchor zero at the colormap centre
+# even when one tail of the data dominates the percentile bracket.
+DIVERGING_NAMES = frozenset({
+    "RdBu", "coolwarm", "diverging", "GrBu", "PuGr", "HiLo",
+})
+
+CYCLIC_NAMES = frozenset({"hsl", "husl"})
+
+
+def is_diverging(name: str) -> bool:
+    """Whether ``name`` denotes a diverging colormap (zero-centred)."""
+    return name in DIVERGING_NAMES
+
+
+def is_cyclic(name: str) -> bool:
+    """Whether ``name`` denotes a cyclic colormap."""
+    return name in CYCLIC_NAMES
 
 # User-registered custom colormaps: name → stops or (N,4) LUT array
 _registry: dict = {}

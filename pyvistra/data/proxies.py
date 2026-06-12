@@ -145,7 +145,7 @@ class CZI5DProxy(File5DProxy):
 # In-memory proxy
 # ---------------------------------------------------------------------------
 
-class Numpy5DProxy:
+class Numpy5DProxy(RefCountMixin):
     """Wraps a 5D numpy array so it has the same interface as the other proxies."""
 
     def __init__(self, array):
@@ -153,6 +153,7 @@ class Numpy5DProxy:
         self.shape = array.shape
         self.dtype = array.dtype
         self.ndim = 5
+        self._init_refcount()
 
     def __getitem__(self, key):
         if not isinstance(key, tuple):
@@ -164,6 +165,10 @@ class Numpy5DProxy:
         if len(key) < 5:
             key = key + (slice(None),) * (5 - len(key))
         return self.array[key]
+
+    def close(self):
+        # Backing array is managed by normal Python GC; nothing to release.
+        pass
 
 
 # ---------------------------------------------------------------------------

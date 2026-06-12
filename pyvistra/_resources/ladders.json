@@ -8,6 +8,13 @@
       "sizes": [250, 150, 100, 75, 50, 37, 25, 20, 15, 10]
     },
     {
+      "name": "Bio-Rad Precision Plus Dual Xtra",
+      "catalog": "1610377",
+      "type": "protein",
+      "unit": "kDa",
+      "sizes": [250, 150, 100, 75, 50, 37, 25, 20, 15, 10, 5, 2]
+    },
+    {
       "name": "Bio-Rad Precision Plus Unstained",
       "catalog": "1610363",
       "type": "protein",

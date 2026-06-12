@@ -176,3 +176,46 @@ def test_point_json_dict_of_columns(tmp_path):
     assert points.point_id.tolist() == [9, 10]
     assert points.t.tolist() == [0, 1]
     assert np.allclose(points.properties["amplitude"], [10.5, 20.5])
+
+
+# ---------------------------------------------------------------------------
+# PointDataHolder subscribe + commands
+# ---------------------------------------------------------------------------
+
+from pyvistra.data.point_commands import (
+    AddPoint,
+    MovePoint,
+    PEVT_ADDED,
+    PEVT_MOVED,
+    PEVT_REMOVED,
+    PointDataHolder,
+    RemovePoint,
+)
+from pyvistra.layers.commands import UndoStack
+
+
+def test_point_holder_subscribe_fires_on_add_remove_move():
+    holder = PointDataHolder()
+    events = []
+    unsub = holder.subscribe(lambda kind, pid: events.append((kind, int(pid))))
+
+    stack = UndoStack()
+    stack.push(AddPoint(x=1.0, y=2.0, t=0), holder)
+    assert events[-1][0] == PEVT_ADDED
+    new_pid = events[-1][1]
+
+    stack.push(MovePoint(new_pid, 5.0, 6.0), holder)
+    assert events[-1][0] == PEVT_MOVED
+
+    stack.push(RemovePoint(new_pid), holder)
+    assert events[-1][0] == PEVT_REMOVED
+
+    # Undo restores the point.
+    stack.undo(holder)
+    assert events[-1][0] == PEVT_ADDED
+
+    unsub()
+    stack.push(AddPoint(x=7.0, y=8.0, t=0), holder)
+    # No further events recorded after unsubscribe.
+    last_kind = events[-1][0]
+    assert last_kind == PEVT_ADDED  # still the last from before unsubscribe

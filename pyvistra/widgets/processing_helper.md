@@ -11,6 +11,11 @@ It handles:
 - wiring a worker into `QThread`
 - safe cleanup after finish/cancel/error
 
+Live preview is automatic: when the destination is a window, the viewer
+subscribes to the `ImageBuffer` and refreshes the displayed slice whenever
+the worker writes data that overlaps the current `(t, z)`. Workers do not
+need to emit per-plane signals — just write into the buffer.
+
 ## Minimal Usage
 
 ```python
@@ -21,7 +26,6 @@ from pyvistra.widgets.processing_helper import BufferProcessingRunner
 
 class MyWorker(QObject):
     progress = Signal(int, int)
-    plane_done = Signal(int, int, int)
     finished = Signal()
     error = Signal(str)
     cancelled = Signal()
@@ -37,7 +41,8 @@ class MyWorker(QObject):
         self._cancel_requested = True
 
     def run(self):
-        # Do processing, write into self._buffer, emit signals
+        # Do processing and write into self._buffer; the destination
+        # window refreshes automatically. Emit progress/finished/etc.
         ...
 
 
@@ -60,7 +65,6 @@ worker = MyWorker(source, out_buffer, params)
 self.runner.start_worker(
     worker=worker,
     on_progress=self._on_progress,
-    on_plane_done=self._on_plane_done,
     on_finished=self._on_finished,
     on_cancelled=self._on_cancelled,
     on_error=self._on_error,
@@ -69,10 +73,6 @@ self.runner.start_worker(
 
 
 # In callbacks:
-def _on_plane_done(self, t, z, c):
-    self.runner.refresh_output_view(t, z)
-
-
 def _on_finished(self):
     # For "Save to File", finalize_output() triggers the actual write.
     self.runner.finalize_output()
@@ -84,7 +84,8 @@ def _cleanup_thread(self):
 
 ## Notes
 
-- For `new`/`existing` window output, the viewer can read from the buffer while
-  the worker writes, enabling live updates.
+- For `new`/`existing` window output, the viewer reads from the buffer
+  while the worker writes; refreshes happen via `ImageBuffer.subscribe`.
 - For `file` output, processing runs first and the save happens at finish.
-- Your dialog should ignore close while worker is active and call `runner.cancel()`.
+- Your dialog should ignore close while the worker is active and call
+  `runner.cancel()`.

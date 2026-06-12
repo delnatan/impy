@@ -6,7 +6,7 @@ from datetime import datetime
 
 import numpy as np
 from qtpy import API_NAME
-from qtpy.QtCore import Qt, QTimer, Signal
+from qtpy.QtCore import QPoint, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QAction,
     QApplication,
@@ -15,8 +15,10 @@ from qtpy.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSlider,
@@ -36,7 +38,29 @@ from ..io import (
 )
 from ..visuals.labels import LabelOverlayVisual
 from ..data.labels import SparseLabels
-from ..data.shapes import ShapeData, RECTANGLE, CIRCLE, LINE, AddShape, RemoveShape, MoveShape, AdjustHandle
+from ..data.shapes import (
+    ShapeData,
+    RECTANGLE,
+    CIRCLE,
+    LINE,
+    POLYLINE,
+    EVT_EDITED,
+    AddShape,
+    RemoveShape,
+    MoveShape,
+    AdjustHandle,
+    AddVertex,
+    RemoveVertex,
+    SetPolylineFlags,
+    SetShapeLabel,
+    SetShapeParams,
+    SetShapeVertices,
+    _apply_handle_adjustment,
+    crop_rect,
+    polyline_is_closed,
+    rect_opposite_corner,
+    square_from_corner,
+)
 from ..layers.base import Layer, LayerList
 from .manager import manager
 from ..visuals.overlays import ScaleTimestampOverlay
@@ -45,12 +69,9 @@ from ..data.points import PointTable
 from ..visuals.points import DEFAULT_STYLE as POINT_DEFAULT_STYLE, PointLayerVisual
 from ..visuals.shapes import ShapeLayerVisual
 from ..rois import (
-    CircleROI,
-    CoordinateROI,
     LaneROI,
     LineROI,
     PointROI,
-    RectangleROI,
 )
 from ..data.tracks import TrackTable
 from ..visuals.tracks import TrackLayerVisual
@@ -59,8 +80,6 @@ from ..widgets import (
     AlignmentDialog,
     AxesDialog,
     ChannelPanel,
-    ContrastDialog,
-    Denoise2DTimelapseDialog,
     MetadataDialog,
     OverlaySettingsDialog,
     TransformDialog,
@@ -95,8 +114,10 @@ class ImageWindow(QMainWindow):
     # New layer system signals
     layer_added = Signal(object)  # Emits Layer when added
     layer_removed = Signal(object)  # Emits Layer when removed
-    layer_data_changed = Signal(object)  # Emits Layer when data changes
-    active_layer_changed = Signal(object)  # Emits Layer when active layer changes
+
+    # Internal — marshals ImageBuffer change notifications from any worker
+    # thread onto the GUI thread (Qt.QueuedConnection in __init__).
+    _buffer_dirty = Signal(object)
 
     def __init__(self, data_or_path, title="Image", meta=None):
         super().__init__()
@@ -132,6 +153,10 @@ class ImageWindow(QMainWindow):
 
         # Register with Manager
         self.window_id = manager.register(self)
+
+        # Set True by PSFComputeDialog so deconvolution dialogs can filter
+        # PSF windows from the general window list.
+        self.is_psf = False
 
         self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
 
@@ -203,11 +228,10 @@ class ImageWindow(QMainWindow):
         self._setup_controls()
 
         # 7. Menu & Dialogs
-        self.contrast_dialog = None
         self.channel_panel = None
         self.transform_dialog = None
-        self.denoise_dialog = None
         self.z_projection_dialog = None
+        self._deconvolution_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
 
@@ -215,7 +239,6 @@ class ImageWindow(QMainWindow):
         self.rois = []
         self._next_roi_id = 0
         self._freed_roi_ids = []  # min-heap of freed IDs for reuse
-        self.drawing_roi = None
         self.start_pos = None
         # ROI grouping
         self._roi_groups_visible = {"Default": True}
@@ -256,6 +279,30 @@ class ImageWindow(QMainWindow):
         self.layers = LayerList()
         self._drawing_shape_layer = None  # Layer being drawn into
         self._drawing_shape_id = None  # Shape ID being drawn
+        # Multi-click polyline drawing state.
+        self._polyline_drawing_layer = None
+        self._polyline_drawing_id = None
+        # Point tool drag state.
+        self._point_dragging_layer = None  # layer name (str) or None
+        self._point_dragging_id = None
+        self._point_drag_start_xy: tuple[float, float] | None = None
+
+        # Interactive edit (pointer drag) on an existing shape entry.
+        # _editing_shape_handle is None for body drag, else handle name.
+        self._editing_shape_layer = None
+        self._editing_shape_id = None
+        self._editing_shape_handle = None
+        self._editing_shape_start_params = None
+        self._editing_shape_start_pos = None
+        # For POLYLINE edits the original vertex array snapshot.
+        self._editing_shape_start_vertices = None
+
+        # Live buffer updates: dispatch from any thread to the GUI thread.
+        self._buffer_unsubscribe = None
+        self._buffer_dirty.connect(
+            self._on_buffer_dirty, Qt.QueuedConnection
+        )
+        self._subscribe_to_buffer(self.img_data)
 
         # 13. Events
         self.canvas.events.mouse_move.connect(self.on_mouse_move)
@@ -288,8 +335,10 @@ class ImageWindow(QMainWindow):
         # Focus policy
         self.setFocusPolicy(Qt.StrongFocus)
 
-        # Initial Draw
+        # Initial Draw + one-shot auto-contrast so default clim matches data.
         self.update_view()
+        self.renderer.auto_contrast()
+        self.canvas.update()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -314,6 +363,11 @@ class ImageWindow(QMainWindow):
         if self._focused_point_roi is not None:
             self._focused_point_roi.remove()
             self._focused_point_roi = None
+
+        # Stop receiving buffer change notifications before tearing down.
+        if self._buffer_unsubscribe is not None:
+            self._buffer_unsubscribe()
+            self._buffer_unsubscribe = None
 
         # Cleanup data buffers/proxies (ImageBuffer, Imaris5DProxy)
         if hasattr(self.img_data, "release"):
@@ -345,13 +399,6 @@ class ImageWindow(QMainWindow):
             if self.overlay is not None:
                 self.overlay.update()
             self.canvas.update()
-        elif event.key() == Qt.Key_F:
-            # Flip selected CoordinateROI
-            for roi in self.rois:
-                if roi.selected and isinstance(roi, CoordinateROI):
-                    roi.flip()
-                    self.canvas.update()
-                    break
         elif event.key() == Qt.Key_L:
             # Toggle ROI labels visibility
             from ..rois import ROI
@@ -367,11 +414,58 @@ class ImageWindow(QMainWindow):
             if self._contour_mode:
                 self._cancel_contour()
                 return
-            # Deselect all ROIs
+            # Cancel an in-progress polyline drawing.
+            if self._polyline_drawing_id is not None and self._polyline_drawing_layer is not None:
+                layer = self._polyline_drawing_layer
+                sid = self._polyline_drawing_id
+                if layer.undo_stack.can_undo:
+                    layer.undo_stack.undo(layer.data)
+                else:
+                    if sid in layer.data:
+                        layer.data.remove(sid)
+                self._polyline_drawing_layer = None
+                self._polyline_drawing_id = None
+                return
+            # Deselect all ROIs and shape-layer entries
             for roi in self.rois:
                 roi.select(False)
+            self._clear_shape_selection()
             self.canvas.update()
             self.roi_selection_changed.emit(None)
+        elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            # Delete currently-selected shape (undoable).
+            if self._current_shape_selection() is not None:
+                self.delete_selected_shape()
+                return
+            super().keyPressEvent(event)
+        elif event.key() == Qt.Key_F2:
+            # Rename currently-selected shape.
+            if self._current_shape_selection() is not None:
+                self.rename_selected_shape()
+                return
+            super().keyPressEvent(event)
+        elif event.key() in (
+            Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down
+        ) and self._current_shape_selection() is not None:
+            # Nudge selected shape. Shift = ×10.
+            step = 10.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0
+            dx = dy = 0.0
+            if event.key() == Qt.Key_Left:
+                dx = -step
+            elif event.key() == Qt.Key_Right:
+                dx = step
+            elif event.key() == Qt.Key_Up:
+                dy = -step
+            elif event.key() == Qt.Key_Down:
+                dy = step
+            self.nudge_selected_shape(dx, dy)
+            return
+        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            # Open properties dialog for selected shape.
+            if self._current_shape_selection() is not None:
+                self.edit_selected_shape_properties()
+                return
+            super().keyPressEvent(event)
         elif event.key() == Qt.Key_Space:
             # Temporarily switch to pointer mode for panning/zooming
             if self._space_held_previous_tool is None:
@@ -458,6 +552,7 @@ class ImageWindow(QMainWindow):
         self.img_data = new_data
         if metadata is not None:
             self.meta = metadata
+        self._subscribe_to_buffer(new_data)
 
         self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
         new_shape = (self.T, self.Z, self.C, self.Y, self.X)
@@ -510,6 +605,9 @@ class ImageWindow(QMainWindow):
             z_label.setText(str(self.z_idx))
 
         self.update_view()
+        if needs_rebuild:
+            self.renderer.auto_contrast()
+            self.canvas.update()
 
     def _setup_menu(self):
         menubar = self.menuBar()
@@ -526,6 +624,22 @@ class ImageWindow(QMainWindow):
         save_ims_action.triggered.connect(self.save_as_imaris)
         file_menu.addAction(save_ims_action)
 
+        save_as_action = QAction("Save As...", self)
+        save_as_action.setShortcut("Ctrl+Alt+S")
+        save_as_action.setToolTip(
+            "Save to any registered format (.tif, .ims, .psf.h5, .pupil.h5, ...)"
+        )
+        save_as_action.triggered.connect(self.save_as_any)
+        file_menu.addAction(save_as_action)
+
+        save_channel_action = QAction("Save Channel...", self)
+        save_channel_action.setToolTip(
+            "Extract one channel (and an optional T/Z subrange) and route it "
+            "to a new window, an existing window, or a file."
+        )
+        save_channel_action.triggered.connect(self._save_channel_dialog)
+        file_menu.addAction(save_channel_action)
+
         file_menu.addSeparator()
 
         snapshot_action = QAction("Save Snapshot...", self)
@@ -538,13 +652,8 @@ class ImageWindow(QMainWindow):
 
         # Adjust Menu
         adjust_menu = menubar.addMenu("Adjust")
-        bc_action = QAction("Brightness/Contrast", self)
-        bc_action.setShortcut("Shift+C")
-        bc_action.triggered.connect(self.show_contrast_dialog)
-        adjust_menu.addAction(bc_action)
-
-        channels_action = QAction("Channels...", self)
-        channels_action.setShortcut("Shift+H")
+        channels_action = QAction("Channels && Contrast...", self)
+        channels_action.setShortcut("Shift+C")
         channels_action.triggered.connect(self.show_channel_panel)
         adjust_menu.addAction(channels_action)
 
@@ -581,13 +690,13 @@ class ImageWindow(QMainWindow):
         align_action.triggered.connect(self.show_alignment_dialog)
         image_menu.addAction(align_action)
 
-        denoise_action = QAction("Denoise 2D Timelapse...", self)
-        denoise_action.triggered.connect(self.show_denoise_dialog)
-        image_menu.addAction(denoise_action)
-
         zproj_action = QAction("Z Projection...", self)
         zproj_action.triggered.connect(self.show_z_projection_dialog)
         image_menu.addAction(zproj_action)
+
+        decon_action = QAction("Deconvolution...", self)
+        decon_action.triggered.connect(self.show_deconvolution_dialog)
+        image_menu.addAction(decon_action)
 
         image_menu.addSeparator()
 
@@ -671,6 +780,70 @@ class ImageWindow(QMainWindow):
             default_ext=".ims",
             valid_exts=[".ims"],
             file_filter="Imaris files (*.ims)",
+        )
+
+    def save_as_any(self):
+        """Save via any registered output format (TIFF, Imaris, PSF, Pupil, …).
+
+        The format list is pulled from :func:`pyvistra.io.available_output_formats`,
+        so adding a new format anywhere (incl. downstream libraries) makes it
+        available from this menu with no extra wiring.
+        """
+        from pyvistra.io import available_output_formats, get_output_format
+
+        formats = available_output_formats()
+        if not formats:
+            QMessageBox.warning(
+                self, "Save As", "No output formats are registered."
+            )
+            return
+
+        # Sort by extension length descending so multi-dot extensions like
+        # ``.psf.h5`` win over ``.h5`` (if both were ever registered).
+        formats_sorted = sorted(formats, key=lambda le: -len(le[1]))
+        filters = [f"{label} (*{ext})" for label, ext in formats_sorted]
+        file_filter = ";;".join(filters)
+        default_ext = formats_sorted[0][1]
+        default_path = self._default_save_path(default_ext)
+
+        filepath, selected_filter = QFileDialog.getSaveFileName(
+            self, "Save As", default_path, file_filter
+        )
+        if not filepath:
+            return
+
+        # Resolve the target extension: prefer the actual filename suffix if
+        # it matches a registered format; otherwise fall back to the one
+        # implied by the chosen filter.
+        ext = next(
+            (e for _, e in formats_sorted if filepath.lower().endswith(e.lower())),
+            None,
+        )
+        if ext is None:
+            ext = next(
+                (e for label, e in formats_sorted if f"(*{e})" in selected_filter),
+                default_ext,
+            )
+            filepath += ext
+
+        fmt = get_output_format(ext)
+        if fmt is None:
+            QMessageBox.critical(
+                self, "Save Failed", f"No saver registered for {ext!r}."
+            )
+            return
+        _, saver = fmt
+
+        try:
+            saver(filepath, self.img_data, self.meta)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Save Failed", f"Could not save {ext} file:\n{exc}"
+            )
+            return
+
+        QMessageBox.information(
+            self, "Save Complete", f"Saved image to:\n{filepath}"
         )
 
     # ---- Snapshot & Frame Export ----
@@ -807,18 +980,18 @@ class ImageWindow(QMainWindow):
 
     # ---- Label/Mask Methods ----
 
-    # ---- Mask Layer Properties (backward compat) ----
+    # ---- Active mask layer (used by LabelManager) ----
 
     @property
     def labels(self):
-        """Active mask layer's SparseLabels (backward compat)."""
+        """SparseLabels of the active mask layer (or None)."""
         if self._active_mask_layer and self._active_mask_layer in self._mask_layers:
             return self._mask_layers[self._active_mask_layer]["labels"]
         return None
 
     @labels.setter
     def labels(self, value):
-        """Set labels on active mask layer, creating one if needed."""
+        """Set labels on the active mask layer, creating one if needed."""
         if value is None:
             return
         if not self._mask_layers:
@@ -831,13 +1004,13 @@ class ImageWindow(QMainWindow):
 
     @property
     def label_overlay(self):
-        """Active mask layer's visual (backward compat)."""
+        """LabelOverlayVisual of the active mask layer (or None)."""
         if self._active_mask_layer and self._active_mask_layer in self._mask_layers:
             return self._mask_layers[self._active_mask_layer]["visual"]
         return None
 
     def set_labels(self, labels):
-        """Set SparseLabels for this window (backward compat)."""
+        """Set SparseLabels on the active mask layer."""
         if labels is None:
             return
         if not self._mask_layers:
@@ -1024,21 +1197,33 @@ class ImageWindow(QMainWindow):
     # ---- Multiple Point Layers API ----
 
     def add_point_layer(self, name, points=None):
-        """Create a named point layer with its own visual."""
+        """Create a named point layer with its own visual.
+
+        Internally wraps the :class:`PointTable` in a
+        :class:`PointDataHolder` so that the unified layer commands
+        (``AddPoint``/``RemovePoint``/``MovePoint``) operate on the same
+        in-place object. The legacy ``self._point_layers[name]["points"]``
+        attribute keeps pointing at the current immutable table — kept in
+        sync via a :meth:`PointDataHolder.subscribe` callback.
+        """
         if name in self._point_layers:
             return
+
+        from ..data.point_commands import PointDataHolder
 
         if points is None:
             points = PointTable.from_arrays(x=[], y=[])
         elif not isinstance(points, PointTable):
             raise TypeError("points must be a PointTable or None")
 
+        holder = PointDataHolder(points)
         style = dict(POINT_DEFAULT_STYLE)
         visual = PointLayerVisual(self.view, **style)
-        visual.set_points(points)
+        visual.set_points(holder.table)
         visual.set_time_z(self.t_idx, self.z_idx)
         self._point_layers[name] = {
-            "points": points,
+            "points": holder.table,
+            "holder": holder,
             "visual": visual,
             "visible": True,
             "selected_ids": set(),
@@ -1047,12 +1232,29 @@ class ImageWindow(QMainWindow):
         if self._active_point_layer is None:
             self._active_point_layer = name
         self.point_layer_added.emit(name)
-        # Register in unified LayerList
+        # Register in unified LayerList with the holder as data so the
+        # standard AddPoint/RemovePoint/MovePoint commands operate on it.
+        layer = None
         if name not in self.layers:
-            layer = Layer(name=name, layer_type="points", data=points, visual=visual,
+            layer = Layer(name=name, layer_type="points", data=holder, visual=visual,
                           style=style)
             self.layers.add(layer)
             self.layer_added.emit(layer)
+
+        def _on_point_event(_kind, _pid, _name=name):
+            entry = self._point_layers.get(_name)
+            if entry is None:
+                return
+            entry["points"] = entry["holder"].table
+            v = entry["visual"]
+            if v is not None:
+                v.set_points(entry["points"])
+                v.set_time_z(self.t_idx, self.z_idx)
+                v.set_selected_point_ids(entry["selected_ids"])
+            self.canvas.update()
+
+        self._point_layers[name]["_unsubscribe"] = holder.subscribe(_on_point_event)
+
         self.canvas.update()
 
     def set_point_layer_points(self, name, points):
@@ -1075,6 +1277,12 @@ class ImageWindow(QMainWindow):
         if name not in self._point_layers:
             return
         entry = self._point_layers.pop(name)
+        unsub = entry.get("_unsubscribe")
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                pass
         if entry["visual"] is not None:
             entry["visual"].remove()
         if self._active_point_layer == name:
@@ -1162,6 +1370,21 @@ class ImageWindow(QMainWindow):
         layer = Layer(name=name, layer_type="shapes", data=data, visual=visual)
         self.layers.add(layer)
         visual.update(data, layer.selected_ids, self.t_idx, self.z_idx)
+
+        # Auto-refresh on any data mutation. Subscribers fire on the caller's
+        # thread; shapes always mutate on the GUI thread, so a direct call is
+        # safe. The unsubscribe handle is stashed in ``layer.style`` so the
+        # subscription is dropped on remove.
+        def _on_shape_event(_event_kind, _shape_id, _layer=layer):
+            if _layer.visual is None:
+                return
+            _layer.visual.update(
+                _layer.data, _layer.selected_ids, self.t_idx, self.z_idx
+            )
+            self.canvas.update()
+
+        layer.style["_unsubscribe_data"] = data.subscribe(_on_shape_event)
+
         self.layer_added.emit(layer)
         self.canvas.update()
         return layer
@@ -1171,6 +1394,12 @@ class ImageWindow(QMainWindow):
         if name not in self.layers:
             return
         layer = self.layers.remove(name)
+        unsub = layer.style.pop("_unsubscribe_data", None)
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                pass
         if layer.visual is not None:
             layer.visual.remove()
         self.layer_removed.emit(layer)
@@ -1187,6 +1416,472 @@ class ImageWindow(QMainWindow):
     def _active_shape_layer(self):
         """Get the currently active shape layer, or None."""
         return self.layers.active("shapes")
+
+    def _hit_test_shape_layers(self, x, y):
+        """Hit-test shape-layer entries at (x, y) on the current t/z slice.
+
+        Tests layers in reverse order (top-most first). For each layer,
+        first tries handles of currently-selected shapes (so an edge grab
+        wins over a body click), then tests bodies.
+
+        Returns
+        -------
+        (layer, shape_id, handle) or None
+            handle is a string for handle hits, None for body hits.
+        """
+        layers = list(self.layers.by_type("shapes"))
+        for layer in reversed(layers):
+            if not layer.visible:
+                continue
+            data = layer.data
+            # Handle hits on selected shapes take priority.
+            for sid in layer.selected_ids:
+                if sid not in data:
+                    continue
+                rec = data.get(sid)
+                if rec.t != self.t_idx or rec.z != self.z_idx:
+                    continue
+                handle = data.hit_test_handle((x, y), sid)
+                if handle is not None:
+                    return layer, sid, handle
+            sid = data.hit_test((x, y), t=self.t_idx, z=self.z_idx)
+            if sid is not None:
+                return layer, sid, None
+        return None
+
+    def _select_shape(self, layer, shape_id):
+        """Make shape_id the sole selection on its layer, deselect elsewhere."""
+        for lyr in self.layers.by_type("shapes"):
+            if lyr is layer:
+                lyr.selected_ids = {shape_id}
+            else:
+                lyr.selected_ids = set()
+            if lyr.visual is not None:
+                lyr.visual.update(
+                    lyr.data, lyr.selected_ids, self.t_idx, self.z_idx
+                )
+
+    def _clear_shape_selection(self):
+        """Deselect all shapes across all shape layers."""
+        for lyr in self.layers.by_type("shapes"):
+            if not lyr.selected_ids:
+                continue
+            lyr.selected_ids = set()
+            if lyr.visual is not None:
+                lyr.visual.update(
+                    lyr.data, lyr.selected_ids, self.t_idx, self.z_idx
+                )
+
+    def _polyline_segment_insert_index(self, rec, x, y, tolerance=8.0):
+        """If ``(x, y)`` is near a polyline segment, return the index at
+        which a new vertex should be inserted. Otherwise return ``None``.
+        """
+        if rec.shape_type != POLYLINE or rec.vertices is None:
+            return None
+        verts = rec.vertices
+        n = len(verts)
+        if n < 2:
+            return None
+        closed = polyline_is_closed(rec)
+        best_idx = None
+        best_dist = float(tolerance)
+        segments = n - 1 + (1 if closed else 0)
+        for i in range(segments):
+            ax, ay = float(verts[i, 0]), float(verts[i, 1])
+            j = (i + 1) % n
+            bx, by = float(verts[j, 0]), float(verts[j, 1])
+            dx, dy = bx - ax, by - ay
+            l2 = dx * dx + dy * dy
+            if l2 == 0:
+                continue
+            t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / l2))
+            qx = ax + t * dx
+            qy = ay + t * dy
+            d = float(np.hypot(x - qx, y - qy))
+            if d < best_dist:
+                best_dist = d
+                best_idx = i + 1
+        return best_idx
+
+    def _current_shape_selection(self):
+        """Return ``(layer, shape_id)`` if exactly one shape is selected, else None."""
+        hit = None
+        for lyr in self.layers.by_type("shapes"):
+            for sid in lyr.selected_ids:
+                if hit is not None:
+                    return None  # multiple selections — ambiguous
+                hit = (lyr, sid)
+        return hit
+
+    def _refresh_shape_layer_visual(self, layer):
+        if layer.visual is not None:
+            layer.visual.update(
+                layer.data, layer.selected_ids, self.t_idx, self.z_idx
+            )
+
+    def delete_selected_shape(self):
+        """Remove the currently-selected shape (undoable). No-op if none."""
+        sel = self._current_shape_selection()
+        if sel is None:
+            return
+        layer, sid = sel
+        layer.undo_stack.push(RemoveShape(sid), layer.data)
+        layer.selected_ids.discard(sid)
+        self._refresh_shape_layer_visual(layer)
+        self.canvas.update()
+
+    def rename_selected_shape(self):
+        """Prompt for a new label for the selected shape (undoable)."""
+        sel = self._current_shape_selection()
+        if sel is None:
+            return
+        layer, sid = sel
+        current = layer.data.get_label(sid)
+        new_label, ok = QInputDialog.getText(
+            self, "Rename Shape", "Label:", text=current
+        )
+        if not ok:
+            return
+        new_label = new_label.strip()
+        if new_label == current:
+            return
+        layer.undo_stack.push(SetShapeLabel(sid, new_label), layer.data)
+        self._refresh_shape_layer_visual(layer)
+        self.canvas.update()
+
+    def nudge_selected_shape(self, dx: float, dy: float) -> None:
+        """Translate the currently-selected shape by (dx, dy) pixels."""
+        sel = self._current_shape_selection()
+        if sel is None or (dx == 0 and dy == 0):
+            return
+        layer, sid = sel
+        layer.undo_stack.push(MoveShape(sid, dx, dy), layer.data)
+
+    def edit_selected_shape_properties(self) -> None:
+        """Open the numerical properties dialog for the selected shape."""
+        sel = self._current_shape_selection()
+        if sel is None:
+            return
+        layer, sid = sel
+        from ..widgets.shape_properties_dialog import ShapePropertiesDialog
+
+        dlg = ShapePropertiesDialog(self, layer, sid, parent=self)
+        dlg.show()
+        dlg.raise_()
+
+    def _reset_vispy_press_state(self):
+        """Clear vispy's tracked ``press_event``.
+
+        QMenu.exec_() and modal dialogs swallow the mouse release that
+        belongs to the press which opened them, so vispy's backend never
+        sees the matching release and ``_vispy_mouse_data['press_event']``
+        stays populated. After that, every ``mouse_move`` overrides
+        ``event.button`` with the stale press's button (see
+        ``vispy.app.base.BaseCanvasBackend._vispy_mouse_move``), which
+        breaks any drag handler that filters on ``event.button == 1``.
+
+        Must be scheduled (not called synchronously) when invoked from
+        inside an ``on_mouse_press`` handler: vispy's backend assigns
+        ``press_event = ev`` *after* the handler returns
+        (``vispy/app/base.py:184``), so a synchronous reset gets
+        immediately overwritten. ``QTimer.singleShot(0, ...)`` defers the
+        clear to the next event-loop tick, after vispy has finished
+        dispatching the press.
+        """
+        def _clear():
+            backend = getattr(self.canvas, "_backend", None)
+            mouse_data = getattr(backend, "_vispy_mouse_data", None)
+            if isinstance(mouse_data, dict):
+                mouse_data["press_event"] = None
+                mouse_data["last_event"] = None
+
+        QTimer.singleShot(0, _clear)
+
+    def _show_shape_context_menu(self, layer, shape_id, global_pos):
+        """Right-click menu for a shape."""
+        rec = layer.data.get(shape_id)
+        menu = QMenu(self)
+        act_props = menu.addAction("Edit Properties…")
+        act_rename = menu.addAction("Rename…")
+        menu.addSeparator()
+        act_delete = menu.addAction("Delete")
+
+        # Send copy to another window (XY-compatible).
+        from .manager import compatible_windows
+        targets = compatible_windows(self)
+        copy_actions: dict = {}
+        if targets:
+            menu.addSeparator()
+            copy_menu = menu.addMenu("Send Copy To Window")
+            for tgt in targets:
+                title = tgt.windowTitle() or "window"
+                label = title
+                # Annotate scale mismatch — copy is still allowed.
+                try:
+                    s_src = (self.meta or {}).get("scale") or ()
+                    s_tgt = (tgt.meta or {}).get("scale") or ()
+                    if s_src and s_tgt and tuple(s_src) != tuple(s_tgt):
+                        label = f"{title}  ⚠ scale differs"
+                except Exception:
+                    pass
+                action = copy_menu.addAction(label)
+                copy_actions[action] = tgt
+
+        act_crop = None
+        act_stats = None
+        act_kymo = None
+        act_close = None
+        smooth_actions: dict = {}
+        if rec.shape_type in (RECTANGLE, CIRCLE, POLYLINE):
+            menu.addSeparator()
+            if rec.shape_type == RECTANGLE:
+                act_crop = menu.addAction("Crop…")
+            act_stats = menu.addAction("Region Statistics…")
+        act_profile = None
+        if rec.shape_type in (LINE, POLYLINE):
+            menu.addSeparator()
+            act_profile = menu.addAction("Line Profile…")
+            # Kymograph requires a time-series.
+            if self.img_data.shape[0] > 1:
+                act_kymo = menu.addAction("Kymograph…")
+        if rec.shape_type == POLYLINE:
+            menu.addSeparator()
+            currently_closed = polyline_is_closed(rec)
+            act_close = menu.addAction(
+                "Open path" if currently_closed else "Close path"
+            )
+            smooth_menu = menu.addMenu("Smoothness")
+            current_s = float(rec.properties.get("smoothness", 0.0))
+            for value, label in (
+                (0.0, "0 — straight segments"),
+                (0.5, "0.5"),
+                (2.0, "2"),
+                (5.0, "5"),
+            ):
+                action = smooth_menu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(abs(current_s - value) < 1e-6)
+                smooth_actions[action] = value
+        chosen = menu.exec_(global_pos)
+        if chosen is act_props:
+            # Make sure the right shape is the single selection.
+            self._select_shape(layer, shape_id)
+            self.edit_selected_shape_properties()
+        elif chosen is act_rename:
+            self._select_shape(layer, shape_id)
+            self.rename_selected_shape()
+        elif chosen is act_delete:
+            self._select_shape(layer, shape_id)
+            self.delete_selected_shape()
+        elif act_crop is not None and chosen is act_crop:
+            self._crop_with_rect(layer, shape_id)
+        elif act_stats is not None and chosen is act_stats:
+            from ..widgets.region_statistics_dialog import RegionStatisticsDialog
+            dlg = RegionStatisticsDialog(self, layer, shape_id, parent=self)
+            dlg.show()
+            dlg.raise_()
+        elif act_kymo is not None and chosen is act_kymo:
+            from ..widgets.kymograph_dialog import KymographDialog
+            dlg = KymographDialog(self, layer, shape_id, parent=self)
+            dlg.show()
+            dlg.raise_()
+        elif act_profile is not None and chosen is act_profile:
+            from ..widgets import get_line_profile_dialog
+            dlg = get_line_profile_dialog()
+            dlg.set_shape_source(self, layer, shape_id)
+            dlg.show()
+            dlg.raise_()
+        elif act_close is not None and chosen is act_close:
+            layer.undo_stack.push(
+                SetPolylineFlags(shape_id, closed=not polyline_is_closed(rec)),
+                layer.data,
+            )
+        elif chosen in smooth_actions:
+            layer.undo_stack.push(
+                SetPolylineFlags(shape_id, smoothness=smooth_actions[chosen]),
+                layer.data,
+            )
+        elif chosen in copy_actions:
+            self._copy_shape_to_window(layer, shape_id, copy_actions[chosen])
+
+    def _copy_shape_to_window(self, src_layer, shape_id, target_window):
+        """Clone a shape into ``target_window``'s active shape layer.
+
+        If the target has no shape layer, a default ``"Shapes"`` one is
+        created. The copy is independent — no live link is established.
+        Anchors (``t``, ``z``) are translated through the ``ALL_FRAMES``
+        sentinel if applicable; otherwise they're carried verbatim.
+        """
+        if target_window is None or src_layer is None:
+            return
+        if not hasattr(target_window, "add_shape_layer"):
+            return
+        target_layer = target_window.layers.active("shapes")
+        if target_layer is None:
+            target_window.add_shape_layer("Shapes")
+            target_layer = target_window.layers.active("shapes")
+            if target_layer is None:
+                return
+
+        rec = src_layer.data.get(shape_id)
+        verts = None if rec.vertices is None else rec.vertices.copy()
+        cmd = AddShape(
+            rec.shape_type,
+            rec.params.copy(),
+            t=rec.t,
+            z=rec.z,
+            label=rec.label,
+            properties=dict(rec.properties),
+            vertices=verts,
+        )
+        target_layer.undo_stack.push(cmd, target_layer.data)
+        target_window.raise_()
+        target_window.activateWindow()
+
+    def _crop_with_rect(self, layer, shape_id):
+        """Crop ``self.img_data`` to a rectangle's XY bounds and route the
+        result through ``ImageOutputSelector`` (reuse window / new window /
+        save). Always preserves full T, Z, C.
+        """
+        from qtpy.QtWidgets import QDialog, QDialogButtonBox
+        from ..widgets.output_selector import ImageOutputSelector
+
+        rec = layer.data.get(shape_id)
+        try:
+            cropped = crop_rect(self.img_data, rec)
+        except ValueError as e:
+            QMessageBox.warning(self, "Crop", str(e))
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Crop region")
+        dlg_layout = QVBoxLayout(dlg)
+        label = rec.label or f"shape {shape_id}"
+        T, Z, C, Yc, Xc = cropped.shape
+        dlg_layout.addWidget(
+            QLabel(f"Cropping {Yc}×{Xc} (Y×X) from '{label}' — T={T}, Z={Z}, C={C}")
+        )
+        default_title = f"{self.windowTitle()} [crop]"
+        selector = ImageOutputSelector(
+            parent=dlg, default_title=default_title, formats=[".tif", ".ims"]
+        )
+        dlg_layout.addWidget(selector)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        dlg_layout.addWidget(buttons)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        metadata = dict(self.meta or {})
+        base_name = metadata.get("filename") or self.windowTitle() or "crop"
+        metadata["filename"] = f"{base_name} [crop]"
+        selector.send(cropped, metadata)
+
+    def _save_channel_dialog(self):
+        """Extract one channel (and an optional T/Z subrange) and route the
+        result through ``ImageOutputSelector``.
+
+        The output keeps the 5D ``(T, Z, C, Y, X)`` shape with ``C=1`` so it
+        round-trips through every existing saver/window.
+        """
+        from qtpy.QtWidgets import (
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
+            QFormLayout,
+            QGroupBox,
+            QSpinBox,
+        )
+        from ..widgets.output_selector import ImageOutputSelector
+
+        T, Z, C, _Y, _X = self.img_data.shape
+        if C <= 0:
+            QMessageBox.warning(self, "Save Channel", "No channels to save.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Save Channel")
+        layout = QVBoxLayout(dlg)
+
+        # Channel picker — use metadata names if available.
+        form = QFormLayout()
+        channel_combo = QComboBox()
+        meta_channels = (self.meta or {}).get("channels") or []
+        for c in range(C):
+            name = ""
+            if c < len(meta_channels) and isinstance(meta_channels[c], dict):
+                name = meta_channels[c].get("name") or ""
+            label = f"Channel {c}" + (f" — {name}" if name else "")
+            channel_combo.addItem(label, c)
+        # Default to the currently-displayed channel.
+        channel_combo.setCurrentIndex(min(self.c_idx, C - 1))
+        form.addRow("Channel:", channel_combo)
+        layout.addLayout(form)
+
+        # T-range
+        t_group = QGroupBox(f"Time range (T = {T})")
+        t_form = QFormLayout(t_group)
+        t_from = QSpinBox(); t_from.setRange(0, T - 1); t_from.setValue(0)
+        t_to = QSpinBox(); t_to.setRange(0, T - 1); t_to.setValue(T - 1)
+        t_form.addRow("From:", t_from)
+        t_form.addRow("To:", t_to)
+        t_group.setEnabled(T > 1)
+        layout.addWidget(t_group)
+
+        # Z-range
+        z_group = QGroupBox(f"Z range (Z = {Z})")
+        z_form = QFormLayout(z_group)
+        z_from = QSpinBox(); z_from.setRange(0, Z - 1); z_from.setValue(0)
+        z_to = QSpinBox(); z_to.setRange(0, Z - 1); z_to.setValue(Z - 1)
+        z_form.addRow("From:", z_from)
+        z_form.addRow("To:", z_to)
+        z_group.setEnabled(Z > 1)
+        layout.addWidget(z_group)
+
+        # Output destination.
+        default_title = f"{self.windowTitle()} [ch{channel_combo.currentData()}]"
+        selector = ImageOutputSelector(
+            parent=dlg, default_title=default_title, formats=[".tif", ".ims"]
+        )
+        layout.addWidget(selector)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        c = int(channel_combo.currentData())
+        t0, t1 = sorted((int(t_from.value()), int(t_to.value())))
+        z0, z1 = sorted((int(z_from.value()), int(z_to.value())))
+
+        # Slice with [c:c+1] to keep the channel axis intact (length 1).
+        try:
+            subset = np.asarray(
+                self.img_data[t0:t1 + 1, z0:z1 + 1, c:c + 1, :, :]
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Save Channel", f"Could not extract: {e}")
+            return
+
+        # Build channel metadata pared down to the single selected channel.
+        metadata = dict(self.meta or {})
+        if meta_channels and c < len(meta_channels):
+            metadata["channels"] = [dict(meta_channels[c])]
+        base_name = metadata.get("filename") or self.windowTitle() or "image"
+        ch_name = ""
+        if meta_channels and c < len(meta_channels):
+            ch_name = (meta_channels[c] or {}).get("name") or ""
+        suffix = f"ch{c}" + (f" {ch_name}" if ch_name else "")
+        metadata["filename"] = f"{base_name} [{suffix}]"
+
+        selector.send(subset, metadata)
 
     def clear_focused_point(self):
         if self._focused_point_roi is not None:
@@ -1660,13 +2355,6 @@ class ImageWindow(QMainWindow):
         else:
             self.view.camera.interactive = False
 
-    def show_contrast_dialog(self):
-        if self.contrast_dialog is None:
-            self.contrast_dialog = ContrastDialog(self, parent=self)
-        self.contrast_dialog.show()
-        self.contrast_dialog.raise_()
-        self.contrast_dialog.refresh_ui()
-
     def show_channel_panel(self):
         if self.channel_panel is None:
             self.channel_panel = ChannelPanel(self, parent=self)
@@ -1687,19 +2375,18 @@ class ImageWindow(QMainWindow):
         self._alignment_dialog.show()
         self._alignment_dialog.raise_()
 
-    def show_denoise_dialog(self):
-        if self.denoise_dialog is None:
-            self.denoise_dialog = Denoise2DTimelapseDialog(
-                self, parent=self
-            )
-        self.denoise_dialog.show()
-        self.denoise_dialog.raise_()
-
     def show_z_projection_dialog(self):
         if self.z_projection_dialog is None:
             self.z_projection_dialog = ZProjectionDialog(self, parent=self)
         self.z_projection_dialog.show()
         self.z_projection_dialog.raise_()
+
+    def show_deconvolution_dialog(self):
+        from pyvistra.widgets.deconvolution_dialog import DeconvolutionDialog
+        if self._deconvolution_dialog is None:
+            self._deconvolution_dialog = DeconvolutionDialog(self, parent=self)
+        self._deconvolution_dialog.show()
+        self._deconvolution_dialog.raise_()
 
     def show_line_profile(self):
         """Show the line profile dialog."""
@@ -1774,6 +2461,8 @@ class ImageWindow(QMainWindow):
 
         # Update view
         self.update_view()
+        self.renderer.auto_contrast()
+        self.canvas.update()
 
     def _rebuild_controls(self):
         """Rebuild control widgets after axes reorder."""
@@ -1797,10 +2486,12 @@ class ImageWindow(QMainWindow):
 
     def set_tool(self, tool_name):
         """
-        Set the active tool (e.g. 'pointer', 'rect', 'circle', 'line', 'coordinate').
+        Set the active tool (e.g. 'pointer', 'rect', 'circle', 'line').
         """
-        valid_tools = ["pointer", "coordinate", "rect", "circle", "line",
-                       "shape_rect", "shape_circle", "shape_line"]
+        valid_tools = [
+            "pointer", "rect", "circle", "line",
+            "polyline", "point", "brush", "eraser",
+        ]
         if tool_name not in valid_tools:
             print(f"Invalid tool: {tool_name}. Valid tools: {valid_tools}")
             return
@@ -1965,11 +2656,6 @@ class ImageWindow(QMainWindow):
         self.renderer.set_active_channel(val)
         self.canvas.update()
         self.view_changed.emit(self)
-
-        # If Contrast Dialog is open, sync it to this channel
-        if self.contrast_dialog and self.contrast_dialog.isVisible():
-            self.contrast_dialog.combo.setCurrentIndex(val)
-            self.contrast_dialog.refresh_ui()
 
     def on_time_change(self, val):
         self.t_idx = val
@@ -2145,6 +2831,49 @@ class ImageWindow(QMainWindow):
             self.z_label.setText(str(val))
         self.update_view()
 
+    def _subscribe_to_buffer(self, data):
+        if self._buffer_unsubscribe is not None:
+            self._buffer_unsubscribe()
+            self._buffer_unsubscribe = None
+        if hasattr(data, "subscribe"):
+            self._buffer_unsubscribe = data.subscribe(
+                lambda key: self._buffer_dirty.emit(key)
+            )
+
+    def _on_buffer_dirty(self, key):
+        if self._key_touches_current_slice(key):
+            self.update_view()
+        else:
+            self.canvas.update()
+
+    def _key_touches_current_slice(self, key):
+        """Conservative check: returns True if a buffer write at *key* could
+        affect the currently displayed (t, z) slice. Unknown keys are
+        treated as overlapping (better to over-refresh than miss updates).
+        """
+        if not isinstance(key, tuple):
+            key = (key,)
+        if Ellipsis in key:
+            return True
+        if len(key) < 2:
+            return True
+
+        def hits(axis_val, current, size):
+            if isinstance(axis_val, slice):
+                start, stop, step = axis_val.indices(size)
+                return (
+                    start <= current < stop
+                    and (current - start) % step == 0
+                )
+            try:
+                return int(axis_val) == current
+            except (TypeError, ValueError):
+                return True
+
+        return hits(key[0], self.t_idx, self.T) and hits(
+            key[1], self.z_idx, self.Z
+        )
+
     def update_view(self):
         if hasattr(self, "chk_proj") and self.chk_proj is not None and self.chk_proj.isChecked():
             mn, mx = self.z_range_slider.value()
@@ -2170,10 +2899,7 @@ class ImageWindow(QMainWindow):
         if self.overlay is not None:
             self.overlay.update()
         self.canvas.update()
-        if self.contrast_dialog and self.contrast_dialog.isVisible():
-            self.contrast_dialog.refresh_ui()
-        if self.channel_panel and self.channel_panel.isVisible():
-            self.channel_panel.refresh_ui()
+        # Channel panel auto-refreshes via view_changed + display subscription.
         self.view_changed.emit(self)
 
     def _sync_focused_point_visibility(self):
@@ -2265,6 +2991,20 @@ class ImageWindow(QMainWindow):
                     return
 
         if tool == "pointer":
+            # Right-click on a shape-layer entry → context menu (Rename/Delete).
+            # Routed before the drag-init path so right-click never starts a drag.
+            if event.button == 2:
+                shape_hit = self._hit_test_shape_layers(x, y)
+                if shape_hit is not None:
+                    layer, shape_id, _handle = shape_hit
+                    self._select_shape(layer, shape_id)
+                    self.canvas.update()
+                    ex, ey = int(event.pos[0]), int(event.pos[1])
+                    global_pos = self.canvas.native.mapToGlobal(QPoint(ex, ey))
+                    self._show_shape_context_menu(layer, shape_id, global_pos)
+                    self._reset_vispy_press_state()
+                    return
+
             # Hit Test ROIs (Reverse order to select top-most)
             hit_roi = None
             hit_handle = None
@@ -2337,10 +3077,67 @@ class ImageWindow(QMainWindow):
                 self.last_pos = (x, y)
                 # Disable camera panning while dragging ROI
                 self.view.camera.interactive = False
+                self._clear_shape_selection()
                 self.canvas.update()
-            else:
-                self.clear_focused_point()
+                return
+
+            # No legacy ROI hit — try shape-layer entries.
+            shape_hit = self._hit_test_shape_layers(x, y)
+            if shape_hit is not None:
+                layer, shape_id, handle = shape_hit
+                rec = layer.data.get(shape_id)
+                has_alt = "Alt" in event.modifiers
+
+                # Polyline-specific shortcuts before drag init.
+                if rec.shape_type == POLYLINE:
+                    # Alt+click a vertex: remove it.
+                    if (
+                        handle is not None
+                        and handle.startswith("v")
+                        and has_alt
+                        and rec.vertices is not None
+                        and len(rec.vertices) > 2
+                    ):
+                        try:
+                            idx = int(handle[1:])
+                        except ValueError:
+                            idx = -1
+                        if 0 <= idx < len(rec.vertices):
+                            self._select_shape(layer, shape_id)
+                            layer.undo_stack.push(
+                                RemoveVertex(shape_id, idx), layer.data
+                            )
+                            return
+                    # Body click near a segment: insert vertex (skip on Alt).
+                    if handle is None and not has_alt:
+                        insert_idx = self._polyline_segment_insert_index(
+                            rec, x, y
+                        )
+                        if insert_idx is not None:
+                            self._select_shape(layer, shape_id)
+                            layer.undo_stack.push(
+                                AddVertex(shape_id, insert_idx, x, y),
+                                layer.data,
+                            )
+                            return
+
+                self._select_shape(layer, shape_id)
+                self._editing_shape_layer = layer
+                self._editing_shape_id = shape_id
+                self._editing_shape_handle = handle  # None == body drag
+                self._editing_shape_start_params = rec.params.copy()
+                self._editing_shape_start_vertices = (
+                    rec.vertices.copy() if rec.vertices is not None else None
+                )
+                self._editing_shape_start_pos = (x, y)
+                self.view.camera.interactive = False
                 self.canvas.update()
+                return
+
+            # Nothing hit — clear all selections.
+            self._clear_shape_selection()
+            self.clear_focused_point()
+            self.canvas.update()
             return
 
         # Handle brush/eraser tools
@@ -2380,39 +3177,38 @@ class ImageWindow(QMainWindow):
                 self._paint_stroke(x, y, erase=(tool == "eraser"))
             return
 
-        # Handle shape drawing tools (rect, circle, line, coordinate)
-        if tool in ("rect", "circle", "line", "coordinate"):
-            self.start_pos = (x, y)
-
-            # Get unique ROI ID (reuses freed IDs via heapq)
-            roi_index = str(self._get_next_roi_id())
-
-            if tool == "coordinate":
-                self.drawing_roi = CoordinateROI(self.view, name=roi_index)
-            elif tool == "rect":
-                self.drawing_roi = RectangleROI(self.view, name=roi_index)
-            elif tool == "circle":
-                self.drawing_roi = CircleROI(self.view, name=roi_index)
-            elif tool == "line":
-                self.drawing_roi = LineROI(self.view, name=roi_index)
-
-            if self.drawing_roi:
-                self.drawing_roi.group = self._active_roi_group
-                self.rois.append(self.drawing_roi)
-                self.roi_added.emit(self.drawing_roi)
-                self.drawing_roi.update((x, y), (x, y))
+        # Shape drawing tools (rect, circle, line) populate the active
+        # ShapeData layer via AddShape. Legacy ROI objects in self.rois
+        # are programmatic-only (e.g. gel_analyzer's LaneROIs).
+        if tool in ("rect", "circle", "line"):
+            # If the press lands on a HANDLE of a selected shape, route to
+            # the edit path so the user can grab handles of the just-drawn
+            # shape without switching tools. Body hits fall through to a
+            # new draw — you can't visually distinguish "inside an existing
+            # shape" from "empty area," but handles are visible targets.
+            shape_hit = self._hit_test_shape_layers(x, y)
+            if shape_hit is not None and shape_hit[2] is not None:
+                layer, shape_id, handle = shape_hit
+                rec = layer.data.get(shape_id)
+                self._select_shape(layer, shape_id)
+                self._editing_shape_layer = layer
+                self._editing_shape_id = shape_id
+                self._editing_shape_handle = handle
+                self._editing_shape_start_params = rec.params.copy()
+                self._editing_shape_start_vertices = (
+                    rec.vertices.copy() if rec.vertices is not None else None
+                )
+                self._editing_shape_start_pos = (x, y)
                 self.view.camera.interactive = False
                 self.canvas.update()
-
-        # Handle shape layer tools (shape_rect, shape_circle, shape_line)
-        if tool in ("shape_rect", "shape_circle", "shape_line"):
+                return
             layer = self._active_shape_layer()
             if layer is None:
                 layer = self.add_shape_layer("Shapes")
             shape_type = {
-                "shape_rect": RECTANGLE,
-                "shape_circle": CIRCLE,
-                "shape_line": LINE,
+                "rect": RECTANGLE,
+                "circle": CIRCLE,
+                "line": LINE,
             }[tool]
             self.start_pos = (x, y)
             cmd = AddShape(
@@ -2420,7 +3216,7 @@ class ImageWindow(QMainWindow):
                 [x, y, x, y],
                 t=self.t_idx,
                 z=self.z_idx,
-                properties={"name": f"Shape {len(layer.data)}"},
+                label=f"Shape {len(layer.data)}",
             )
             layer.undo_stack.push(cmd, layer.data)
             self._drawing_shape_layer = layer
@@ -2428,6 +3224,82 @@ class ImageWindow(QMainWindow):
             layer.visual.update(layer.data, layer.selected_ids, self.t_idx, self.z_idx)
             self.view.camera.interactive = False
             self.canvas.update()
+
+        # Multi-click polyline drawing.
+        if tool == "polyline":
+            if event.button == 1:
+                layer = self._polyline_drawing_layer
+                if layer is None:
+                    layer = self._active_shape_layer() or self.add_shape_layer("Shapes")
+                if self._polyline_drawing_id is None:
+                    cmd = AddShape(
+                        POLYLINE,
+                        vertices=[(x, y), (x, y)],
+                        t=self.t_idx,
+                        z=self.z_idx,
+                        label=f"Shape {len(layer.data)}",
+                    )
+                    layer.undo_stack.push(cmd, layer.data)
+                    self._polyline_drawing_layer = layer
+                    self._polyline_drawing_id = cmd.shape_id
+                else:
+                    rec = layer.data.get(self._polyline_drawing_id)
+                    new_verts = np.vstack(
+                        [rec.vertices, [[x, y]]]
+                    ).astype(np.float32, copy=False)
+                    rec.vertices = new_verts
+                    layer.data._emit("edited", self._polyline_drawing_id)
+                self.view.camera.interactive = False
+                return
+            if event.button == 2 and self._polyline_drawing_id is not None:
+                # Right-click finishes — drop the trailing preview vertex.
+                layer = self._polyline_drawing_layer
+                rec = layer.data.get(self._polyline_drawing_id)
+                if rec.vertices is not None and len(rec.vertices) >= 3:
+                    rec.vertices = rec.vertices[:-1].astype(
+                        np.float32, copy=False
+                    )
+                    layer.data._emit("edited", self._polyline_drawing_id)
+                self._polyline_drawing_layer = None
+                self._polyline_drawing_id = None
+                return
+
+        # Point tool — drop, drag, or Alt-remove.
+        if tool == "point" and event.button == 1:
+            has_alt = "Alt" in event.modifiers
+            # Find active point layer (or create one).
+            layer = self.layers.active("points")
+            layer_name = layer.name if layer is not None else None
+            if layer_name is None or layer_name not in self._point_layers:
+                self.add_point_layer("Points")
+                layer = self.layers.active("points")
+                layer_name = layer.name if layer is not None else None
+            holder = self._point_layers[layer_name]["holder"]
+
+            near = self._nearest_point(x, y, radius_px=10.0)
+            if near is not None and near["layer"] == layer_name:
+                pid = int(near["point_id"])
+                if has_alt:
+                    from ..data.point_commands import RemovePoint
+                    layer.undo_stack.push(RemovePoint(pid), holder)
+                    return
+                # Start drag.
+                row = self._get_point_row(layer_name, pid)
+                if row is not None:
+                    self._point_dragging_layer = layer_name
+                    self._point_dragging_id = pid
+                    self._point_drag_start_xy = (
+                        float(row.get("x", x)), float(row.get("y", y))
+                    )
+                    self.view.camera.interactive = False
+                return
+
+            # No hit — drop a new point.
+            from ..data.point_commands import AddPoint
+            layer.undo_stack.push(
+                AddPoint(x=float(x), y=float(y), t=self.t_idx), holder
+            )
+            return
 
     def on_mouse_move(self, event):
         # 1. Update Info Label (always)
@@ -2480,6 +3352,21 @@ class ImageWindow(QMainWindow):
                 self.info_label.setText("")
                 self._hover_label.visible = False
 
+        # 1b. Polyline drawing — update preview vertex (no button held).
+        if self._polyline_drawing_id is not None and self._polyline_drawing_layer is not None:
+            x, y = self._map_event_to_image(event)
+            layer = self._polyline_drawing_layer
+            try:
+                rec = layer.data.get(self._polyline_drawing_id)
+            except KeyError:
+                self._polyline_drawing_layer = None
+                self._polyline_drawing_id = None
+            else:
+                if rec.vertices is not None and len(rec.vertices) > 0:
+                    rec.vertices[-1, 0] = x
+                    rec.vertices[-1, 1] = y
+                    layer.data._emit("edited", self._polyline_drawing_id)
+
         # 2. Contour Fill Mode (no button held - just mouse movement)
         if self._contour_mode:
             x, y = self._map_event_to_image(event)
@@ -2522,36 +3409,77 @@ class ImageWindow(QMainWindow):
             self.canvas.update()
             return
 
-        # 3. Update Drawing
-        if self.drawing_roi and event.button == 1:
-            x, y = self._map_event_to_image(event)
-            end_pos = (x, y)
-
-            # Shift key constrains LineROI to horizontal/vertical
-            if (
-                isinstance(self.drawing_roi, LineROI)
-                and "Shift" in event.modifiers
-            ):
-                sx, sy = self.start_pos
-                dx = abs(x - sx)
-                dy = abs(y - sy)
-                if dx > dy:
-                    # Horizontal line
-                    end_pos = (x, sy)
-                else:
-                    # Vertical line
-                    end_pos = (sx, y)
-
-            self.drawing_roi.update(self.start_pos, end_pos)
-            self.canvas.update()
-
         # 5. Shape Layer Drawing Update
         if self._drawing_shape_layer is not None and self._drawing_shape_id is not None and event.button == 1:
             x, y = self._map_event_to_image(event)
             layer = self._drawing_shape_layer
             sx, sy = self.start_pos
+            rec = layer.data.get(self._drawing_shape_id)
+            if rec.shape_type == RECTANGLE and "Shift" in event.modifiers:
+                x, y = square_from_corner(sx, sy, x, y)
             layer.data.update(self._drawing_shape_id, [sx, sy, x, y])
             layer.visual.update(layer.data, layer.selected_ids, self.t_idx, self.z_idx)
+            self.canvas.update()
+
+        # 5b. Point-tool drag — update x/y of the dragged point in place
+        # (no command pushed yet; we push a single MovePoint on release).
+        if (
+            self._point_dragging_id is not None
+            and self._point_dragging_layer is not None
+            and event.button == 1
+        ):
+            x, y = self._map_event_to_image(event)
+            entry = self._point_layers.get(self._point_dragging_layer)
+            if entry is not None:
+                holder = entry["holder"]
+                tbl = holder.table
+                idx = tbl._id_to_index.get(int(self._point_dragging_id))
+                if idx is not None:
+                    tbl.x[idx] = float(x)
+                    tbl.y[idx] = float(y)
+                    visual = entry["visual"]
+                    if visual is not None:
+                        visual.set_points(tbl)
+                        visual.set_time_z(self.t_idx, self.z_idx)
+                    self.canvas.update()
+
+        # 6. Shape Layer Edit Drag (move body or adjust handle)
+        if self._editing_shape_id is not None and event.button == 1:
+            x, y = self._map_event_to_image(event)
+            layer = self._editing_shape_layer
+            rec = layer.data.get(self._editing_shape_id)
+            start_params = self._editing_shape_start_params
+            start_verts = self._editing_shape_start_vertices
+            sx, sy = self._editing_shape_start_pos
+            if self._editing_shape_handle is None:
+                # Body drag: translate the params (rect-style) and any
+                # polyline vertices by (dx, dy).
+                dx, dy = x - sx, y - sy
+                rec.params[0] = start_params[0] + dx
+                rec.params[1] = start_params[1] + dy
+                rec.params[2] = start_params[2] + dx
+                rec.params[3] = start_params[3] + dy
+                if start_verts is not None:
+                    rec.vertices = (start_verts + np.array([dx, dy], dtype=np.float32))
+            else:
+                # Handle drag: reset to start, then apply current pointer.
+                rec.params[:] = start_params
+                if start_verts is not None:
+                    rec.vertices = start_verts.copy()
+                nx, ny = x, y
+                if rec.shape_type == RECTANGLE and "Shift" in event.modifiers:
+                    anchor = rect_opposite_corner(
+                        start_params, self._editing_shape_handle
+                    )
+                    if anchor is not None:
+                        nx, ny = square_from_corner(anchor[0], anchor[1], x, y)
+                _apply_handle_adjustment(rec, self._editing_shape_handle, nx, ny)
+            # Notify subscribers (e.g. region-stats / line-profile dialogs)
+            # so derived calculations refresh live during the drag.
+            layer.data._emit(EVT_EDITED, self._editing_shape_id)
+            layer.visual.update(
+                layer.data, layer.selected_ids, self.t_idx, self.z_idx
+            )
             self.canvas.update()
 
     def on_mouse_release(self, event):
@@ -2581,23 +3509,89 @@ class ImageWindow(QMainWindow):
             if manager.active_tool == "pointer":
                 self.view.camera.interactive = True
 
-        if self.drawing_roi:
-            self.drawing_roi = None
-            self.start_pos = None
-            # Re-enable camera after drawing
-            self.view.camera.interactive = False  # Keep disabled for draw tools
-
         # Shape layer drawing finalization
         if self._drawing_shape_layer is not None:
             layer = self._drawing_shape_layer
-            self.layer_data_changed.emit(layer)
+            shape_id = self._drawing_shape_id
             self._drawing_shape_layer = None
             self._drawing_shape_id = None
             self.start_pos = None
             self.view.camera.interactive = False  # Keep disabled for draw tools
+            # Auto-select the new shape so its handles render.
+            if shape_id is not None:
+                self._select_shape(layer, shape_id)
 
+        # Point drag finalization — push a single MovePoint command.
+        if (
+            self._point_dragging_id is not None
+            and self._point_dragging_layer is not None
+        ):
+            entry = self._point_layers.get(self._point_dragging_layer)
+            pid = int(self._point_dragging_id)
+            sx, sy = self._point_drag_start_xy or (0.0, 0.0)
+            self._point_dragging_layer = None
+            self._point_dragging_id = None
+            self._point_drag_start_xy = None
+            if entry is not None:
+                holder = entry["holder"]
+                tbl = holder.table
+                idx = tbl._id_to_index.get(pid)
+                if idx is not None:
+                    final_x = float(tbl.x[idx])
+                    final_y = float(tbl.y[idx])
+                    if final_x != sx or final_y != sy:
+                        # Roll back the in-place mutation, then push a
+                        # MovePoint command so undo/redo are clean.
+                        tbl.x[idx] = sx
+                        tbl.y[idx] = sy
+                        from ..data.point_commands import MovePoint
+                        layer = self.layers[self._point_dragging_layer] if (
+                            self._point_dragging_layer and
+                            self._point_dragging_layer in self.layers
+                        ) else None
+                        # Use stored entry's layer instead of stale name.
+                        for lyr in self.layers.by_type("points"):
+                            if lyr.data is holder:
+                                layer = lyr
+                                break
+                        if layer is not None:
+                            layer.undo_stack.push(
+                                MovePoint(pid, final_x, final_y), holder
+                            )
+            if manager.active_tool == "pointer":
+                self.view.camera.interactive = True
 
-from .toolbar import Toolbar  # Re-export for backward compatibility
+        # Shape layer edit finalization — push a single undoable command
+        # for the whole drag (live mutation already applied).
+        if self._editing_shape_id is not None:
+            layer = self._editing_shape_layer
+            shape_id = self._editing_shape_id
+            rec = layer.data.get(shape_id)
+            old_params = self._editing_shape_start_params
+            new_params = rec.params.copy()
+            params_changed = not np.array_equal(old_params, new_params)
+            old_verts = self._editing_shape_start_vertices
+            new_verts = rec.vertices.copy() if rec.vertices is not None else None
+            verts_changed = (
+                old_verts is not None and new_verts is not None
+                and not np.array_equal(old_verts, new_verts)
+            )
+            if params_changed:
+                layer.undo_stack.push_executed(
+                    SetShapeParams(shape_id, old_params, new_params)
+                )
+            if verts_changed:
+                layer.undo_stack.push_executed(
+                    SetShapeVertices(shape_id, old_verts, new_verts)
+                )
+            self._editing_shape_layer = None
+            self._editing_shape_id = None
+            self._editing_shape_handle = None
+            self._editing_shape_start_params = None
+            self._editing_shape_start_vertices = None
+            self._editing_shape_start_pos = None
+            if manager.active_tool == "pointer":
+                self.view.camera.interactive = True
 
 
 def imshow(

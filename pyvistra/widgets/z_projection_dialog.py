@@ -22,7 +22,6 @@ class ZProjectionWorker(QObject):
     """Background worker for Z projections."""
 
     progress = Signal(int, int)  # done, total
-    plane_done = Signal(int, int, int)  # t, z, c
     finished = Signal()
     error = Signal(str)
     cancelled = Signal()
@@ -76,7 +75,6 @@ class ZProjectionWorker(QObject):
 
                     done += 1
                     self.progress.emit(done, total)
-                    self.plane_done.emit(t, 0, c)
 
             self.finished.emit()
 
@@ -135,7 +133,7 @@ class ZProjectionDialog(QDialog):
 
         self.output_selector = ImageOutputSelector(
             default_title="Z Projection",
-            formats=[("TIFF", ".tif"), ("Imaris", ".ims")],
+            formats=[".tif", ".ims"],
         )
         main_layout.addWidget(self.output_selector)
         self._runner = BufferProcessingRunner(self.viewer, self.output_selector)
@@ -228,7 +226,6 @@ class ZProjectionDialog(QDialog):
         self._runner.start_worker(
             worker=worker,
             on_progress=self._on_progress,
-            on_plane_done=self._on_plane_done,
             on_finished=self._on_finished,
             on_cancelled=self._on_cancelled,
             on_error=self._on_error,
@@ -245,9 +242,6 @@ class ZProjectionDialog(QDialog):
     def _on_progress(self, done, total):
         self.progress_bar.setValue(done)
         self.status_label.setText(f"Running... {done}/{total}")
-
-    def _on_plane_done(self, t, z, _c):
-        self._runner.refresh_output_view(t, z)
 
     def _on_finished(self):
         if self._runner.output_type == "file":

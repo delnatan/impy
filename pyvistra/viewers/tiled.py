@@ -16,7 +16,6 @@ from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -36,14 +35,16 @@ from qtpy.QtWidgets import (
 from superqt import QRangeSlider
 from vispy import scene
 
+from .. import colormaps as _colormaps
+from ..contrast import compute_percentile_clim
+from ..data.channel_state import ChannelDisplayList
 from ..io import load_image
 from ..visuals.image import (
-    COLORMAPS,
     DEFAULT_CHANNEL_COLORMAPS,
     CompositeImageVisual,
     get_colormap,
 )
-from ..widgets import CompactHistogramWidget, ContrastDialog
+from ..widgets import ChannelPanel, ChannelRow
 from ..widgets.axes_dialog import AxesDialog
 
 
@@ -54,38 +55,62 @@ class TiledVisualProxy:
 
     Unlike individual tile contrast (which remains per-tile), this proxy
     handles global settings: colormap, gamma, and channel visibility.
+    Backed by a :class:`ChannelDisplayList` that fans out to every loaded
+    tile's renderer on change.
     """
+
+    _NEUTRAL_SWATCH = "#888888"
 
     def __init__(self, viewer):
         self.viewer = viewer
-        self._max_channels = 1
-
-        # Global settings (applied to all tiles)
-        self._channel_colormaps = {}  # channel_idx -> colormap_name
-        self._channel_gammas = {}  # channel_idx -> gamma value
-        self._channel_visibility = {}  # channel_idx -> bool
-        self._channel_colors = list(
-            DEFAULT_CHANNEL_COLORMAPS
-        )  # Display colors
+        self._max_channels = 0
+        self.display = ChannelDisplayList(0)
+        self.display.subscribe(self._on_display_changed)
 
     def update_max_channels(self, max_c):
         """Update the maximum number of channels across all tiles."""
+        if max_c <= self._max_channels:
+            self._max_channels = max_c
+            return
+
+        # Preserve existing state; append defaults for new channels.
+        old = self.display
+        new = ChannelDisplayList(max_c)
+        for c in range(min(self._max_channels, max_c)):
+            old_state = old[c]
+            new.set_clim(c, *old_state.clim)
+            new.set_gamma(c, old_state.gamma)
+            new.set_colormap_name(c, old_state.colormap_name)
+            new.set_visible(c, old_state.visible)
+        for c in range(self._max_channels, max_c):
+            new.set_colormap_name(
+                c, DEFAULT_CHANNEL_COLORMAPS[c % len(DEFAULT_CHANNEL_COLORMAPS)]
+            )
+        new.subscribe(self._on_display_changed)
+        self.display = new
         self._max_channels = max_c
-        # Initialize defaults for new channels
-        for c in range(max_c):
-            if c not in self._channel_colormaps:
-                self._channel_colormaps[c] = DEFAULT_CHANNEL_COLORMAPS[
-                    c % len(DEFAULT_CHANNEL_COLORMAPS)
-                ]
-            if c not in self._channel_gammas:
-                self._channel_gammas[c] = 1.0
-            if c not in self._channel_visibility:
-                self._channel_visibility[c] = True
+
+    def _on_display_changed(self, channel_idx, field):
+        state = self.display[channel_idx]
+        for renderer in self._get_tile_renderers():
+            if channel_idx >= len(renderer.layers):
+                continue
+            if field == "clim":
+                renderer.set_clim(channel_idx, *state.clim)
+            elif field == "gamma":
+                renderer.set_gamma(channel_idx, state.gamma)
+            elif field == "colormap_name":
+                renderer.set_colormap(channel_idx, state.colormap_name)
+            elif field == "visible":
+                renderer.set_channel_visible(channel_idx, state.visible)
 
     @property
     def channel_colors(self):
-        """Return display colors for histogram rendering."""
-        return self._channel_colors
+        """Per-channel swatch colors, derived from current colormaps."""
+        return [
+            self.display[c].display_color() or self._NEUTRAL_SWATCH
+            for c in range(len(self.display))
+        ]
 
     def _get_tile_renderers(self):
         """Get all renderers from loaded tiles."""
@@ -95,51 +120,34 @@ class TiledVisualProxy:
             if t.renderer is not None
         ]
 
+    # Channel state — thin delegations.
+
     def set_colormap(self, channel_idx, cmap_name):
-        """Set colormap for a channel across all tiles."""
-        self._channel_colormaps[channel_idx] = cmap_name
-
-        # Update display color
-        _, display_color = get_colormap(cmap_name)
-        if display_color and channel_idx < len(self._channel_colors):
-            self._channel_colors[channel_idx] = display_color
-
-        # Apply to all tiles
-        for renderer in self._get_tile_renderers():
-            if channel_idx < len(renderer.layers):
-                renderer.set_colormap(channel_idx, cmap_name)
+        self.display.set_colormap_name(channel_idx, cmap_name)
 
     def get_colormap_name(self, channel_idx):
-        """Get colormap name for a channel."""
-        return self._channel_colormaps.get(channel_idx, "White")
+        if channel_idx < len(self.display):
+            return self.display[channel_idx].colormap_name
+        return "White"
 
     def set_gamma(self, channel_idx, gamma):
-        """Set gamma for a channel across all tiles."""
-        self._channel_gammas[channel_idx] = gamma
-        for renderer in self._get_tile_renderers():
-            if channel_idx < len(renderer.layers):
-                renderer.set_gamma(channel_idx, gamma)
+        self.display.set_gamma(channel_idx, gamma)
 
     def get_gamma(self, channel_idx):
-        """Get gamma for a channel."""
-        return self._channel_gammas.get(channel_idx, 1.0)
+        if channel_idx < len(self.display):
+            return self.display[channel_idx].gamma
+        return 1.0
 
     def set_channel_visible(self, channel_idx, visible):
-        """Set visibility for a channel across all tiles."""
-        self._channel_visibility[channel_idx] = visible
-        for renderer in self._get_tile_renderers():
-            if channel_idx < len(renderer.layers):
-                renderer.set_channel_visible(channel_idx, visible)
+        self.display.set_visible(channel_idx, visible)
 
     def get_channel_visible(self, channel_idx):
-        """Get visibility state for a channel."""
-        return self._channel_visibility.get(channel_idx, True)
+        if channel_idx < len(self.display):
+            return self.display[channel_idx].visible
+        return True
 
     def set_clim(self, channel_idx, vmin, vmax):
-        """Set contrast limits for a channel across all tiles."""
-        for renderer in self._get_tile_renderers():
-            if channel_idx < len(renderer.layers):
-                renderer.set_clim(channel_idx, vmin, vmax)
+        self.display.set_clim(channel_idx, vmin, vmax)
 
     def get_aggregate_data(self, channel_idx):
         """
@@ -186,205 +194,16 @@ class TiledVisualProxy:
                 )
 
 
-class TiledChannelRow(QWidget):
-    """
-    A single row representing one channel in the tiled viewer panel.
-    Similar to ChannelRow but designed for aggregate display across multiple tiles.
-    """
-
-    visibilityChanged = None  # Will be set as Signal
-    colormapChanged = None
-    gammaChanged = None
-
-    def __init__(self, channel_idx, channel_name, color, parent=None):
-        super().__init__(parent)
-        self.channel_idx = channel_idx
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(4)
-
-        # Visibility checkbox
-        self.chk_visible = QCheckBox()
-        self.chk_visible.setChecked(True)
-        self.chk_visible.setToolTip("Toggle channel visibility (all tiles)")
-        self.chk_visible.toggled.connect(self._on_visibility_changed)
-        layout.addWidget(self.chk_visible)
-
-        # Color swatch (button for colormap menu)
-        self.color_btn = QPushButton()
-        self.color_btn.setFixedSize(20, 20)
-        self.color_btn.setCursor(Qt.PointingHandCursor)
-        self.color_btn.setToolTip("Change colormap (all tiles)")
-        self._update_color_swatch(color)
-        self.color_btn.clicked.connect(self._show_colormap_menu)
-        layout.addWidget(self.color_btn)
-
-        # Channel name label
-        self.name_label = QLabel(channel_name)
-        self.name_label.setFixedWidth(40)
-        self.name_label.setStyleSheet("color: #EEE; font-size: 11px;")
-        layout.addWidget(self.name_label)
-
-        # Min spinbox for contrast
-        self.min_spin = QDoubleSpinBox()
-        self.min_spin.setDecimals(1)
-        self.min_spin.setRange(-1e9, 1e9)
-        self.min_spin.setSingleStep(10)
-        self.min_spin.setFixedWidth(65)
-        self.min_spin.setToolTip("Minimum intensity (all tiles)")
-        self.min_spin.valueChanged.connect(self._on_min_changed)
-        layout.addWidget(self.min_spin)
-
-        # Compact histogram (shows aggregate distribution, interactive)
-        self.histogram = CompactHistogramWidget()
-        self.histogram.climChanged.connect(self._on_histogram_clim_changed)
-        layout.addWidget(self.histogram, 1)
-
-        # Max spinbox for contrast
-        self.max_spin = QDoubleSpinBox()
-        self.max_spin.setDecimals(1)
-        self.max_spin.setRange(-1e9, 1e9)
-        self.max_spin.setSingleStep(10)
-        self.max_spin.setFixedWidth(65)
-        self.max_spin.setToolTip("Maximum intensity (all tiles)")
-        self.max_spin.valueChanged.connect(self._on_max_changed)
-        layout.addWidget(self.max_spin)
-
-        # Gamma spinbox
-        gamma_label = QLabel("γ")
-        gamma_label.setStyleSheet("color: #AAA; font-size: 10px;")
-        gamma_label.setFixedWidth(10)
-        layout.addWidget(gamma_label)
-
-        self.gamma_spin = QDoubleSpinBox()
-        self.gamma_spin.setRange(0.1, 4.0)
-        self.gamma_spin.setSingleStep(0.1)
-        self.gamma_spin.setValue(1.0)
-        self.gamma_spin.setFixedWidth(50)
-        self.gamma_spin.setToolTip("Gamma correction (all tiles)")
-        self.gamma_spin.valueChanged.connect(self._on_gamma_changed)
-        layout.addWidget(self.gamma_spin)
-
-        self.current_colormap = "White"
-
-        # Callbacks (set by parent)
-        self._visibility_callback = None
-        self._colormap_callback = None
-        self._gamma_callback = None
-        self._clim_callback = None
-
-    def set_callbacks(
-        self, visibility_cb, colormap_cb, gamma_cb, clim_cb=None
-    ):
-        """Set callback functions for changes."""
-        self._visibility_callback = visibility_cb
-        self._colormap_callback = colormap_cb
-        self._gamma_callback = gamma_cb
-        self._clim_callback = clim_cb
-
-    def _update_color_swatch(self, color):
-        """Update the color swatch button background."""
-        self.color_btn.setStyleSheet(
-            f"background-color: {color}; border: 1px solid #555; border-radius: 3px;"
-        )
-
-    def _on_visibility_changed(self, checked):
-        if self._visibility_callback:
-            self._visibility_callback(self.channel_idx, checked)
-
-    def _on_gamma_changed(self, value):
-        if self._gamma_callback:
-            self._gamma_callback(self.channel_idx, value)
-
-    def _on_min_changed(self, value):
-        """Handle min spinbox change."""
-        max_val = self.max_spin.value()
-        if value < max_val and self._clim_callback:
-            self._clim_callback(self.channel_idx, value, max_val)
-            # Update histogram display
-            self.histogram.blockSignals(True)
-            self.histogram.set_clim(value, max_val)
-            self.histogram.blockSignals(False)
-
-    def _on_max_changed(self, value):
-        """Handle max spinbox change."""
-        min_val = self.min_spin.value()
-        if value > min_val and self._clim_callback:
-            self._clim_callback(self.channel_idx, min_val, value)
-            # Update histogram display
-            self.histogram.blockSignals(True)
-            self.histogram.set_clim(min_val, value)
-            self.histogram.blockSignals(False)
-
-    def _on_histogram_clim_changed(self, vmin, vmax):
-        """Handle histogram clim change (from dragging handles)."""
-        # Update spinboxes
-        self.min_spin.blockSignals(True)
-        self.max_spin.blockSignals(True)
-        self.min_spin.setValue(vmin)
-        self.max_spin.setValue(vmax)
-        self.min_spin.blockSignals(False)
-        self.max_spin.blockSignals(False)
-        # Notify parent
-        if self._clim_callback:
-            self._clim_callback(self.channel_idx, vmin, vmax)
-
-    def _show_colormap_menu(self):
-        """Show a popup menu for colormap selection."""
-        menu = QMenu(self)
-        for cmap_name in COLORMAPS.keys():
-            action = menu.addAction(cmap_name)
-            action.triggered.connect(
-                lambda checked, name=cmap_name: self._on_colormap_selected(
-                    name
-                )
-            )
-        menu.exec_(
-            self.color_btn.mapToGlobal(self.color_btn.rect().bottomLeft())
-        )
-
-    def _on_colormap_selected(self, cmap_name):
-        self.current_colormap = cmap_name
-        if self._colormap_callback:
-            self._colormap_callback(self.channel_idx, cmap_name)
-
-    def set_data(self, data_slice, color):
-        """Update histogram data and color."""
-        self._update_color_swatch(color)
-        if data_slice is not None:
-            self.histogram.set_data(data_slice, color)
-
-    def set_clim(self, vmin, vmax):
-        """Update histogram and spinbox display range."""
-        self.histogram.blockSignals(True)
-        self.min_spin.blockSignals(True)
-        self.max_spin.blockSignals(True)
-        self.histogram.set_clim(vmin, vmax)
-        self.min_spin.setValue(vmin)
-        self.max_spin.setValue(vmax)
-        self.histogram.blockSignals(False)
-        self.min_spin.blockSignals(False)
-        self.max_spin.blockSignals(False)
-
-    def set_visible_state(self, visible):
-        """Update checkbox state without triggering callback."""
-        self.chk_visible.blockSignals(True)
-        self.chk_visible.setChecked(visible)
-        self.chk_visible.blockSignals(False)
-
-    def set_gamma(self, gamma):
-        """Update gamma spinbox without triggering callback."""
-        self.gamma_spin.blockSignals(True)
-        self.gamma_spin.setValue(gamma)
-        self.gamma_spin.blockSignals(False)
-
-
 class TiledChannelPanel(QDialog):
     """
     Floating dialog for global channel control in TiledViewer.
-    Controls colormap, gamma, and visibility across all tiles.
-    Shows aggregate histogram from all visible tiles.
+
+    Controls colormap, gamma, contrast, and visibility across all tiles
+    via the viewer's :class:`TiledVisualProxy`. Uses the shared
+    :class:`ChannelRow` widget; subscribes to the proxy's
+    :class:`ChannelDisplayList` so external state changes refresh the UI
+    automatically. Histograms reflect aggregated data across all loaded
+    tiles for the displayed channel.
     """
 
     def __init__(self, viewer, parent=None):
@@ -394,29 +213,26 @@ class TiledChannelPanel(QDialog):
 
         self.setWindowTitle("Channels (All Tiles)")
         self.setWindowFlags(Qt.Tool)
-        self.resize(480, min(180 + viewer.max_C * 55, 450))
+        self.resize(520, min(180 + viewer.max_C * 55, 460))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
 
-        # Info label
         info_label = QLabel(
             f"<b>Global Channel Settings</b> ({viewer.max_C} channels)"
         )
         info_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(info_label)
 
-        # Note about global controls
         note_label = QLabel(
             "<i>Adjust min/max to set global contrast. "
-            "Use Auto All for per-tile optimization.</i>"
+            "Use Auto Contrast All for per-tile optimization.</i>"
         )
         note_label.setStyleSheet("color: #888; font-size: 10px;")
         note_label.setWordWrap(True)
         layout.addWidget(note_label)
 
-        # Scroll area for channel rows
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -426,83 +242,84 @@ class TiledChannelPanel(QDialog):
         self.rows_layout = QVBoxLayout(scroll_content)
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(2)
-
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll, 1)
 
-        # Channel rows
         self.channel_rows = []
         self._setup_channel_rows()
 
-        # Button row
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
-
         btn_auto = QPushButton("Auto Contrast All")
         btn_auto.setToolTip(
             "Apply percentile-based auto-contrast to each tile"
         )
         btn_auto.clicked.connect(self._auto_contrast_all)
         btn_layout.addWidget(btn_auto)
-
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
-        # Initial data load
+        # Subscribe to proxy state changes so external mutations refresh UI.
+        self._display_unsubscribe = self.proxy.display.subscribe(
+            self._on_display_changed
+        )
+
         self.refresh_ui()
 
     def _setup_channel_rows(self):
-        """Create a row widget for each channel."""
         for c in range(self.viewer.max_C):
             ch_name = f"Ch {c + 1}"
-            color = self.proxy.channel_colors[
-                c % len(self.proxy.channel_colors)
-            ]
-
-            row = TiledChannelRow(c, ch_name, color)
-            row.set_callbacks(
-                self._on_visibility_changed,
-                self._on_colormap_changed,
-                self._on_gamma_changed,
-                self._on_clim_changed,
-            )
-
+            color = self._swatch_color(c)
+            row = ChannelRow(c, ch_name, color)
+            row.visibilityChanged.connect(self._on_visibility_changed)
+            row.colormapChanged.connect(self._on_colormap_changed)
+            row.gammaChanged.connect(self._on_gamma_changed)
+            row.climChanged.connect(self._on_clim_changed)
             self.channel_rows.append(row)
             self.rows_layout.addWidget(row)
-
         self.rows_layout.addStretch()
 
+    def _swatch_color(self, c_idx):
+        colors = self.proxy.channel_colors
+        if not colors:
+            return "#888888"
+        return colors[c_idx % len(colors)]
+
+    # User input → proxy.
+
     def _on_visibility_changed(self, channel_idx, visible):
-        """Handle visibility toggle for a channel."""
         self.proxy.set_channel_visible(channel_idx, visible)
         self._update_all_canvases()
 
     def _on_colormap_changed(self, channel_idx, cmap_name):
-        """Handle colormap change for a channel."""
         self.proxy.set_colormap(channel_idx, cmap_name)
         self._update_all_canvases()
 
-        # Update color swatch
-        color = self.proxy.channel_colors[
-            channel_idx % len(self.proxy.channel_colors)
-        ]
-        self.channel_rows[channel_idx]._update_color_swatch(color)
-
-        # Refresh histogram with new color
-        self.refresh_ui()
-
     def _on_gamma_changed(self, channel_idx, gamma):
-        """Handle gamma change for a channel."""
         self.proxy.set_gamma(channel_idx, gamma)
         self._update_all_canvases()
 
     def _on_clim_changed(self, channel_idx, vmin, vmax):
-        """Handle contrast limits change for a channel."""
         self.proxy.set_clim(channel_idx, vmin, vmax)
         self._update_all_canvases()
 
+    # Proxy → UI.
+
+    def _on_display_changed(self, channel_idx, field):
+        if channel_idx >= len(self.channel_rows):
+            return
+        row = self.channel_rows[channel_idx]
+        state = self.proxy.display[channel_idx]
+        if field == "clim":
+            row.set_clim(*state.clim)
+        elif field == "gamma":
+            row.set_gamma(state.gamma)
+        elif field == "colormap_name":
+            row._update_color_swatch(self._swatch_color(channel_idx))
+        elif field == "visible":
+            row.set_visible_state(state.visible)
+
     def _update_all_canvases(self):
-        """Update all tile canvases."""
         for tile in self.viewer.tile_widgets:
             if tile.canvas:
                 tile.canvas.update()
@@ -513,32 +330,26 @@ class TiledChannelPanel(QDialog):
         self.refresh_ui()
 
     def refresh_ui(self):
-        """Refresh all channel rows with current data."""
+        """Refresh all channel rows from current proxy state + aggregate data."""
         for c, row in enumerate(self.channel_rows):
-            # Get aggregate data for this channel
             agg_data = self.proxy.get_aggregate_data(c)
-            color = self.proxy.channel_colors[
-                c % len(self.proxy.channel_colors)
-            ]
+            color = self._swatch_color(c)
 
             if agg_data is not None and agg_data.size > 0:
                 row.set_data(agg_data, color)
-
-                # Set clim based on data range (for histogram display only)
-                valid = agg_data[agg_data > 0]
-                if valid.size > 0:
-                    mn, mx = np.nanpercentile(valid, (0.5, 99.5))
-                    row.set_clim(mn, mx)
+                mn, mx = compute_percentile_clim(agg_data, 0.5, 99.5)
+                row.set_clim(mn, mx)
             else:
-                row.set_data(None, color)
+                row._update_color_swatch(color)
 
-            # Update visibility state
-            visible = self.proxy.get_channel_visible(c)
-            row.set_visible_state(visible)
+            row.set_visible_state(self.proxy.get_channel_visible(c))
+            row.set_gamma(self.proxy.get_gamma(c))
 
-            # Update gamma
-            gamma = self.proxy.get_gamma(c)
-            row.set_gamma(gamma)
+    def closeEvent(self, event):
+        if self._display_unsubscribe is not None:
+            self._display_unsubscribe()
+            self._display_unsubscribe = None
+        super().closeEvent(event)
 
 
 class FlowLayout(QLayout):
@@ -934,9 +745,9 @@ class TileWidget(QFrame):
         auto_action = menu.addAction("Auto Contrast")
         auto_action.triggered.connect(self._auto_contrast)
 
-        # Contrast dialog
-        contrast_action = menu.addAction("Adjust Contrast...")
-        contrast_action.triggered.connect(self._show_contrast_dialog)
+        # Channels & contrast panel
+        contrast_action = menu.addAction("Channels && Contrast...")
+        contrast_action.triggered.connect(self._show_channel_panel)
 
         menu.addSeparator()
 
@@ -963,20 +774,17 @@ class TileWidget(QFrame):
 
         cache = self.renderer.current_slice_cache
         for c in range(cache.shape[0]):
-            plane = cache[c]
-            valid = plane[plane > 0]
-            if valid.size > 0:
-                mn, mx = np.nanpercentile(valid, (0.5, 99.5))
-                self.renderer.set_clim(c, mn, max(mx, mn + 1))
+            mn, mx = compute_percentile_clim(cache[c], 0.5, 99.5)
+            self.renderer.set_clim(c, mn, mx)
 
         self.canvas.update()
 
-    def _show_contrast_dialog(self):
-        """Show contrast adjustment dialog."""
+    def _show_channel_panel(self):
+        """Show the unified Channels & Contrast panel for this tile."""
         if self.renderer is None:
             return
 
-        # Create a temporary ImageWindow-like wrapper for ContrastDialog
+        # Lightweight wrapper exposing the attributes ChannelPanel reads.
         class TileWrapper:
             def __init__(self, tile):
                 self.renderer = tile.renderer
@@ -986,8 +794,8 @@ class TileWidget(QFrame):
                 self.meta = tile.meta or {}
 
         wrapper = TileWrapper(self)
-        dlg = ContrastDialog(wrapper, parent=self)
-        dlg.exec_()
+        panel = ChannelPanel(wrapper, parent=self)
+        panel.exec_()
 
     def _open_in_viewer(self):
         """Open this image in a full ImageWindow."""

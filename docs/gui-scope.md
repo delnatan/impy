@@ -16,7 +16,7 @@ These are available in the application and toolbar/dialog workflow:
 
 - gel analysis workflow
 - line profile dialog workflow
-- denoise/PSF/transform/alignment dialogs
+- PSF/transform/alignment dialogs
 - annotation manager panel interactions
 
 These can still be combined with scripting by loading data in Python first and then opening viewers, but they are designed primarily around GUI interactions.

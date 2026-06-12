@@ -35,6 +35,7 @@ class Toolbar(QMainWindow):
         self.setAcceptDrops(True)
         self.open_windows = []
         self._psf_dialog = None  # Lazy singleton for PSF dialog
+        self._pupil_dialog = None  # Lazy singleton for Pupil dialog
 
         # Central Widget with Layout
         central = QWidget()
@@ -59,10 +60,11 @@ class Toolbar(QMainWindow):
 
         self._tool_labels = {
             "pointer": "Pan/Zoom",
-            "coordinate": "Coordinate",
             "rect": "Rectangle",
             "circle": "Circle",
             "line": "Line",
+            "polyline": "Polyline",
+            "point": "Point",
             "brush": "Brush",
             "eraser": "Eraser",
         }
@@ -76,15 +78,6 @@ class Toolbar(QMainWindow):
             "Pan/Zoom",
             "Ctrl+1",
         )
-        self.act_coord = self._create_tool_action(
-            "coordinate",
-            self._load_tool_icon(
-                "coordinate",
-                self.style().standardIcon(QStyle.SP_DialogYesButton),
-            ),
-            "Coordinate",
-            "Ctrl+2",
-        )
         self.act_rect = self._create_tool_action(
             "rect",
             self._load_tool_icon(
@@ -92,7 +85,7 @@ class Toolbar(QMainWindow):
                 self.style().standardIcon(QStyle.SP_TitleBarNormalButton),
             ),
             "Rectangle",
-            "Ctrl+3",
+            "Ctrl+2",
         )
         self.act_circle = self._create_tool_action(
             "circle",
@@ -101,7 +94,7 @@ class Toolbar(QMainWindow):
                 self.style().standardIcon(QStyle.SP_BrowserReload),
             ),
             "Circle",
-            "Ctrl+4",
+            "Ctrl+3",
         )
         self.act_line = self._create_tool_action(
             "line",
@@ -110,7 +103,25 @@ class Toolbar(QMainWindow):
                 self.style().standardIcon(QStyle.SP_LineEditClearButton),
             ),
             "Line",
+            "Ctrl+4",
+        )
+        self.act_polyline = self._create_tool_action(
+            "polyline",
+            self._load_tool_icon(
+                "polyline",
+                self.style().standardIcon(QStyle.SP_ArrowForward),
+            ),
+            "Polyline (click vertices, right-click to finish)",
             "Ctrl+5",
+        )
+        self.act_point = self._create_tool_action(
+            "point",
+            self._load_tool_icon(
+                "point",
+                self.style().standardIcon(QStyle.SP_MediaStop),
+            ),
+            "Point (click to drop, Alt+click to remove)",
+            "Ctrl+6",
         )
         self.act_brush = self._create_tool_action(
             "brush",
@@ -119,7 +130,7 @@ class Toolbar(QMainWindow):
                 self.style().standardIcon(QStyle.SP_FileDialogDetailedView),
             ),
             "Brush",
-            "Ctrl+6",
+            "Ctrl+7",
         )
         self.act_eraser = self._create_tool_action(
             "eraser",
@@ -128,14 +139,15 @@ class Toolbar(QMainWindow):
                 self.style().standardIcon(QStyle.SP_DialogDiscardButton),
             ),
             "Eraser",
-            "Ctrl+7",
+            "Ctrl+8",
         )
 
         self.tools.addAction(self.act_pointer)
-        self.tools.addAction(self.act_coord)
         self.tools.addAction(self.act_rect)
         self.tools.addAction(self.act_circle)
         self.tools.addAction(self.act_line)
+        self.tools.addAction(self.act_polyline)
+        self.tools.addAction(self.act_point)
 
         # Separator before painting tools
         self.tools.addSeparator()
@@ -155,6 +167,19 @@ class Toolbar(QMainWindow):
         self.act_annotation_mgr.setToolTip("Annotations")
         self.act_annotation_mgr.triggered.connect(self.show_annotation_manager)
         self.tools.addAction(self.act_annotation_mgr)
+
+        # Layer Manager Button (unified shapes/points/tracks/labels panel)
+        self.act_layer_mgr = QAction(
+            self._load_tool_icon(
+                "layers",
+                self.style().standardIcon(QStyle.SP_FileDialogInfoView),
+            ),
+            "",
+            self,
+        )
+        self.act_layer_mgr.setToolTip("Layers")
+        self.act_layer_mgr.triggered.connect(self.show_layer_manager)
+        self.tools.addAction(self.act_layer_mgr)
 
         # Python Console Button
         self.act_console = QAction(
@@ -180,10 +205,11 @@ class Toolbar(QMainWindow):
         self.group = QActionGroup(self)
         self.group.setExclusive(True)
         self.group.addAction(self.act_pointer)
-        self.group.addAction(self.act_coord)
         self.group.addAction(self.act_rect)
         self.group.addAction(self.act_circle)
         self.group.addAction(self.act_line)
+        self.group.addAction(self.act_polyline)
+        self.group.addAction(self.act_point)
         self.group.addAction(self.act_brush)
         self.group.addAction(self.act_eraser)
 
@@ -199,6 +225,10 @@ class Toolbar(QMainWindow):
         compute_psf_action = QAction("Compute PSF...", self)
         compute_psf_action.triggered.connect(self._show_psf_dialog)
         file_menu.addAction(compute_psf_action)
+
+        compute_pupil_action = QAction("Compute Pupil...", self)
+        compute_pupil_action.triggered.connect(self._show_pupil_dialog)
+        file_menu.addAction(compute_pupil_action)
 
         file_menu.addSeparator()
 
@@ -248,6 +278,11 @@ class Toolbar(QMainWindow):
         mgr.show()
         mgr.raise_()
 
+    def show_layer_manager(self):
+        from .layer_manager import show_layer_manager
+
+        show_layer_manager()
+
     def show_console(self):
         console = get_console()
         console.show()
@@ -262,6 +297,15 @@ class Toolbar(QMainWindow):
         self._psf_dialog.show()
         self._psf_dialog.raise_()
 
+    def _show_pupil_dialog(self):
+        """Show the Pupil computation dialog."""
+        from ..widgets import PupilComputeDialog
+
+        if self._pupil_dialog is None:
+            self._pupil_dialog = PupilComputeDialog(parent=self)
+        self._pupil_dialog.show()
+        self._pupil_dialog.raise_()
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.accept()
@@ -271,7 +315,12 @@ class Toolbar(QMainWindow):
     def dropEvent(self, event: QDropEvent):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
 
-        # Collect supported image files
+        # Collect supported image files.
+        #
+        # Single extensions (matched via splitext) and compound suffixes
+        # (matched via name.endswith) are kept separate because deconlib
+        # artifacts use two-dot suffixes (``.psf.h5``, ``.pupil.h5``) that
+        # splitext would collapse to a generic ``.h5``.
         supported_ext = {
             ".ims",
             ".czi",
@@ -282,13 +331,19 @@ class Toolbar(QMainWindow):
             ".jpg",
             ".jpeg",
         }
+        supported_suffixes = (".psf.h5", ".pupil.h5")
+
+        def is_supported(name):
+            lower = name.lower()
+            if lower.endswith(supported_suffixes):
+                return True
+            return os.path.splitext(lower)[1] in supported_ext
+
         image_files = []
 
         for f in files:
-            # Check for .zarr directories (including .psf.zarr)
-            if (
-                f.endswith(".zarr/") or f.endswith(".psf.zarr/")
-            ) and os.path.isdir(f):
+            # Check for .zarr directories (general Zarr arrays / OME-Zarr).
+            if f.endswith(".zarr/") and os.path.isdir(f):
                 image_files.append(f)
             elif os.path.isdir(f):
                 # Folder: collect all images recursively
@@ -303,13 +358,9 @@ class Toolbar(QMainWindow):
                     for name in names:
                         if name.startswith("."):
                             continue
-                        if os.path.splitext(name)[1].lower() in supported_ext:
+                        if is_supported(name):
                             image_files.append(os.path.join(root, name))
-            elif os.path.splitext(f)[
-                1
-            ].lower() in supported_ext and not os.path.basename(f).startswith(
-                "."
-            ):
+            elif not os.path.basename(f).startswith(".") and is_supported(f):
                 image_files.append(f)
 
         # Sort by filename

@@ -218,20 +218,7 @@ class AnnotationManager(QWidget):
         self.menu_bar = QMenuBar()
         layout.setMenuBar(self.menu_bar)
 
-        # Analysis Menu (same as ROIManager)
-        from ..analysis import crop_image, measure_intensity
-
         analysis_menu = self.menu_bar.addMenu("Analysis")
-
-        action_crop = QAction("Crop Image", self)
-        action_crop.triggered.connect(lambda: self._run_analysis(crop_image))
-        analysis_menu.addAction(action_crop)
-
-        action_measure = QAction("Measure Intensity", self)
-        action_measure.triggered.connect(
-            lambda: self._run_analysis(measure_intensity)
-        )
-        analysis_menu.addAction(action_measure)
 
         action_line_profile = QAction("Line Profile...", self)
         action_line_profile.triggered.connect(self._show_line_profile_dialog)
@@ -244,14 +231,6 @@ class AnnotationManager(QWidget):
         action_gel = QAction("Gel Analyzer...", self)
         action_gel.triggered.connect(lambda: show_gel_analyzer(self))
         analysis_menu.addAction(action_gel)
-
-        # Lanes Menu
-        from ..analysis import align_lanes
-
-        lanes_menu = self.menu_bar.addMenu("Lanes")
-        action_align = QAction("Align Lanes", self)
-        action_align.triggered.connect(self._align_lanes_action)
-        lanes_menu.addAction(action_align)
 
     def _install_shortcuts(self):
         """Install manager-local shortcuts that work with child focus."""
@@ -1649,36 +1628,6 @@ class AnnotationManager(QWidget):
 
     # ---- Analysis ----
 
-    def _run_analysis(self, func):
-        from ..analysis import crop_image
-
-        item = self.item_list.currentItem()
-        if not item or not self.active_window:
-            print("No item selected")
-            return
-
-        data = item.data(Qt.UserRole)
-        if not data or data[0] != "roi":
-            print("Select an ROI first")
-            return
-
-        roi = data[1]
-        data_5d = self.active_window.img_data
-
-        if func == crop_image:
-            func(data_5d, roi)
-        else:
-            cache = self.active_window.renderer.current_slice_cache
-            if cache is None:
-                print("No image data available")
-                return
-            if cache.ndim == 3:
-                c = self.active_window.c_idx
-                data_2d = cache[c] if c < cache.shape[0] else cache[0]
-            else:
-                data_2d = cache
-            func(data_2d, roi)
-
     def _show_line_profile_dialog(self):
         from ..widgets import get_line_profile_dialog
 
@@ -1692,15 +1641,6 @@ class AnnotationManager(QWidget):
                 if roi.selected and isinstance(roi, LineROI):
                     dialog._update_profile(roi)
                     break
-
-    def _align_lanes_action(self):
-        from ..analysis import align_lanes
-
-        if not self.active_window:
-            return
-        count = align_lanes(self.active_window.rois, reference="top")
-        if count > 0:
-            self.active_window.canvas.update()
 
     # ---- Keyboard Shortcuts ----
 

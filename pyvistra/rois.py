@@ -805,13 +805,16 @@ class LaneROI(RectangleROI):
 
     # Default colors
     LADDER_COLOR = "#FFBB16"
-    SAMPLE_COLOR = "#9C27B0"
+    SAMPLE_COLOR = "#00BCD4"
 
     def __init__(self, view, name="Lane"):
         super().__init__(view, name)
         self.locked = False  # When True, body can't be moved
         self.show_marker_labels = True
         self._show_border = True
+        self.label_side = "left"   # "left", "right", or "top"
+        self.label_font_size = 8
+        self.label_offset = 3      # pixel gap between band line and label
         self._markers = []  # List of dicts: {y_local, label, color}
         self._marker_visuals = []  # List of (Line, Text) tuples
         self._dragging_marker_idx = None
@@ -883,15 +886,16 @@ class LaneROI(RectangleROI):
             pos=line_pos, color=color, width=2, parent=self.view.scene
         )
 
+        anchor_x, anchor_y, pos = self._marker_text_config(x_min, x_max, y_global)
         text_visual = scene.visuals.Text(
             text=label,
             color=color,
-            font_size=8,
-            anchor_x="right",
-            anchor_y="center",
+            font_size=self.label_font_size,
+            anchor_x=anchor_x,
+            anchor_y=anchor_y,
             parent=self.view.scene,
         )
-        text_visual.pos = (x_min - 3, y_global, 0)
+        text_visual.pos = pos
         text_visual.visible = self.show_marker_labels and bool(label)
 
         self._marker_visuals.append((line_visual, text_visual))
@@ -957,6 +961,22 @@ class LaneROI(RectangleROI):
                 text_visual.text = label
                 text_visual.visible = self.show_marker_labels and bool(label)
 
+    def _marker_text_config(self, x_min, x_max, y_global):
+        """Return (anchor_x, anchor_y, pos) for a marker label based on label_side."""
+        off = self.label_offset
+        if self.label_side == "right":
+            return "left", "center", (x_max + off, y_global, 0)
+        elif self.label_side == "top":
+            x_center = (x_min + x_max) / 2
+            return "center", "bottom", (x_center, y_global - off, 0)
+        else:  # "left"
+            return "right", "center", (x_min - off, y_global, 0)
+
+    def rebuild_marker_visuals(self):
+        """Rebuild all marker visuals; call after changing label_side or label_font_size."""
+        self._clear_marker_visuals()
+        self._create_marker_visuals()
+
     def _get_bounds(self):
         """Get lane bounds (x_min, x_max, y_min, y_max)."""
         if "p1" not in self.data:
@@ -988,15 +1008,16 @@ class LaneROI(RectangleROI):
                 pos=line_pos, color=color, width=2, parent=self.view.scene
             )
 
+            anchor_x, anchor_y, pos = self._marker_text_config(x_min, x_max, y_global)
             text_visual = scene.visuals.Text(
                 text=label,
                 color=color,
-                font_size=8,
-                anchor_x="right",
-                anchor_y="center",
+                font_size=self.label_font_size,
+                anchor_x=anchor_x,
+                anchor_y=anchor_y,
                 parent=self.view.scene,
             )
-            text_visual.pos = (x_min - 3, y_global, 0)
+            text_visual.pos = pos
             text_visual.visible = self.show_marker_labels and bool(label)
 
             self._marker_visuals.append((line_visual, text_visual))
@@ -1028,7 +1049,8 @@ class LaneROI(RectangleROI):
             [[x_min, y_global, 0], [x_max, y_global, 0]], dtype=np.float32
         )
         line_visual.set_data(pos=line_pos)
-        text_visual.pos = (x_min - 3, y_global, 0)
+        _, _, pos = self._marker_text_config(x_min, x_max, y_global)
+        text_visual.pos = pos
 
     def set_marker_labels_visible(self, visible):
         """Toggle marker label visibility."""

@@ -182,7 +182,6 @@ class PythonConsole(QWidget):
     - annotation_mgr: AnnotationManager singleton
     - windows: dict of all open ImageWindow instances
     - np: numpy
-    - plt: matplotlib.pyplot
 
     Usage:
         console = PythonConsole()
@@ -268,15 +267,6 @@ class PythonConsole(QWidget):
             "np": np,
             "numpy": np,
         }
-
-        # Add matplotlib if available
-        try:
-            import matplotlib.pyplot as plt
-
-            self.namespace["plt"] = plt
-            self.namespace["matplotlib"] = __import__("matplotlib")
-        except ImportError:
-            pass
 
         # Add pyvistra objects
         self._update_namespace()
@@ -382,7 +372,6 @@ Available objects:
   annotation_mgr - AnnotationManager (when available)
   aw()        - Get active window (shortcut for active_window())
   np          - numpy
-  plt         - matplotlib.pyplot
   imshow()    - Display array as image
   load_image()- Load image file
   save_tiff() - Save as TIFF

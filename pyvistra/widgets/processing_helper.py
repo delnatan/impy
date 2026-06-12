@@ -1,4 +1,8 @@
+from typing import Tuple
+
 from qtpy.QtCore import QThread
+
+from pyvistra.data import Readable5D, Writable5D
 
 
 class BufferProcessingRunner:
@@ -10,6 +14,23 @@ class BufferProcessingRunner:
     - create ImageBuffer output
     - route output via ImageOutputSelector
     - manage QThread + worker wiring and cleanup
+
+    Workers receive a :class:`Readable5D` source and a :class:`Writable5D`
+    destination (an :class:`ImageBuffer`). Live preview happens
+    automatically when the destination is a window — the viewer subscribes
+    to buffer changes and refreshes the displayed slice on overlap.
+
+    A processor dialog needs three pieces:
+
+      1. A params form (its own widgets).
+      2. A worker (``QObject`` with ``progress`` / ``finished`` /
+         ``cancelled`` / ``error`` signals and a ``run`` method).
+      3. An :class:`ImageOutputSelector`.
+
+    Everything else — thread lifetime, refcounting, output routing — is
+    this runner's job. Synchronous one-shot computations (no worker
+    thread) should skip the runner and call
+    ``output_selector.send(buffer, metadata)`` directly.
     """
 
     def __init__(self, viewer, output_selector):
@@ -27,14 +48,14 @@ class BufferProcessingRunner:
     def is_running(self):
         return self.thread is not None
 
-    def prepare_output(self, output_shape, output_dtype, output_meta):
+    def prepare_output(
+        self, output_shape, output_dtype, output_meta
+    ) -> Tuple[Readable5D, Writable5D]:
         from pyvistra.io import ImageBuffer
 
-        source = self.viewer.img_data
-        if hasattr(source, "acquire"):
-            source = source.acquire()
-
-        self.source_data = source
+        # Every 5D proxy/buffer is refcounted via RefCountMixin, so
+        # acquire() is always available.
+        self.source_data = self.viewer.img_data.acquire()
         self.output_meta = output_meta
         self.output_type = self.output_selector.get_selection_type()
         self.output_buffer = ImageBuffer(
@@ -59,7 +80,6 @@ class BufferProcessingRunner:
         self,
         worker,
         on_progress,
-        on_plane_done,
         on_finished,
         on_cancelled,
         on_error,
@@ -71,7 +91,6 @@ class BufferProcessingRunner:
 
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(on_progress)
-        self.worker.plane_done.connect(on_plane_done)
         self.worker.finished.connect(on_finished)
         self.worker.cancelled.connect(on_cancelled)
         self.worker.error.connect(on_error)
@@ -90,24 +109,14 @@ class BufferProcessingRunner:
             )
         return self.output_viewer
 
-    def refresh_output_view(self, t, z):
-        if self.output_viewer is None:
-            return
-        if self.output_viewer.t_idx == t and self.output_viewer.z_idx == z:
-            self.output_viewer.update_view()
-        else:
-            self.output_viewer.canvas.update()
-
     def cancel(self):
         if self.worker is not None:
             self.worker.cancel()
 
     def cleanup(self):
-        if self.source_data is not None and hasattr(self.source_data, "release"):
+        if self.source_data is not None:
             self.source_data.release()
-        if self.output_buffer is not None and hasattr(
-            self.output_buffer, "release"
-        ):
+        if self.output_buffer is not None:
             self.output_buffer.release()
 
         if self.worker is not None:

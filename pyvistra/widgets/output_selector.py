@@ -12,7 +12,23 @@ from qtpy.QtWidgets import (
 
 
 class ImageOutputSelector(QWidget):
-    """Reusable widget for selecting image output destination."""
+    """Reusable widget for selecting image output destination.
+
+    The single I/O routing point for processor dialogs and PSF/result
+    generators. ``send(data, metadata)`` dispatches to one of three paths
+    based on the user's combo selection:
+
+      - **Existing window**: calls ``window.set_data(data, metadata)``.
+      - **New window**: constructs an ``ImageWindow`` and shows it.
+      - **File**: looks up the saver for the chosen extension in the
+        registry (``pyvistra.io.register_output_format``) and writes it.
+
+    Supported formats are driven entirely by the registry — passing
+    ``formats=[".tif", ".ims"]`` to ``__init__`` selects which subset of
+    registered formats this dialog exposes. To add a new format
+    repo-wide, register it once at module load and every existing dialog
+    that allows it picks it up automatically.
+    """
 
     output_sent = Signal(object)  # Emits ImageWindow or filepath after send
 
@@ -25,13 +41,32 @@ class ImageOutputSelector(QWidget):
         Args:
             parent: Parent widget
             default_title: Default title for new windows
-            formats: List of supported formats for saving, e.g.
-                     [("TIFF", ".tif"), ("PSF Zarr", ".psf.zarr")]
-                     If None, defaults to [("TIFF", ".tif")]
+            formats: List of extensions for saving (e.g. ``[".tif", ".ims"]``).
+                Labels and savers are looked up from the registry in
+                ``pyvistra.io`` via :func:`get_output_format`. If ``None``,
+                defaults to ``[".tif"]``.
+
+                Legacy ``[(label, ext), ...]`` tuples are also accepted but
+                the labels are ignored — registry labels take precedence.
         """
+        from pyvistra.io import get_output_format
+
         super().__init__(parent)
         self._default_title = default_title
-        self._formats = formats or [("TIFF", ".tif")]
+
+        raw_formats = formats or [".tif"]
+        self._formats = []
+        for entry in raw_formats:
+            ext = entry[1] if isinstance(entry, tuple) else entry
+            fmt = get_output_format(ext)
+            if fmt is None:
+                raise ValueError(
+                    f"No saver registered for {ext!r}. "
+                    "Call pyvistra.io.register_output_format() first."
+                )
+            label, _ = fmt
+            self._formats.append((label, ext))
+
         self._manager = None
 
         layout = QVBoxLayout(self)
@@ -190,34 +225,26 @@ class ImageOutputSelector(QWidget):
     def _send_to_file(self, data, metadata):
         from qtpy.QtWidgets import QFileDialog
 
-        from pyvistra.io import save_psf, save_tiff
+        from pyvistra.io import get_output_format
 
         filepath = self._path_edit.text()
         ext = self._format_combo.currentData()
 
         if not filepath:
-            # Open file dialog
-            filter_str = f"*{ext}"
             filepath, _ = QFileDialog.getSaveFileName(
-                self, "Save Output", f"output{ext}", filter_str
+                self, "Save Output", f"output{ext}", f"*{ext}"
             )
             if not filepath:
                 return None
 
-        # Ensure correct extension
         if not filepath.endswith(ext):
             filepath += ext
 
-        # Save based on format
-        if ext == ".tif":
-            scale = metadata.get("scale", (1.0, 1.0, 1.0))
-            save_tiff(filepath, data, scale=scale, metadata=metadata)
-        elif ext == ".psf.zarr":
-            save_psf(filepath, data, metadata)
-        elif ext == ".ims":
-            from pyvistra.io import save_imaris
-
-            save_imaris(filepath, data, metadata)
+        fmt = get_output_format(ext)
+        if fmt is None:
+            raise ValueError(f"No saver registered for {ext!r}")
+        _, saver = fmt
+        saver(filepath, data, metadata)
 
         self.output_sent.emit(filepath)
         return filepath

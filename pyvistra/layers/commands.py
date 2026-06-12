@@ -41,6 +41,18 @@ class UndoStack:
         if len(self._undo) > self._max_size:
             self._undo.pop(0)
 
+    def push_executed(self, cmd: Command) -> None:
+        """Record an already-applied command on the undo stack.
+
+        Used by interactive operations (drag, resize) that mutate the
+        data live for visual feedback and only finalize as a single
+        command on mouse release.
+        """
+        self._undo.append(cmd)
+        self._redo.clear()
+        if len(self._undo) > self._max_size:
+            self._undo.pop(0)
+
     def undo(self, data: Any) -> bool:
         """Undo the last command. Returns True if an undo was performed."""
         if not self._undo:

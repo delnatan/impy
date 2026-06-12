@@ -17,6 +17,8 @@ from .colors import (
     compute_adjacency_graph,
     compute_smart_colors,
 )
+from .channel_state import ChannelDisplayList, ChannelDisplayState
+from .protocols import ObservableBuffer, Readable5D, Writable5D
 
 __all__ = [
     "File5DProxy",
@@ -32,4 +34,9 @@ __all__ = [
     "SMART_LABEL_PALETTE",
     "compute_adjacency_graph",
     "compute_smart_colors",
+    "ChannelDisplayList",
+    "ChannelDisplayState",
+    "ObservableBuffer",
+    "Readable5D",
+    "Writable5D",
 ]
