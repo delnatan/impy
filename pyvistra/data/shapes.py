@@ -135,6 +135,7 @@ class ShapeData:
         p = np.zeros(N_PARAMS, dtype=np.float32)
         if params is not None:
             p[: len(params)] = params
+        p = _normalize_shape_params(shape_type, p)
 
         verts_arr: np.ndarray | None = None
         if shape_type == POLYLINE:
@@ -192,7 +193,8 @@ class ShapeData:
     def update(self, shape_id: int, params: np.ndarray | tuple | list) -> None:
         """Update shape params in-place."""
         rec = self._shapes[shape_id]
-        rec.params[:len(params)] = params
+        p = _normalize_shape_params(rec.shape_type, params)
+        rec.params[:len(p)] = p
         self._emit(EVT_EDITED, shape_id)
 
     def get_time_slice(self, t: int, z: int | None = None) -> list[ShapeRecord]:
@@ -299,6 +301,27 @@ class ShapeData:
 # ---------------------------------------------------------------------------
 # Geometry helpers (pure functions, no vispy)
 # ---------------------------------------------------------------------------
+
+def snap_rectangle_params(params: np.ndarray | tuple | list) -> np.ndarray:
+    """Return rectangle params snapped to integer pixel coordinates."""
+    p = np.asarray(params, dtype=np.float32).copy()
+    n = min(4, p.size)
+    if n:
+        p[:n] = np.rint(p[:n])
+    return p
+
+
+def _normalize_shape_params(shape_type: str, params: np.ndarray | tuple | list) -> np.ndarray:
+    p = np.asarray(params, dtype=np.float32).copy()
+    if shape_type == RECTANGLE:
+        return snap_rectangle_params(p)
+    return p
+
+
+def _set_record_params(rec: ShapeRecord, params: np.ndarray | tuple | list) -> None:
+    p = _normalize_shape_params(rec.shape_type, params)
+    rec.params[:len(p)] = p
+
 
 def get_handles(rec: ShapeRecord) -> dict[str, tuple[float, float]]:
     """Return handle positions for a shape as {name: (x, y)}.
@@ -649,6 +672,8 @@ class MoveShape:
         rec.params[1] += d * self.dy
         rec.params[2] += d * self.dx
         rec.params[3] += d * self.dy
+        if rec.shape_type == RECTANGLE:
+            _set_record_params(rec, rec.params)
         if rec.vertices is not None:
             rec.vertices[:, 0] += d * self.dx
             rec.vertices[:, 1] += d * self.dy
@@ -680,7 +705,7 @@ class AdjustHandle:
     def undo(self, data: ShapeData) -> None:
         if self._old_params is not None:
             rec = data.get(self.shape_id)
-            rec.params[:] = self._old_params
+            _set_record_params(rec, self._old_params)
             data._emit(EVT_EDITED, self.shape_id)
 
 
@@ -698,11 +723,11 @@ class SetShapeParams:
         self._new_params = np.array(new_params, dtype=np.float32).copy()
 
     def execute(self, data: ShapeData) -> None:
-        data.get(self.shape_id).params[:] = self._new_params
+        _set_record_params(data.get(self.shape_id), self._new_params)
         data._emit(EVT_EDITED, self.shape_id)
 
     def undo(self, data: ShapeData) -> None:
-        data.get(self.shape_id).params[:] = self._old_params
+        _set_record_params(data.get(self.shape_id), self._old_params)
         data._emit(EVT_EDITED, self.shape_id)
 
 
@@ -722,6 +747,7 @@ def _apply_handle_adjustment(rec: ShapeRecord, handle: str, nx: float, ny: float
         elif handle == "br":
             r, b = nx, ny
         p[0], p[1], p[2], p[3] = l, t, r, b
+        p[:] = snap_rectangle_params(p)
     elif rec.shape_type == CIRCLE:
         if handle == "center":
             dx, dy = nx - p[0], ny - p[1]

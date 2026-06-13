@@ -40,6 +40,15 @@ def test_shape_data_add_and_get():
     np.testing.assert_allclose(rec.params[:4], [10, 20, 50, 60])
 
 
+def test_rectangle_params_snap_to_integer_pixels():
+    sd = ShapeData()
+    sid = sd.add(RECTANGLE, [10.2, 20.6, 50.7, 60.1])
+    np.testing.assert_allclose(sd.get(sid).params[:4], [10, 21, 51, 60])
+
+    sd.update(sid, [1.4, 2.5, 9.6, 10.2])
+    np.testing.assert_allclose(sd.get(sid).params[:4], [1, 2, 10, 10])
+
+
 def test_shape_data_remove():
     sd = ShapeData()
     sid = sd.add(CIRCLE, [100, 100, 120, 100])
@@ -257,6 +266,21 @@ def test_adjust_handle_command():
 
     stack.undo(sd)
     np.testing.assert_allclose(sd.get(0).params[2:4], [50, 50])
+
+
+def test_rectangle_commands_snap_to_integer_pixels():
+    sd = ShapeData()
+    sid = sd.add(RECTANGLE, [0, 0, 10, 10])
+
+    AdjustHandle(sid, "br", 20.6, 30.2).execute(sd)
+    np.testing.assert_allclose(sd.get(sid).params[:4], [0, 0, 21, 30])
+
+    SetShapeParams(
+        sid,
+        sd.get(sid).params.copy(),
+        np.array([2.2, 3.8, 12.6, 13.1, 0, 0, 0, 0], dtype=np.float32),
+    ).execute(sd)
+    np.testing.assert_allclose(sd.get(sid).params[:4], [2, 4, 13, 13])
 
 
 # ---------------------------------------------------------------------------

@@ -36,18 +36,22 @@ class DecondialogState:
     algorithm: str                          # "memsolve_mem" | "richardson_lucy"
 
     # Forward model — independent lateral (XY) and axial (Z) controls.
-    # Factors may be non-integer (fractional-area binning is positivity
-    # preserving for any ratio).
+    # deconlib's recipe registry currently derives detector domains from
+    # integer super-res factors, so the dialog exposes whole-number factors.
     super_res_xy: float = 1.0
     super_res_z: float = 1.0
     pad_xy: int = 0                         # symmetric per lateral axis
     pad_z: int = 0                          # symmetric on Z
 
     # ICF (MEM only)
-    icf_mode: str = "off"                   # "off" | "fixed" | "sweep"
+    icf_mode: str = "off"                   # "off" | "fixed" | "sweep" | "wavelet"
     icf_sigma_um: Optional[float] = None    # used when icf_mode == "fixed"
     icf_sweep_sigmas_um: Tuple[float, ...] = ()
     icf_refine: bool = True
+    wavelet_levels: int = 3
+    wavelet_kernel: str = "b3spline"        # "b3spline" | "triangle"
+    wavelet_prior_scale: float = 5.0
+    wavelet_allow_poisson: bool = False
 
     # Likelihood (MEM)
     likelihood: str = "poisson"             # "poisson" | "gaussian"
@@ -93,20 +97,18 @@ def build_recipe(state: DecondialogState, ndim: int):
 
     factor_tuple = _per_axis_factor(state, ndim)
     pad_tuple = _per_axis_pad(state, ndim)
+    _validate_integral_super_res(factor_tuple)
 
-    # super_res_idc supports factor=1, so it's also the right recipe for
-    # padding-only runs (detector padding without super-res). fft_conv has
-    # no notion of padding and would silently drop it.
     is_super_res = any(abs(f - 1.0) > 1e-6 for f in factor_tuple)
     has_pad = any(p > 0 for p in pad_tuple)
-    if is_super_res or has_pad:
+    if is_super_res:
         kind = "super_res_idc"
         srf: Tuple[int, ...] = tuple(int(round(f)) for f in factor_tuple)
         pad: Tuple[int, ...] = pad_tuple
     else:
         kind = "fft_conv"
         srf = ()
-        pad = ()
+        pad = pad_tuple if has_pad else ()
 
     icf = None
     if (state.algorithm == "memsolve_mem"
@@ -187,6 +189,19 @@ def build_posterior(state: DecondialogState):
     )
 
 
+def build_wavelet_config(state: DecondialogState):
+    """Return a `WaveletMemConfig` when wavelet MEM is requested, else None."""
+    if state.icf_mode != "wavelet":
+        return None
+    from deconlib import WaveletMemConfig
+    return WaveletMemConfig(
+        levels=max(1, int(state.wavelet_levels)),
+        kernel=str(state.wavelet_kernel),
+        prior_scale=max(float(state.wavelet_prior_scale), 1e-6),
+        allow_poisson=bool(state.wavelet_allow_poisson),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Geometry / PSF preparation
 
@@ -194,8 +209,8 @@ def build_posterior(state: DecondialogState):
 class PreparedInputs:
     """The numeric inputs `run_*` workflow drivers consume.
 
-    All shapes match deconlib's recipe-builder contracts (PSF padded to
-    hidden_shape, geometry consistent with the recipe).
+    Geometry matches deconlib's recipe-builder contracts. PSFs may be compact
+    corner-origin kernels; deconlib embeds them into the computed FFT canvas.
 
     ``output_slices`` is set when the dialog requested ``return_region
     == "valid"`` and the hidden-grid reconstruction needs cropping
@@ -229,9 +244,9 @@ def prepare_inputs(
     by the chosen lateral / axial super-res factor), DC-at-corner.
     `psf_pixel_size_um` matches `psf_array.ndim`.
 
-    When `require_psf_match` is True (default), the PSF's shape must
-    match the computed hidden-grid shape; otherwise a clear `ValueError`
-    is raised pointing to the "Compute PSF…" recourse.
+    When `require_psf_match` is True, the PSF's shape must match the computed
+    hidden-grid shape. The dialog disables that legacy guard so compact PSFs
+    can use deconlib's linear-convolution padding path.
     """
     from deconlib import BundleGeometry, Psf
 
@@ -250,23 +265,19 @@ def prepare_inputs(
         int(round((d + 2 * p) * f))
         for d, p, f in zip(data_shape, pad_tuple, factor_tuple)
     )
-    if recipe.kind == "fft_conv":
-        # fft_conv requires hidden == visible == data; padding/factors do
-        # not apply.
-        hidden_shape = data_shape
-        visible_shape = data_shape
-    else:
-        visible_shape = hidden_shape
+    visible_shape = hidden_shape
 
-    target_psf_shape = hidden_shape
     log.info(
         "prepare_inputs: algorithm=%s y=%s psf=%s "
         "factor_xyz=%s pad_xyz=%s recipe.kind=%s "
-        "→ hidden=%s visible=%s data=%s target_psf=%s",
+        "→ hidden=%s visible=%s data=%s",
         state.algorithm, tuple(y_obs.shape), tuple(psf_array.shape),
         factor_tuple, pad_tuple, recipe.kind,
-        hidden_shape, visible_shape, data_shape, target_psf_shape,
+        hidden_shape, visible_shape, data_shape,
     )
+    if require_psf_match and any(p > 0 for p in pad_tuple):
+        require_psf_match = False
+    target_psf_shape = hidden_shape
     if require_psf_match and tuple(psf_array.shape) != target_psf_shape:
         log.error(
             "PSF/hidden-shape mismatch — supplied %s, need %s",
@@ -278,7 +289,7 @@ def prepare_inputs(
             "the current super-res factors and detector padding (use the "
             "“Compute PSF…” button)."
         )
-    psf_padded = _fit_psf_corner(psf_array, target_psf_shape).astype(np.float32)
+    psf_padded = np.asarray(psf_array, dtype=np.float32)
 
     # The PSF is supplied at hidden-grid sampling (this is what the
     # "Compute PSF…" preset produces, dividing the data spacing by the
@@ -372,7 +383,7 @@ def expected_hidden_shape(state: DecondialogState, data_shape: Tuple[int, ...]
     )
 
 
-def output_5d_shape(state: DecondialogState, data_shape: Tuple[int, ...]
+def output_5d_shape(state: DecondialogState, data_shape: Tuple[int, ...], n_channels: int = 1
                     ) -> Tuple[int, int, int, int, int]:
     """Return the (T, Z, C, Y, X) shape of the deconvolved output.
 
@@ -397,9 +408,10 @@ def output_5d_shape(state: DecondialogState, data_shape: Tuple[int, ...]
     else:
         out = expected_hidden_shape(state, data_shape)
 
+    C = max(1, int(n_channels))
     if ndim == 2:
-        return (1, 1, 1, out[0], out[1])
-    return (1, out[0], 1, out[1], out[2])
+        return (1, 1, C, out[0], out[1])
+    return (1, out[0], C, out[1], out[2])
 
 
 # --------------------------------------------------------------------------- #
@@ -421,6 +433,16 @@ def _per_axis_pad(state: DecondialogState, ndim: int) -> Tuple[int, ...]:
     if ndim == 3:
         return (pz, pxy, pxy)
     return (pxy, pxy)
+
+
+def _validate_integral_super_res(factors: Tuple[float, ...]) -> None:
+    if any(abs(float(f) - round(float(f))) > 1e-6 for f in factors):
+        pretty = " × ".join(f"{float(f):g}" for f in factors)
+        raise ValueError(
+            "Super-res factors must be whole numbers with the current "
+            f"deconlib recipe builder (got {pretty}). Choose 1, 2, 3, ... "
+            "or disable super-res."
+        )
 
 
 def _fit_psf_corner(psf: np.ndarray, target_shape: Tuple[int, ...]) -> np.ndarray:

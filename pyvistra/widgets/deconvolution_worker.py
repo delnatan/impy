@@ -44,6 +44,8 @@ class MemDeconvolutionWorker(QObject):
         icf_sweep,
         posterior,
         buffer,                     # ImageBuffer for live preview
+        wavelet_config=None,
+        output_channel: int = 0,
         likelihood: str = "poisson",
         preview_every_outer: int = 1,
     ):
@@ -51,8 +53,10 @@ class MemDeconvolutionWorker(QObject):
         self._p = prepared
         self._map_config = map_config
         self._icf_sweep = icf_sweep
+        self._wavelet_config = wavelet_config
         self._posterior = posterior
         self._buffer = buffer
+        self._output_channel = max(0, int(output_channel))
         self._likelihood = likelihood
         self._preview_every_outer = max(1, int(preview_every_outer))
         self._cancel = False
@@ -66,6 +70,7 @@ class MemDeconvolutionWorker(QObject):
                 WorkflowCancelled,
                 WorkflowProgress,
                 run_deconvolution_workflow,
+                run_wavelet_mem_workflow,
             )
 
             log.info(
@@ -95,26 +100,51 @@ class MemDeconvolutionWorker(QObject):
 
             self.status.emit("Running MEM workflow…")
             self.progress.emit(0, 1)
-            result = run_deconvolution_workflow(
-                self._p.y,
-                self._p.prior,
-                base_recipe=self._p.recipe,
-                psf=self._p.psf,
-                optics=self._p.optics,
-                geometry=self._p.geometry,
-                sigma=self._p.sigma,
-                likelihood=self._likelihood,
-                icf_sweep=self._icf_sweep,
-                map_config=self._map_config,
-                posterior=self._posterior,
-                progress=progress_cb,
-                preview_every_outer=self._preview_every_outer,
-            )
+            if self._wavelet_config is None:
+                result = run_deconvolution_workflow(
+                    self._p.y,
+                    self._p.prior,
+                    base_recipe=self._p.recipe,
+                    psf=self._p.psf,
+                    optics=self._p.optics,
+                    geometry=self._p.geometry,
+                    sigma=self._p.sigma,
+                    likelihood=self._likelihood,
+                    icf_sweep=self._icf_sweep,
+                    map_config=self._map_config,
+                    posterior=self._posterior,
+                    progress=progress_cb,
+                    preview_every_outer=self._preview_every_outer,
+                )
+            else:
+                result = run_wavelet_mem_workflow(
+                    self._p.y,
+                    prior=None,
+                    default_image=self._p.prior,
+                    base_recipe=self._p.recipe,
+                    psf=self._p.psf,
+                    optics=self._p.optics,
+                    geometry=self._p.geometry,
+                    wavelet=self._wavelet_config,
+                    sigma=self._p.sigma,
+                    likelihood=self._likelihood,
+                    map_config=self._map_config,
+                    posterior=self._posterior,
+                    progress=progress_cb,
+                    preview_every_outer=self._preview_every_outer,
+                    preview_space="visible",
+                )
             self._write_final(result)
-            log.info(
-                "MEM done: chosen_recipe.icf=%s scan_rows=%d refined=%s",
-                result.chosen_recipe.icf, len(result.scan), result.refined,
-            )
+            if self._wavelet_config is None:
+                log.info(
+                    "MEM done: chosen_recipe.icf=%s scan_rows=%d refined=%s",
+                    result.chosen_recipe.icf, len(result.scan), result.refined,
+                )
+            else:
+                log.info(
+                    "wavelet MEM done: recipe.icf=%s visible=%s",
+                    result.wavelet_recipe.icf, tuple(result.visible.shape),
+                )
         except WorkflowCancelled:
             log.info("MEM worker cancelled via workflow progress callback")
             self.cancelled.emit()
@@ -166,7 +196,7 @@ class MemDeconvolutionWorker(QObject):
                      tuple(s.stop - s.start for s in self._p.output_slices),
                      self._p.output_slices)
             arr = arr[self._p.output_slices]
-        _write_to_buffer(self._buffer, arr)
+        _write_to_buffer(self._buffer, arr, channel=self._output_channel)
 
     def _coerce_preview_array(
         self,
@@ -197,7 +227,9 @@ class MemDeconvolutionWorker(QObject):
         arr = self._coerce_preview_array(arr, preview_space=preview_space)
         if self._p.output_slices is not None:
             arr = arr[self._p.output_slices]
-        _write_to_buffer(self._buffer, arr, log_stats=False)
+        _write_to_buffer(
+            self._buffer, arr, channel=self._output_channel, log_stats=False
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -216,11 +248,19 @@ class RLDeconvolutionWorker(QObject):
     cancelled = Signal()
     error    = Signal(str)
 
-    def __init__(self, *, prepared: PreparedInputs, rl_config, buffer):
+    def __init__(
+        self,
+        *,
+        prepared: PreparedInputs,
+        rl_config,
+        buffer,
+        output_channel: int = 0,
+    ):
         super().__init__()
         self._p = prepared
         self._rl_config = rl_config
         self._buffer = buffer
+        self._output_channel = max(0, int(output_channel))
         self._cancel = False
 
     def cancel(self) -> None:
@@ -258,7 +298,12 @@ class RLDeconvolutionWorker(QObject):
                 restored = np.asarray(estimate, dtype=np.float32)
                 if self._p.output_slices is not None:
                     restored = restored[self._p.output_slices]
-                _write_to_buffer(self._buffer, restored, log_stats=False)
+                _write_to_buffer(
+                    self._buffer,
+                    restored,
+                    channel=self._output_channel,
+                    log_stats=False,
+                )
                 done = int(iteration) + 1
                 self.progress.emit(done, self._rl_config.num_iter)
                 self.status.emit(
@@ -299,7 +344,9 @@ class RLDeconvolutionWorker(QObject):
                 recipe=self._p.recipe,
             )
 
-            _write_to_buffer(self._buffer, restored_np)
+            _write_to_buffer(
+                self._buffer, restored_np, channel=self._output_channel
+            )
             self.progress.emit(result.iterations, self._rl_config.num_iter)
             self.status.emit(
                 f"Done after {result.iterations} iterations"
@@ -323,7 +370,15 @@ class RLDeconvolutionWorker(QObject):
 # --------------------------------------------------------------------------- #
 # Helpers
 
-def _write_to_buffer(buffer, arr: np.ndarray, *, log_stats: bool = True) -> None:
+def _write_to_buffer(
+    buffer, arr: np.ndarray, *, channel: int = 0, log_stats: bool = True
+) -> None:
+    channel = max(0, int(channel))
+    if channel >= buffer.shape[2]:
+        raise ValueError(
+            f"output channel {channel} is outside buffer channel count {buffer.shape[2]}"
+        )
+
     nan_count = int(np.isnan(arr).sum())
     inf_count = int(np.isinf(arr).sum())
     if nan_count or inf_count:
@@ -344,12 +399,12 @@ def _write_to_buffer(buffer, arr: np.ndarray, *, log_stats: bool = True) -> None
         if arr.shape != target:
             log.error("buffer/result shape mismatch: result=%s buffer=%s",
                       arr.shape, buffer.shape)
-        buffer[0, 0, 0, :, :] = arr
+        buffer[0, 0, channel, :, :] = arr
     elif arr.ndim == 3:
         target = (buffer.shape[1], buffer.shape[3], buffer.shape[4])
         if arr.shape != target:
             log.error("buffer/result shape mismatch: result=%s buffer=%s",
                       arr.shape, buffer.shape)
-        buffer[0, :, 0, :, :] = arr
+        buffer[0, :, channel, :, :] = arr
     else:
         raise ValueError(f"unexpected hidden-space ndim {arr.ndim}")

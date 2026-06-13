@@ -40,6 +40,7 @@ from ..visuals.labels import LabelOverlayVisual
 from ..data.labels import SparseLabels
 from ..data.shapes import (
     ShapeData,
+    ALL_FRAMES,
     RECTANGLE,
     CIRCLE,
     LINE,
@@ -59,6 +60,7 @@ from ..data.shapes import (
     crop_rect,
     polyline_is_closed,
     rect_opposite_corner,
+    snap_rectangle_params,
     square_from_corner,
 )
 from ..layers.base import Layer, LayerList
@@ -312,6 +314,7 @@ class ImageWindow(QMainWindow):
         self.canvas.events.mouse_release.connect(self._on_view_transform_event)
         self.canvas.events.mouse_wheel.connect(self._on_view_transform_event)
         self.canvas.events.resize.connect(self._on_view_transform_event)
+        manager.tool_changed.connect(self._on_active_tool_changed)
 
         # 14. Hover tooltip (on-canvas Text visual for point info)
         self._hover_label = scene.visuals.Text(
@@ -1439,7 +1442,7 @@ class ImageWindow(QMainWindow):
                 if sid not in data:
                     continue
                 rec = data.get(sid)
-                if rec.t != self.t_idx or rec.z != self.z_idx:
+                if not self._shape_visible_in_current_slice(rec):
                     continue
                 handle = data.hit_test_handle((x, y), sid)
                 if handle is not None:
@@ -1448,6 +1451,13 @@ class ImageWindow(QMainWindow):
             if sid is not None:
                 return layer, sid, None
         return None
+
+    def _shape_visible_in_current_slice(self, rec) -> bool:
+        """Return whether a shape should be interactive in this T/Z view."""
+        return (
+            (rec.t == self.t_idx or rec.t == ALL_FRAMES)
+            and (rec.z == self.z_idx or rec.z == ALL_FRAMES)
+        )
 
     def _select_shape(self, layer, shape_id):
         """Make shape_id the sole selection on its layer, deselect elsewhere."""
@@ -1518,6 +1528,83 @@ class ImageWindow(QMainWindow):
             layer.visual.update(
                 layer.data, layer.selected_ids, self.t_idx, self.z_idx
             )
+
+    def _finalize_shape_drawing(self) -> None:
+        """Clear active draw state and select the newly-created shape."""
+        if self._drawing_shape_layer is None:
+            return
+        layer = self._drawing_shape_layer
+        shape_id = self._drawing_shape_id
+        self._drawing_shape_layer = None
+        self._drawing_shape_id = None
+        self.start_pos = None
+        if shape_id is not None and shape_id in layer.data:
+            self._select_shape(layer, shape_id)
+
+    def _finalize_shape_edit(self) -> None:
+        """Record the live shape edit as a single undoable command."""
+        if self._editing_shape_id is None or self._editing_shape_layer is None:
+            return
+        layer = self._editing_shape_layer
+        shape_id = self._editing_shape_id
+        rec = layer.data.get(shape_id)
+        old_params = self._editing_shape_start_params
+        new_params = rec.params.copy()
+        params_changed = (
+            old_params is not None and not np.array_equal(old_params, new_params)
+        )
+        old_verts = self._editing_shape_start_vertices
+        new_verts = rec.vertices.copy() if rec.vertices is not None else None
+        verts_changed = (
+            old_verts is not None and new_verts is not None
+            and not np.array_equal(old_verts, new_verts)
+        )
+        if params_changed:
+            layer.undo_stack.push_executed(
+                SetShapeParams(shape_id, old_params, new_params)
+            )
+        if verts_changed:
+            layer.undo_stack.push_executed(
+                SetShapeVertices(shape_id, old_verts, new_verts)
+            )
+        self._editing_shape_layer = None
+        self._editing_shape_id = None
+        self._editing_shape_handle = None
+        self._editing_shape_start_params = None
+        self._editing_shape_start_vertices = None
+        self._editing_shape_start_pos = None
+
+    def _finalize_polyline_drawing(self) -> None:
+        """Finish a polyline preview when leaving the polyline tool."""
+        if self._polyline_drawing_id is None or self._polyline_drawing_layer is None:
+            return
+        layer = self._polyline_drawing_layer
+        sid = self._polyline_drawing_id
+        try:
+            rec = layer.data.get(sid)
+        except KeyError:
+            self._polyline_drawing_layer = None
+            self._polyline_drawing_id = None
+            return
+        if rec.vertices is not None:
+            if len(rec.vertices) >= 3:
+                rec.vertices = rec.vertices[:-1].astype(np.float32, copy=False)
+                layer.data._emit(EVT_EDITED, sid)
+                self._select_shape(layer, sid)
+            elif layer.undo_stack.can_undo:
+                layer.undo_stack.undo(layer.data)
+            elif sid in layer.data:
+                layer.data.remove(sid)
+        self._polyline_drawing_layer = None
+        self._polyline_drawing_id = None
+
+    def _on_active_tool_changed(self, tool_name: str) -> None:
+        """Keep transient shape state consistent when shortcuts/toolbars switch tools."""
+        self._finalize_shape_drawing()
+        self._finalize_shape_edit()
+        if tool_name != "polyline":
+            self._finalize_polyline_drawing()
+        self.update_cursor()
 
     def delete_selected_shape(self):
         """Remove the currently-selected shape (undoable). No-op if none."""
@@ -3459,6 +3546,8 @@ class ImageWindow(QMainWindow):
                 rec.params[1] = start_params[1] + dy
                 rec.params[2] = start_params[2] + dx
                 rec.params[3] = start_params[3] + dy
+                if rec.shape_type == RECTANGLE:
+                    rec.params[:] = snap_rectangle_params(rec.params)
                 if start_verts is not None:
                     rec.vertices = (start_verts + np.array([dx, dy], dtype=np.float32))
             else:
@@ -3511,15 +3600,8 @@ class ImageWindow(QMainWindow):
 
         # Shape layer drawing finalization
         if self._drawing_shape_layer is not None:
-            layer = self._drawing_shape_layer
-            shape_id = self._drawing_shape_id
-            self._drawing_shape_layer = None
-            self._drawing_shape_id = None
-            self.start_pos = None
-            self.view.camera.interactive = False  # Keep disabled for draw tools
-            # Auto-select the new shape so its handles render.
-            if shape_id is not None:
-                self._select_shape(layer, shape_id)
+            self._finalize_shape_drawing()
+            self.view.camera.interactive = manager.active_tool == "pointer"
 
         # Point drag finalization — push a single MovePoint command.
         if (
@@ -3564,32 +3646,7 @@ class ImageWindow(QMainWindow):
         # Shape layer edit finalization — push a single undoable command
         # for the whole drag (live mutation already applied).
         if self._editing_shape_id is not None:
-            layer = self._editing_shape_layer
-            shape_id = self._editing_shape_id
-            rec = layer.data.get(shape_id)
-            old_params = self._editing_shape_start_params
-            new_params = rec.params.copy()
-            params_changed = not np.array_equal(old_params, new_params)
-            old_verts = self._editing_shape_start_vertices
-            new_verts = rec.vertices.copy() if rec.vertices is not None else None
-            verts_changed = (
-                old_verts is not None and new_verts is not None
-                and not np.array_equal(old_verts, new_verts)
-            )
-            if params_changed:
-                layer.undo_stack.push_executed(
-                    SetShapeParams(shape_id, old_params, new_params)
-                )
-            if verts_changed:
-                layer.undo_stack.push_executed(
-                    SetShapeVertices(shape_id, old_verts, new_verts)
-                )
-            self._editing_shape_layer = None
-            self._editing_shape_id = None
-            self._editing_shape_handle = None
-            self._editing_shape_start_params = None
-            self._editing_shape_start_vertices = None
-            self._editing_shape_start_pos = None
+            self._finalize_shape_edit()
             if manager.active_tool == "pointer":
                 self.view.camera.interactive = True
 

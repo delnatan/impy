@@ -1,5 +1,6 @@
 from typing import Tuple
 
+import numpy as np
 from qtpy.QtCore import QThread
 
 from pyvistra.data import Readable5D, Writable5D
@@ -49,7 +50,12 @@ class BufferProcessingRunner:
         return self.thread is not None
 
     def prepare_output(
-        self, output_shape, output_dtype, output_meta
+        self,
+        output_shape,
+        output_dtype,
+        output_meta,
+        *,
+        reuse_existing_buffer: bool = False,
     ) -> Tuple[Readable5D, Writable5D]:
         from pyvistra.io import ImageBuffer
 
@@ -58,12 +64,32 @@ class BufferProcessingRunner:
         self.source_data = self.viewer.img_data.acquire()
         self.output_meta = output_meta
         self.output_type = self.output_selector.get_selection_type()
+        self.output_viewer = None
+
+        if reuse_existing_buffer and self.output_type == "existing":
+            window = self.output_selector.selected_existing_window()
+            data = None if window is None else getattr(window, "img_data", None)
+            if (
+                window is not self.viewer
+                and data is not None
+                and hasattr(data, "acquire")
+                and hasattr(data, "__setitem__")
+                and tuple(getattr(data, "shape", ())) == tuple(output_shape)
+                and np.dtype(getattr(data, "dtype", object))
+                == np.dtype(output_dtype)
+            ):
+                self.output_buffer = data.acquire()
+                self.output_viewer = window
+                if hasattr(data, "metadata"):
+                    data.metadata.update(output_meta)
+                window.meta.update(output_meta)
+                return self.source_data, self.output_buffer
+
         self.output_buffer = ImageBuffer(
             shape=output_shape,
             dtype=output_dtype,
             metadata=output_meta,
         )
-        self.output_viewer = None
 
         # Stream live only for window outputs.
         if self.output_type in ("new", "existing"):

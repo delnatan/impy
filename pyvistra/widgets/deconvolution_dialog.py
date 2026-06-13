@@ -24,6 +24,7 @@ from qtpy.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -33,6 +34,7 @@ from qtpy.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QTabWidget,
@@ -51,6 +53,7 @@ from .decon_recipe import (
     build_mem_config,
     build_posterior,
     build_rl_config,
+    build_wavelet_config,
     log,
     output_5d_shape,
     prepare_inputs,
@@ -69,7 +72,8 @@ class DeconvolutionDialog(QDialog):
         self.viewer = viewer
         self.setWindowTitle("Deconvolution")
         self.setWindowFlags(Qt.Tool)
-        self.resize(480, 620)
+        self.resize(560, 600)
+        self.setMinimumSize(520, 460)
 
         self._runner = None
         self._rect_shapes: list = []
@@ -133,6 +137,7 @@ class DeconvolutionDialog(QDialog):
         self._on_algorithm_changed()
         self._on_icf_mode_changed()
         self._refresh_compute_target_hint()
+        self._refresh_recipe_preview()
 
     # ------------------------------------------------------------------ #
     # Tab builders
@@ -145,7 +150,7 @@ class DeconvolutionDialog(QDialog):
 
         T, _Z, C, _Y, _X = self.viewer.img_data.shape
 
-        cf_grp = QGroupBox("Source")
+        cf_grp = QGroupBox("Detector / data")
         cf_form = QFormLayout(cf_grp)
         cf_form.setLabelAlignment(Qt.AlignRight)
         cf_form.setVerticalSpacing(4)
@@ -157,16 +162,34 @@ class DeconvolutionDialog(QDialog):
         ch_t_layout.setSpacing(6)
         self.channel_spin = QSpinBox()
         self.channel_spin.setRange(0, max(0, C - 1))
+        self.channel_spin.setValue(
+            min(max(0, getattr(self.viewer, "c_idx", 0)), max(0, C - 1))
+        )
         self.channel_spin.setFixedWidth(52)
+        self.channel_spin.valueChanged.connect(
+            lambda _v: self._refresh_recipe_preview()
+        )
         ch_t_layout.addWidget(self.channel_spin)
         ch_t_layout.addWidget(QLabel("Frame T:"))
         self.frame_spin = QSpinBox()
         self.frame_spin.setRange(0, max(0, T - 1))
         self.frame_spin.setValue(getattr(self.viewer, "t_idx", 0))
         self.frame_spin.setFixedWidth(52)
+        self.frame_spin.valueChanged.connect(
+            lambda _v: self._refresh_recipe_preview()
+        )
         ch_t_layout.addWidget(self.frame_spin)
         ch_t_layout.addStretch()
         cf_form.addRow("Channel:", ch_t)
+
+        self.stack_channels_check = QCheckBox("Stack into source channel index")
+        self.stack_channels_check.setToolTip(
+            "Create/reuse a multi-channel output buffer and write the selected "
+            "source channel into the same channel index. Re-run for other "
+            "channels into the same output window to fill the stack."
+        )
+        self.stack_channels_check.setChecked(C > 1)
+        cf_form.addRow("", self.stack_channels_check)
 
         # Region picker
         region_w = QWidget()
@@ -176,9 +199,9 @@ class DeconvolutionDialog(QDialog):
 
         radio_row = QHBoxLayout()
         radio_row.setSpacing(8)
-        self.full_radio = QRadioButton("Full")
+        self.full_radio = QRadioButton("Full field")
         self.full_radio.setChecked(True)
-        self.shape_radio = QRadioButton("Shape:")
+        self.shape_radio = QRadioButton("ROI:")
         radio_row.addWidget(self.full_radio)
         radio_row.addWidget(self.shape_radio)
         self.shape_combo = QComboBox()
@@ -222,12 +245,21 @@ class DeconvolutionDialog(QDialog):
         self._z_group.addButton(self.all_z_radio)
         self._z_group.addButton(self.around_z_radio)
         self.around_z_radio.toggled.connect(self.z_half_spin.setEnabled)
+        self.around_z_radio.toggled.connect(
+            lambda *_: self._refresh_workflow_summary()
+        )
+        self.all_z_radio.toggled.connect(
+            lambda *_: self._refresh_workflow_summary()
+        )
+        self.z_half_spin.valueChanged.connect(
+            lambda *_: self._refresh_workflow_summary()
+        )
 
         cf_form.addRow("Region:", region_w)
         vbox.addWidget(cf_grp)
 
         # PSF
-        psf_grp = QGroupBox("PSF")
+        psf_grp = QGroupBox("PSF source")
         psf_form = QFormLayout(psf_grp)
         psf_form.setLabelAlignment(Qt.AlignRight)
         psf_form.setVerticalSpacing(4)
@@ -245,11 +277,15 @@ class DeconvolutionDialog(QDialog):
         self.psf_channel_spin.setRange(0, 0)
         self.psf_channel_spin.setFixedWidth(48)
         psf_win_layout.addWidget(self.psf_channel_spin)
-        psf_form.addRow("Window:", psf_win_row)
+        psf_form.addRow("Use:", psf_win_row)
 
         self.scale_label = QLabel("—")
         self.scale_label.setStyleSheet("font-size: 10px;")
-        psf_form.addRow("Scale:", self.scale_label)
+        self.scale_label.setToolTip(
+            "Compares PSF sampling with the current data sampling and "
+            "super-resolution factors."
+        )
+        psf_form.addRow("Sampling:", self.scale_label)
 
         compute_row = QWidget()
         compute_layout = QHBoxLayout(compute_row)
@@ -277,7 +313,19 @@ class DeconvolutionDialog(QDialog):
 
     def _build_solver_tab(self) -> QWidget:
         tab = QWidget()
-        vbox = QVBoxLayout(tab)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        vbox = QVBoxLayout(content)
         vbox.setContentsMargins(8, 8, 8, 8)
         vbox.setSpacing(6)
 
@@ -300,8 +348,8 @@ class DeconvolutionDialog(QDialog):
         self.mem_radio.toggled.connect(self._on_algorithm_changed)
         vbox.addWidget(algo_grp)
 
-        # Forward model
-        fm_grp = QGroupBox("Forward model")
+        # Recipe
+        fm_grp = QGroupBox("Recipe")
         fm_form = QFormLayout(fm_grp)
         fm_form.setLabelAlignment(Qt.AlignRight)
         fm_form.setVerticalSpacing(4)
@@ -312,23 +360,28 @@ class DeconvolutionDialog(QDialog):
         sr_layout.setContentsMargins(0, 0, 0, 0)
         sr_layout.setSpacing(6)
         sr_layout.addWidget(QLabel("XY ×:"))
-        self.sr_xy_spin = QDoubleSpinBox()
-        self.sr_xy_spin.setRange(1.0, 8.0)
-        self.sr_xy_spin.setDecimals(2)
-        self.sr_xy_spin.setSingleStep(0.25)
-        self.sr_xy_spin.setValue(1.0)
+        self.sr_xy_spin = QSpinBox()
+        self.sr_xy_spin.setRange(1, 8)
+        self.sr_xy_spin.setSingleStep(1)
+        self.sr_xy_spin.setValue(1)
         self.sr_xy_spin.setFixedWidth(72)
         self.sr_xy_spin.valueChanged.connect(self._on_sr_changed)
+        self.sr_xy_spin.setToolTip(
+            "Fine-grid reconstruction factor in X/Y. 1 keeps native "
+            "camera sampling; whole-number values above 1 use detector-area integration."
+        )
         sr_layout.addWidget(self.sr_xy_spin)
         sr_layout.addSpacing(10)
         sr_layout.addWidget(QLabel("Z ×:"))
-        self.sr_z_spin = QDoubleSpinBox()
-        self.sr_z_spin.setRange(1.0, 8.0)
-        self.sr_z_spin.setDecimals(2)
-        self.sr_z_spin.setSingleStep(0.25)
-        self.sr_z_spin.setValue(1.0)
+        self.sr_z_spin = QSpinBox()
+        self.sr_z_spin.setRange(1, 8)
+        self.sr_z_spin.setSingleStep(1)
+        self.sr_z_spin.setValue(1)
         self.sr_z_spin.setFixedWidth(72)
         self.sr_z_spin.valueChanged.connect(self._on_sr_changed)
+        self.sr_z_spin.setToolTip(
+            "Axial fine-grid factor for 3D data. Disabled for single-plane data."
+        )
         if not is_3d:
             # ndim=2 recipe path drops sr_z entirely; disable so the user
             # doesn't set a value that silently has no effect.
@@ -337,11 +390,17 @@ class DeconvolutionDialog(QDialog):
                 "Image has a single Z plane — axial super-res has no effect."
             )
         sr_layout.addWidget(self.sr_z_spin)
-        sr_note = QLabel("(1 = none; fractional-area binning supports non-integer)")
-        sr_note.setStyleSheet("color: #888; font-size: 10px;")
-        sr_layout.addWidget(sr_note)
         sr_layout.addStretch()
         fm_form.addRow("Super-res:", sr_row)
+
+        self.margin_check = QCheckBox("Model signal just outside detector")
+        self.margin_check.setToolTip(
+            "Adds an unknown border around the measured detector field so "
+            "edge photons can be explained without wrap-around artifacts."
+        )
+        self.margin_check.setChecked(True)
+        self.margin_check.toggled.connect(self._on_margin_toggled)
+        fm_form.addRow("Finite detector:", self.margin_check)
 
         pad_row = QWidget()
         pad_layout = QHBoxLayout(pad_row)
@@ -354,9 +413,8 @@ class DeconvolutionDialog(QDialog):
         self.pad_xy_spin.setRange(0, 256)
         self.pad_xy_spin.setValue(16)
         self.pad_xy_spin.setFixedWidth(56)
-        self.pad_xy_spin.valueChanged.connect(
-            lambda _v: self._refresh_compute_target_hint()
-        )
+        self.pad_xy_spin.setToolTip("Symmetric lateral margin in camera pixels.")
+        self.pad_xy_spin.valueChanged.connect(self._on_margin_value_changed)
         pad_layout.addWidget(self.pad_xy_spin)
         pad_layout.addSpacing(10)
         pad_layout.addWidget(QLabel("Z:"))
@@ -364,9 +422,8 @@ class DeconvolutionDialog(QDialog):
         self.pad_z_spin.setRange(0, 256)
         self.pad_z_spin.setValue(4 if is_3d else 0)
         self.pad_z_spin.setFixedWidth(56)
-        self.pad_z_spin.valueChanged.connect(
-            lambda _v: self._refresh_compute_target_hint()
-        )
+        self.pad_z_spin.setToolTip("Symmetric axial margin in camera pixels.")
+        self.pad_z_spin.valueChanged.connect(self._on_margin_value_changed)
         if not is_3d:
             # ndim=2 recipe path drops pad_z; lock to 0 to match the recipe.
             self.pad_z_spin.setEnabled(False)
@@ -374,11 +431,15 @@ class DeconvolutionDialog(QDialog):
                 "Image has a single Z plane — Z padding has no effect."
             )
         pad_layout.addWidget(self.pad_z_spin)
-        pad_note = QLabel("(symmetric, in data-grid px; ~½ PSF models out-of-FOV signal)")
-        pad_note.setStyleSheet("color: #888; font-size: 10px;")
-        pad_layout.addWidget(pad_note)
+        self.margin_auto_btn = QPushButton("Auto")
+        self.margin_auto_btn.setToolTip(
+            "Use half of the selected PSF kernel size as the finite-detector margin."
+        )
+        self.margin_auto_btn.clicked.connect(self._auto_margin_from_psf)
+        pad_layout.addWidget(self.margin_auto_btn)
         pad_layout.addStretch()
-        fm_form.addRow("Detector pad:", pad_row)
+        self._margin_row_widget = pad_row
+        fm_form.addRow("Margin:", pad_row)
 
         # Return region: applies to both MEM and RL. "valid" crops out
         # the detector-pad border from the hidden grid; useful when you
@@ -387,27 +448,30 @@ class DeconvolutionDialog(QDialog):
         region_layout = QHBoxLayout(region_row)
         region_layout.setContentsMargins(0, 0, 0, 0)
         region_layout.setSpacing(8)
-        self.region_full_radio = QRadioButton("Full")
+        self.region_full_radio = QRadioButton("Full canvas")
         self.region_full_radio.setChecked(True)
-        self.region_valid_radio = QRadioButton("Valid (crop pad)")
+        self.region_valid_radio = QRadioButton("Detector field")
         region_layout.addWidget(self.region_full_radio)
         region_layout.addWidget(self.region_valid_radio)
-        region_note = QLabel("(crops detector-pad border from output)")
-        region_note.setStyleSheet("color: #888; font-size: 10px;")
-        region_layout.addWidget(region_note)
         region_layout.addStretch()
         self._region_group_btn = QButtonGroup(self)
         self._region_group_btn.addButton(self.region_full_radio)
         self._region_group_btn.addButton(self.region_valid_radio)
         self._region_group_btn.buttonToggled.connect(
-            lambda *_: self._refresh_compute_target_hint()
+            lambda *_: self._refresh_workflow_summary()
         )
-        fm_form.addRow("Return region:", region_row)
+        self.region_full_radio.setToolTip(
+            "Keep the full reconstructed domain, including any finite-detector margin."
+        )
+        self.region_valid_radio.setToolTip(
+            "Crop the result to the measured detector field after convergence."
+        )
+        fm_form.addRow("Output:", region_row)
 
         vbox.addWidget(fm_grp)
 
-        # ICF group (MEM only)
-        icf_grp = QGroupBox("ICF (MEM only)")
+        # ICF / wavelet group (MEM only)
+        icf_grp = QGroupBox("ICF / wavelet (MEM only)")
         icf_v = QVBoxLayout(icf_grp)
         icf_v.setContentsMargins(8, 6, 8, 6)
         icf_v.setSpacing(4)
@@ -416,11 +480,13 @@ class DeconvolutionDialog(QDialog):
         icf_mode_row.setSpacing(8)
         self.icf_off_radio = QRadioButton("Off")
         self.icf_off_radio.setChecked(True)
-        self.icf_fixed_radio = QRadioButton("Fixed σ")
+        self.icf_fixed_radio = QRadioButton("Gaussian")
         self.icf_sweep_radio = QRadioButton("Sweep")
+        self.wavelet_radio = QRadioButton("Wavelet")
         icf_mode_row.addWidget(self.icf_off_radio)
         icf_mode_row.addWidget(self.icf_fixed_radio)
         icf_mode_row.addWidget(self.icf_sweep_radio)
+        icf_mode_row.addWidget(self.wavelet_radio)
         icf_mode_row.addStretch()
         icf_v.addLayout(icf_mode_row)
 
@@ -428,6 +494,7 @@ class DeconvolutionDialog(QDialog):
         self._icf_group.addButton(self.icf_off_radio)
         self._icf_group.addButton(self.icf_fixed_radio)
         self._icf_group.addButton(self.icf_sweep_radio)
+        self._icf_group.addButton(self.wavelet_radio)
         self._icf_group.buttonToggled.connect(self._on_icf_mode_changed)
 
         self._icf_stack = QStackedWidget()
@@ -462,6 +529,45 @@ class DeconvolutionDialog(QDialog):
         self.icf_refine_check.setChecked(True)
         sweep_layout.addWidget(self.icf_refine_check)
         self._icf_stack.addWidget(sweep_w)
+        # wavelet page
+        wavelet_w = QWidget()
+        wavelet_layout = QHBoxLayout(wavelet_w)
+        wavelet_layout.setContentsMargins(0, 0, 0, 0)
+        wavelet_layout.setSpacing(6)
+        wavelet_layout.addWidget(QLabel("Levels:"))
+        self.wavelet_levels_spin = QSpinBox()
+        self.wavelet_levels_spin.setRange(1, 8)
+        self.wavelet_levels_spin.setValue(3)
+        self.wavelet_levels_spin.setFixedWidth(56)
+        self.wavelet_levels_spin.setToolTip(
+            "Number of a-trous wavelet detail levels in signed coefficient space."
+        )
+        wavelet_layout.addWidget(self.wavelet_levels_spin)
+        wavelet_layout.addWidget(QLabel("Kernel:"))
+        self.wavelet_kernel_combo = QComboBox()
+        self.wavelet_kernel_combo.addItem("B3 spline", "b3spline")
+        self.wavelet_kernel_combo.addItem("Triangle", "triangle")
+        self.wavelet_kernel_combo.setToolTip("Wavelet smoothing kernel.")
+        wavelet_layout.addWidget(self.wavelet_kernel_combo)
+        wavelet_layout.addWidget(QLabel("Prior ×:"))
+        self.wavelet_prior_scale_spin = QDoubleSpinBox()
+        self.wavelet_prior_scale_spin.setRange(0.01, 100.0)
+        self.wavelet_prior_scale_spin.setDecimals(2)
+        self.wavelet_prior_scale_spin.setSingleStep(0.5)
+        self.wavelet_prior_scale_spin.setValue(5.0)
+        self.wavelet_prior_scale_spin.setFixedWidth(72)
+        self.wavelet_prior_scale_spin.setToolTip(
+            "Multiplier for coefficient prior scales; larger values damp less."
+        )
+        wavelet_layout.addWidget(self.wavelet_prior_scale_spin)
+        self.wavelet_allow_poisson_check = QCheckBox("Poisson")
+        self.wavelet_allow_poisson_check.setToolTip(
+            "Experimental: signed wavelet synthesis does not guarantee "
+            "nonnegative visible intensities. Gaussian likelihood is safer."
+        )
+        wavelet_layout.addWidget(self.wavelet_allow_poisson_check)
+        wavelet_layout.addStretch()
+        self._icf_stack.addWidget(wavelet_w)
 
         icf_v.addWidget(self._icf_stack)
         self.icf_last_sweep_label = QLabel("Last sweep: —")
@@ -470,12 +576,59 @@ class DeconvolutionDialog(QDialog):
         vbox.addWidget(icf_grp)
         self._icf_group_widget = icf_grp
 
+        preview_grp = QGroupBox("Recipe preview")
+        preview_layout = QVBoxLayout(preview_grp)
+        preview_layout.setContentsMargins(8, 6, 8, 6)
+        preview_layout.setSpacing(4)
+        self.recipe_preview = QPlainTextEdit()
+        self.recipe_preview.setReadOnly(True)
+        self.recipe_preview.setFixedHeight(78)
+        self.recipe_preview.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.recipe_preview.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.recipe_preview.setStyleSheet(
+            "font-family: Menlo, Consolas, monospace; font-size: 10px;"
+        )
+        preview_layout.addWidget(self.recipe_preview)
+        vbox.addWidget(preview_grp)
+
+        diag_grp = QGroupBox("Advanced diagnostics")
+        diag_grp.setCheckable(True)
+        diag_grp.setChecked(False)
+        diag_grp.setToolTip(
+            "Shows derived array sizes, including the computed FFT canvas. "
+            "There is no manual FFT padding control."
+        )
+        diag_form = QFormLayout(diag_grp)
+        diag_form.setLabelAlignment(Qt.AlignRight)
+        diag_form.setVerticalSpacing(3)
+        diag_form.setContentsMargins(8, 6, 8, 6)
+        self.detector_domain_label = QLabel("—")
+        self.hidden_canvas_label = QLabel("—")
+        self.psf_kernel_label = QLabel("—")
+        self.fft_canvas_label = QLabel("—")
+        diag_form.addRow("Detector domain:", self.detector_domain_label)
+        diag_form.addRow("Hidden canvas:", self.hidden_canvas_label)
+        diag_form.addRow("PSF kernel:", self.psf_kernel_label)
+        diag_form.addRow("FFT canvas:", self.fft_canvas_label)
+        self._diagnostics_group = diag_grp
+        self._diagnostics_widgets = [
+            self.detector_domain_label,
+            self.hidden_canvas_label,
+            self.psf_kernel_label,
+            self.fft_canvas_label,
+        ]
+        diag_grp.toggled.connect(self._on_diagnostics_toggled)
+        vbox.addWidget(diag_grp)
+
         # Algorithm-specific knob stacks
         self._mem_box = self._build_mem_knobs()
         self._rl_box = self._build_rl_knobs()
         vbox.addWidget(self._mem_box)
         vbox.addWidget(self._rl_box)
         vbox.addStretch()
+        self._connect_recipe_preview_signals()
+        self._on_margin_toggled(self.margin_check.isChecked())
+        self._on_diagnostics_toggled(False)
         return tab
 
     def _build_mem_knobs(self) -> QGroupBox:
@@ -584,19 +737,229 @@ class DeconvolutionDialog(QDialog):
     # ------------------------------------------------------------------ #
     # Dynamic visibility
 
+    def _connect_recipe_preview_signals(self) -> None:
+        widgets = [
+            self.mem_radio, self.rl_radio,
+            self.icf_off_radio, self.icf_fixed_radio,
+            self.icf_sweep_radio, self.wavelet_radio,
+            self.icf_refine_check, self.wavelet_allow_poisson_check,
+        ]
+        for widget in widgets:
+            widget.toggled.connect(lambda *_: self._refresh_workflow_summary())
+        for spin in (
+            self.icf_sigma_spin, self.wavelet_levels_spin,
+            self.wavelet_prior_scale_spin, self.rl_iter_spin,
+            self.rl_bg_spin, self.rl_eval_spin, self.max_iter_spin,
+            self.posterior_n_spin,
+        ):
+            spin.valueChanged.connect(lambda *_: self._refresh_workflow_summary())
+        self.icf_sweep_edit.textChanged.connect(
+            lambda *_: self._refresh_workflow_summary()
+        )
+        self.wavelet_kernel_combo.currentIndexChanged.connect(
+            lambda *_: self._refresh_workflow_summary()
+        )
+
+    def _refresh_workflow_summary(self) -> None:
+        if hasattr(self, "compute_target_label"):
+            self._refresh_compute_target_hint()
+        if hasattr(self, "recipe_preview"):
+            self._refresh_recipe_preview()
+
+    def _on_margin_toggled(self, checked: bool) -> None:
+        self._margin_row_widget.setVisible(bool(checked))
+        self.pad_xy_spin.setEnabled(bool(checked))
+        self.margin_auto_btn.setEnabled(bool(checked))
+        is_3d = self.viewer.img_data.shape[1] > 1
+        self.pad_z_spin.setEnabled(bool(checked) and is_3d)
+        self._refresh_workflow_summary()
+
+    def _on_margin_value_changed(self, _value) -> None:
+        self._refresh_workflow_summary()
+        win = self.psf_combo.currentData()
+        if win is not None:
+            self._check_scale_match(win)
+
+    def _auto_margin_from_psf(self) -> None:
+        kernel = self._current_psf_kernel_shape()
+        if kernel is None:
+            self._set_status("Select a PSF window before using Auto margin.", warn=True)
+            return
+        if len(kernel) == 2:
+            py = px = max(0, int(kernel[-1]) // 2)
+            pz = 0
+        else:
+            pz = max(0, int(kernel[0]) // 2)
+            py = px = max(0, int(kernel[-1]) // 2)
+        self.margin_check.setChecked(True)
+        self.pad_xy_spin.setValue(max(py, px))
+        self.pad_z_spin.setValue(pz if self.viewer.img_data.shape[1] > 1 else 0)
+        self._refresh_workflow_summary()
+
+    def _on_diagnostics_toggled(self, checked: bool) -> None:
+        for child in self._diagnostics_group.findChildren(QWidget):
+            if child is not self._diagnostics_group:
+                child.setVisible(bool(checked))
+        self._diagnostics_group.setMaximumHeight(16777215 if checked else 24)
+
+    def _effective_pad(self) -> tuple[int, int]:
+        if not self.margin_check.isChecked():
+            return 0, 0
+        return int(self.pad_xy_spin.value()), int(self.pad_z_spin.value())
+
+    def _current_data_shape(self) -> Optional[tuple[int, ...]]:
+        _T, Z, _C, Y, X = self.viewer.img_data.shape
+        if self.full_radio.isChecked():
+            n_z, n_y, n_x = Z, Y, X
+        else:
+            idx = self.shape_combo.currentIndex()
+            if idx < 0 or idx >= len(self._rect_shapes):
+                return None
+            _, rec = self._rect_shapes[idx]
+            p = rec.params
+            n_y = int(abs(p[3] - p[1]))
+            n_x = int(abs(p[2] - p[0]))
+            if Z > 1 and self.around_z_radio.isChecked():
+                half = self.z_half_spin.value()
+                n_z = min(Z, rec.z + half + 1) - max(0, rec.z - half)
+            else:
+                n_z = Z
+        if n_z <= 1:
+            return (n_y, n_x)
+        return (n_z, n_y, n_x)
+
+    def _current_shape_plan(self) -> Optional[dict[str, tuple[int, ...]]]:
+        data_shape = self._current_data_shape()
+        if data_shape is None:
+            return None
+        ndim = len(data_shape)
+        f_xy = max(float(self.sr_xy_spin.value()), 1.0)
+        f_z = max(float(self.sr_z_spin.value()), 1.0)
+        pad_xy, pad_z = self._effective_pad()
+        factors = ((f_z, f_xy, f_xy) if ndim == 3 else (f_xy, f_xy))
+        pads = ((pad_z, pad_xy, pad_xy) if ndim == 3 else (pad_xy, pad_xy))
+        detector_domain = tuple(d + 2 * p for d, p in zip(data_shape, pads))
+        hidden = tuple(
+            int(round(d * f)) for d, f in zip(detector_domain, factors)
+        )
+        valid = tuple(int(round(d * f)) for d, f in zip(data_shape, factors))
+        return {
+            "data": tuple(data_shape),
+            "detector_domain": detector_domain,
+            "hidden": hidden,
+            "valid": valid,
+            "pads": tuple(pads),
+            "factors": tuple(factors),
+        }
+
+    def _current_psf_kernel_shape(self) -> Optional[tuple[int, ...]]:
+        win = self.psf_combo.currentData()
+        if win is None:
+            return None
+        _T, Zp, _C, Yp, Xp = win.img_data.shape
+        if self.viewer.img_data.shape[1] <= 1 or Zp <= 1:
+            return (Yp, Xp)
+        return (Zp, Yp, Xp)
+
+    def _format_shape(self, shape: Optional[tuple[int, ...]]) -> str:
+        if shape is None:
+            return "—"
+        return " × ".join(str(int(v)) for v in shape)
+
+    def _next_smooth_number(self, n: int) -> int:
+        candidate = max(1, int(n))
+        while True:
+            m = candidate
+            for p in (2, 3, 5):
+                while m % p == 0:
+                    m //= p
+            if m == 1:
+                return candidate
+            candidate += 1
+
+    def _fft_canvas_shape(
+        self,
+        signal_shape: tuple[int, ...],
+        kernel_shape: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        return tuple(
+            self._next_smooth_number(max(int(n) + int(m) - 1, int(m)))
+            for n, m in zip(signal_shape, kernel_shape)
+        )
+
+    def _refresh_recipe_preview(self) -> None:
+        if not hasattr(self, "recipe_preview"):
+            return
+        plan = self._current_shape_plan()
+        if plan is None:
+            text = "Select a detector region to preview the recipe."
+            self.recipe_preview.setPlainText(text)
+            return
+        pad_any = any(int(p) > 0 for p in plan["pads"])
+        sr_any = any(abs(float(f) - 1.0) > 1e-6 for f in plan["factors"])
+        recipe_kind = "super_res_idc" if sr_any else "fft_conv"
+        output_shape = (
+            plan["valid"] if self.region_valid_radio.isChecked() else plan["hidden"]
+        )
+
+        if self.mem_radio.isChecked():
+            if self.wavelet_radio.isChecked():
+                solver = (
+                    f"MEM wavelet, {self.wavelet_levels_spin.value()} levels, "
+                    f"{self.wavelet_kernel_combo.currentData()}"
+                )
+            elif self.icf_sweep_radio.isChecked():
+                solver = f"MEM + Gaussian ICF sweep ({self.icf_sweep_edit.text()})"
+            elif self.icf_fixed_radio.isChecked():
+                solver = f"MEM + Gaussian ICF σ={self.icf_sigma_spin.value():g} µm"
+            else:
+                solver = "MEM"
+        else:
+            solver = f"Richardson-Lucy, {self.rl_iter_spin.value()} iter"
+
+        pad_text = self._format_shape(plan["pads"]) if pad_any else "none"
+        sr_text = " × ".join(f"{float(v):g}" for v in plan["factors"])
+        lines = [
+            f"{solver}",
+            f"{recipe_kind}: data {self._format_shape(plan['data'])} -> "
+            f"hidden {self._format_shape(plan['hidden'])} -> "
+            f"output {self._format_shape(output_shape)}",
+            f"super-res {sr_text}; finite margin {pad_text}",
+        ]
+        self.recipe_preview.setPlainText("\n".join(lines))
+
+        kernel = self._current_psf_kernel_shape()
+        fft_shape = (
+            self._fft_canvas_shape(plan["hidden"], kernel)
+            if kernel is not None and len(kernel) == len(plan["hidden"])
+            else None
+        )
+        self.detector_domain_label.setText(self._format_shape(plan["detector_domain"]))
+        self.hidden_canvas_label.setText(self._format_shape(plan["hidden"]))
+        self.psf_kernel_label.setText(self._format_shape(kernel))
+        self.fft_canvas_label.setText(self._format_shape(fft_shape))
+
     def _on_algorithm_changed(self, *_):
         is_mem = self.mem_radio.isChecked()
         self._icf_group_widget.setVisible(is_mem)
         self._mem_box.setVisible(is_mem)
         self._rl_box.setVisible(not is_mem)
+        self._refresh_recipe_preview()
 
     def _on_icf_mode_changed(self, *_):
         if self.icf_off_radio.isChecked():
             self._icf_stack.setCurrentIndex(0)
         elif self.icf_fixed_radio.isChecked():
             self._icf_stack.setCurrentIndex(1)
-        else:
+        elif self.icf_sweep_radio.isChecked():
             self._icf_stack.setCurrentIndex(2)
+        else:
+            self._icf_stack.setCurrentIndex(3)
+            if not self.wavelet_allow_poisson_check.isChecked():
+                self.gaussian_radio.setChecked(True)
+            self.posterior_n_spin.setValue(0)
+        self.posterior_n_spin.setEnabled(not self.wavelet_radio.isChecked())
+        self._refresh_recipe_preview()
 
     def _apply_last_sweep_sigma(self):
         if self._last_icf_sigma_um is None:
@@ -609,7 +972,7 @@ class DeconvolutionDialog(QDialog):
         )
 
     def _on_sr_changed(self, _value):
-        self._refresh_compute_target_hint()
+        self._refresh_workflow_summary()
         # PSF expected fine-grid spacing depends on the sr factors, so the
         # ✓/✗ scale indicator needs to refresh whenever they change.
         win = self.psf_combo.currentData()
@@ -626,30 +989,18 @@ class DeconvolutionDialog(QDialog):
         falling back to 2D `(Ny, Nx)` / `(dy, dx)` when the ROI has a
         single Z plane. Returns `(None, None)` if no ROI is resolvable.
         """
-        T, Z, _C, Y, X = self.viewer.img_data.shape
-        if self.full_radio.isChecked():
-            n_z = Z
-            n_y = Y
-            n_x = X
+        data_shape = self._current_data_shape()
+        if data_shape is None:
+            return None, None
+        if len(data_shape) == 2:
+            n_y, n_x = data_shape
+            n_z = 1
         else:
-            idx = self.shape_combo.currentIndex()
-            if idx < 0 or idx >= len(self._rect_shapes):
-                return None, None
-            _, rec = self._rect_shapes[idx]
-            p = rec.params
-            x1, y1, x2, y2 = p[0], p[1], p[2], p[3]
-            n_y = int(abs(y2 - y1))
-            n_x = int(abs(x2 - x1))
-            if Z > 1 and self.around_z_radio.isChecked():
-                half = self.z_half_spin.value()
-                n_z = min(Z, rec.z + half + 1) - max(0, rec.z - half)
-            else:
-                n_z = Z
+            n_z, n_y, n_x = data_shape
 
         f_xy = max(float(self.sr_xy_spin.value()), 1.0)
         f_z = max(float(self.sr_z_spin.value()), 1.0)
-        pad_xy = int(self.pad_xy_spin.value())
-        pad_z = int(self.pad_z_spin.value())
+        pad_xy, pad_z = self._effective_pad()
         n_y_h = int(round((n_y + 2 * pad_xy) * f_xy))
         n_x_h = int(round((n_x + 2 * pad_xy) * f_xy))
         n_z_h = int(round((n_z + 2 * pad_z) * f_z))
@@ -732,10 +1083,12 @@ class DeconvolutionDialog(QDialog):
             self.psf_channel_spin.setRange(0, 0)
             self.scale_label.setText("No PSF window")
             self.scale_label.setStyleSheet("color: #F44; font-size: 10px;")
+            self._refresh_recipe_preview()
             return
         _T, _Zp, C, _Yp, _Xp = win.img_data.shape
         self.psf_channel_spin.setRange(0, max(0, C - 1))
         self._check_scale_match(win)
+        self._refresh_recipe_preview()
 
     def _check_scale_match(self, psf_win):
         """Compare PSF spacing against the expected fine-grid spacing.
@@ -820,6 +1173,7 @@ class DeconvolutionDialog(QDialog):
         self.shape_combo.setEnabled(use_shape)
         self.bounds_label.setVisible(use_shape)
         self._on_shape_selected(self.shape_combo.currentIndex())
+        self._refresh_workflow_summary()
 
     def _on_shape_selected(self, idx):
         if not self.shape_radio.isChecked() or idx < 0 or idx >= len(self._rect_shapes):
@@ -837,7 +1191,7 @@ class DeconvolutionDialog(QDialog):
         )
         self._z_row_widget.setVisible(Z > 1)
         self.frame_spin.setValue(rec.t)
-        self._refresh_compute_target_hint()
+        self._refresh_workflow_summary()
 
     # ------------------------------------------------------------------ #
     # State / inputs
@@ -848,8 +1202,10 @@ class DeconvolutionDialog(QDialog):
             icf_mode = "off"
         elif self.icf_fixed_radio.isChecked():
             icf_mode = "fixed"
-        else:
+        elif self.icf_sweep_radio.isChecked():
             icf_mode = "sweep"
+        else:
+            icf_mode = "wavelet"
 
         sweep_sigmas: tuple = ()
         if icf_mode == "sweep":
@@ -860,16 +1216,21 @@ class DeconvolutionDialog(QDialog):
             except ValueError:
                 sweep_sigmas = ()
 
+        pad_xy, pad_z = self._effective_pad()
         return DecondialogState(
             algorithm=algo,
             super_res_xy=self.sr_xy_spin.value(),
             super_res_z=self.sr_z_spin.value(),
-            pad_xy=self.pad_xy_spin.value(),
-            pad_z=self.pad_z_spin.value(),
+            pad_xy=pad_xy,
+            pad_z=pad_z,
             icf_mode=icf_mode,
             icf_sigma_um=self.icf_sigma_spin.value(),
             icf_sweep_sigmas_um=sweep_sigmas,
             icf_refine=self.icf_refine_check.isChecked(),
+            wavelet_levels=self.wavelet_levels_spin.value(),
+            wavelet_kernel=self.wavelet_kernel_combo.currentData(),
+            wavelet_prior_scale=self.wavelet_prior_scale_spin.value(),
+            wavelet_allow_poisson=self.wavelet_allow_poisson_check.isChecked(),
             likelihood="poisson" if self.poisson_radio.isChecked() else "gaussian",
             sigma_gaussian=self.sigma_spin.value(),
             max_iter=self.max_iter_spin.value(),
@@ -993,6 +1354,20 @@ class DeconvolutionDialog(QDialog):
                 "ICF sweep requires a comma-separated σ list.", error=True
             )
             return None
+        if state.icf_mode == "wavelet":
+            if state.posterior_n_samples > 0:
+                self._set_status(
+                    "Wavelet MEM does not support posterior sampling yet.",
+                    error=True,
+                )
+                return None
+            if state.likelihood == "poisson" and not state.wavelet_allow_poisson:
+                self._set_status(
+                    "Wavelet MEM uses Gaussian likelihood by default. Enable "
+                    "the Poisson checkbox for experimental Poisson runs.",
+                    error=True,
+                )
+                return None
 
         try:
             prepared = prepare_inputs(
@@ -1001,6 +1376,7 @@ class DeconvolutionDialog(QDialog):
                 psf_array=psf_data,
                 psf_pixel_size_um=psf_pixel_size,
                 optics=optics,
+                require_psf_match=False,
             )
         except Exception as exc:
             self._set_status(f"{type(exc).__name__}: {exc}", error=True)
@@ -1020,10 +1396,15 @@ class DeconvolutionDialog(QDialog):
         prepared, state, t, c = result
         self._last_run_state = state
 
-        output_shape = output_5d_shape(state, prepared.geometry.data_shape)
+        stack_channels = self.stack_channels_check.isChecked()
+        output_channels = self.viewer.C if stack_channels else 1
+        output_channel = c if stack_channels else 0
+        output_shape = output_5d_shape(
+            state, prepared.geometry.data_shape, n_channels=output_channels
+        )
         log.info(
-            "output buffer shape=%s (algorithm=%s, return_region=%s)",
-            output_shape, state.algorithm, state.return_region,
+            "output buffer shape=%s channel=%d (algorithm=%s, return_region=%s)",
+            output_shape, output_channel, state.algorithm, state.return_region,
         )
 
         # Output spacing = fine-grid spacing (data spacing ÷ super-res factor).
@@ -1034,10 +1415,26 @@ class DeconvolutionDialog(QDialog):
             out_scale = (1.0, float(vs[0]), float(vs[1]))
         else:
             out_scale = tuple(float(s) for s in vs)
+        meta_channels = list((self.viewer.meta or {}).get("channels") or [])
+        if stack_channels:
+            channels = [
+                meta_channels[i]
+                if i < len(meta_channels)
+                else {"name": f"Channel {i}"}
+                for i in range(output_channels)
+            ]
+        else:
+            channels = [
+                meta_channels[c]
+                if c < len(meta_channels)
+                else {"name": f"Channel {c}"}
+            ]
+
         output_meta = {
             "filename": "Deconvolved",
             "scale": out_scale,
             "is_rgb": False,
+            "channels": channels,
             "source_channel": c,
             "source_frame": t,
             "algorithm": state.algorithm,
@@ -1047,6 +1444,7 @@ class DeconvolutionDialog(QDialog):
             output_shape=output_shape,
             output_dtype=np.dtype(np.float32),
             output_meta=output_meta,
+            reuse_existing_buffer=stack_channels,
         )
 
         if state.algorithm == "memsolve_mem":
@@ -1057,6 +1455,8 @@ class DeconvolutionDialog(QDialog):
                 icf_sweep=build_icf_sweep(state),
                 posterior=build_posterior(state),
                 buffer=buffer,
+                wavelet_config=build_wavelet_config(state),
+                output_channel=output_channel,
                 likelihood=state.likelihood,
             )
         else:
@@ -1065,6 +1465,7 @@ class DeconvolutionDialog(QDialog):
                 prepared=prepared,
                 rl_config=build_rl_config(state),
                 buffer=buffer,
+                output_channel=output_channel,
             )
 
         worker.status.connect(self._on_status)
@@ -1171,6 +1572,12 @@ class DeconvolutionDialog(QDialog):
             return (
                 f"Running Richardson–Lucy for {state.rl_num_iter} iterations "
                 f"(eval every {state.rl_eval_interval})."
+            )
+
+        if state.icf_mode == "wavelet":
+            return (
+                f"Running wavelet MEM with {state.wavelet_levels} a-trous "
+                f"level(s) ({state.wavelet_kernel})."
             )
 
         if state.icf_mode == "sweep":

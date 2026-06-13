@@ -75,7 +75,7 @@ class ShapeLayerVisual:
         if selected_ids is None:
             selected_ids = set()
 
-        shapes = data.get_time_slice(current_t)
+        shapes = data.get_time_slice(current_t, current_z)
 
         # --- Outlines ---
         all_segments = []

@@ -3,7 +3,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from pyvistra.widgets.decon_recipe import PreparedInputs
-from pyvistra.widgets.deconvolution_worker import MemDeconvolutionWorker
+from pyvistra.widgets.deconvolution_worker import (
+    MemDeconvolutionWorker,
+    _write_to_buffer,
+)
 
 
 def _prepared_inputs():
@@ -60,3 +63,14 @@ def test_mem_preview_rejects_flattened_visible_array():
         assert "MEM preview shape mismatch" in str(exc)
     else:
         raise AssertionError("expected ValueError for flattened preview payload")
+
+
+def test_write_to_buffer_targets_requested_channel():
+    buffer = np.zeros((1, 2, 3, 4, 5), dtype=np.float32)
+    arr = np.ones((2, 4, 5), dtype=np.float32)
+
+    _write_to_buffer(buffer, arr, channel=2)
+
+    np.testing.assert_array_equal(buffer[0, :, 2, :, :], arr)
+    assert not np.any(buffer[0, :, 0, :, :])
+    assert not np.any(buffer[0, :, 1, :, :])

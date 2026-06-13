@@ -174,6 +174,14 @@ class ImageOutputSelector(QWidget):
         else:
             return "existing"
 
+    def selected_existing_window(self):
+        """Return the selected existing window, or None for new/file outputs."""
+        if self.get_selection_type() != "existing":
+            return None
+        from pyvistra.ui.manager import manager
+
+        return manager.get(self._combo.currentData())
+
     def send(self, data, metadata=None):
         """
         Send data to the selected destination.

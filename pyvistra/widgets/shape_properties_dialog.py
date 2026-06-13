@@ -186,9 +186,11 @@ class ShapePropertiesDialog(QDialog):
 
         outer.addWidget(coords_box)
 
-        # Snap-to-integer toggle (rectangle / line only — circle radius
-        # snapping isn't well-defined and we leave it as-is).
+        # Rectangle shapes are bbox-like and always stored on integer pixels.
         self._snap_int = QCheckBox("Snap to integer pixels")
+        if self._shape_type == RECTANGLE:
+            self._snap_int.setChecked(True)
+            self._snap_int.setEnabled(False)
         outer.addWidget(self._snap_int)
 
         # Close button row.
