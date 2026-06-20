@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import json
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -264,6 +266,187 @@ class PointTable:
             y=y_arr,
             z=z_arr,
             properties=props,
+        )
+
+
+def _coerce_csv_scalar(value: str):
+    text = value.strip()
+    if text == "":
+        return ""
+    lower = text.lower()
+    if lower in {"true", "false"}:
+        return lower == "true"
+    try:
+        if "." not in text and "e" not in lower:
+            return int(text)
+        return float(text)
+    except ValueError:
+        return value
+
+
+def load_points_csv(path) -> PointTable:
+    x = []
+    y = []
+    point_id = []
+    t = []
+    z = []
+
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError("CSV has no header row")
+        missing = {"x", "y"} - set(reader.fieldnames)
+        if missing:
+            raise ValueError(
+                f"Missing required columns: {', '.join(sorted(missing))}"
+            )
+
+        has_point_id = "point_id" in reader.fieldnames
+        has_t = "t" in reader.fieldnames
+        has_z = "z" in reader.fieldnames
+        prop_cols = [
+            col
+            for col in reader.fieldnames
+            if col not in {"point_id", "t", "z", "x", "y"}
+        ]
+        properties = {col: [] for col in prop_cols}
+
+        for row in reader:
+            x.append(float(row["x"]))
+            y.append(float(row["y"]))
+            if has_point_id:
+                point_id.append(int(float(row["point_id"])))
+            if has_t:
+                t.append(int(float(row["t"])))
+            if has_z:
+                z_val = row.get("z", "")
+                z.append(float(z_val) if z_val != "" else 0.0)
+            for col in prop_cols:
+                properties[col].append(_coerce_csv_scalar(row.get(col, "")))
+
+    return PointTable.from_arrays(
+        point_id=point_id if has_point_id else None,
+        t=t if has_t else None,
+        x=x,
+        y=y,
+        z=z if has_z else None,
+        properties=properties,
+    )
+
+
+def load_points_json(path) -> PointTable:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        rows = data.get("points", data.get("rows", None))
+        if rows is None:
+            if {"x", "y"}.issubset(data.keys()):
+                excluded = {"point_id", "t", "z", "x", "y"}
+                props = {
+                    str(k): np.asarray(v)
+                    for k, v in data.items()
+                    if k not in excluded
+                }
+                return PointTable.from_arrays(
+                    point_id=data.get("point_id"),
+                    t=data.get("t"),
+                    x=data["x"],
+                    y=data["y"],
+                    z=data.get("z"),
+                    properties=props,
+                )
+            raise ValueError(
+                "JSON must be a list of rows or contain a 'points'/'rows' list"
+            )
+    elif isinstance(data, list):
+        rows = data
+    else:
+        raise ValueError("Invalid JSON point format")
+
+    if not rows:
+        return PointTable.from_arrays(x=[], y=[])
+
+    if "x" not in rows[0] or "y" not in rows[0]:
+        raise ValueError("Missing required keys 'x'/'y' in JSON row records")
+
+    excluded = {"point_id", "t", "z", "x", "y"}
+    prop_keys = sorted(
+        {key for row in rows for key in row.keys() if key not in excluded}
+    )
+
+    props = {key: [row.get(key) for row in rows] for key in prop_keys}
+    point_id = (
+        [int(float(r["point_id"])) for r in rows]
+        if all("point_id" in r for r in rows)
+        else None
+    )
+    t = (
+        [int(float(r["t"])) for r in rows]
+        if any("t" in r for r in rows)
+        else None
+    )
+    z = (
+        [float(r.get("z", 0.0)) for r in rows]
+        if any("z" in r for r in rows)
+        else None
+    )
+
+    return PointTable.from_arrays(
+        point_id=point_id,
+        t=t,
+        x=[float(r["x"]) for r in rows],
+        y=[float(r["y"]) for r in rows],
+        z=z,
+        properties=props,
+    )
+
+
+def save_points_csv(path, points: PointTable) -> None:
+    fieldnames = ["point_id", "t", "x", "y"]
+    if points.z is not None:
+        fieldnames.append("z")
+    fieldnames.extend(sorted(points.properties.keys()))
+
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for i in range(points.n_rows):
+            row = {
+                "point_id": int(points.point_id[i]),
+                "t": int(points.t[i]),
+                "x": float(points.x[i]),
+                "y": float(points.y[i]),
+            }
+            if points.z is not None:
+                row["z"] = float(points.z[i])
+            for key, arr in points.properties.items():
+                value = arr[i]
+                row[key] = value.item() if hasattr(value, "item") else value
+            writer.writerow(row)
+
+
+def save_points_json(path, points: PointTable) -> None:
+    rows = []
+    for i in range(points.n_rows):
+        row = {
+            "point_id": int(points.point_id[i]),
+            "t": int(points.t[i]),
+            "x": float(points.x[i]),
+            "y": float(points.y[i]),
+        }
+        if points.z is not None:
+            row["z"] = float(points.z[i])
+        for key, arr in points.properties.items():
+            value = arr[i]
+            row[key] = value.item() if hasattr(value, "item") else value
+        rows.append(row)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            {"format": "pyvistra_points", "version": 1, "points": rows},
+            f,
+            indent=2,
         )
 
     def get_time_slice(self, t_idx: int) -> slice | None:

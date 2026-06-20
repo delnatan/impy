@@ -5,8 +5,8 @@ class WindowManager(QObject):
     """
     Manages all ImageWindow instances.
 
-    Emits signals when windows are registered/unregistered so that
-    other components (like AnnotationManager) can respond immediately.
+    Emits signals when windows are registered/unregistered so other
+    components can respond immediately.
     """
 
     # Signals for window lifecycle
@@ -19,6 +19,7 @@ class WindowManager(QObject):
         self.windows = {}
         self._next_id = 1
         self.active_tool = "pointer"  # Global tool state
+        self.active_window = None
 
     def set_active_tool(self, tool_name):
         """Set the global active tool and emit update signal if it changed."""
@@ -32,6 +33,9 @@ class WindowManager(QObject):
         wid = self._next_id
         self.windows[wid] = window
         self._next_id += 1
+        self.active_window = window
+        if hasattr(window, "window_activated"):
+            window.window_activated.connect(self.set_active_window)
         self.window_registered.emit(window)
         return wid
 
@@ -41,8 +45,15 @@ class WindowManager(QObject):
         for wid, w in list(self.windows.items()):
             if w == window:
                 del self.windows[wid]
+                if self.active_window is window:
+                    self.active_window = next(iter(self.windows.values()), None)
                 self.window_unregistered.emit(window)
                 return
+
+    def set_active_window(self, window):
+        """Remember the last ImageWindow that received focus/activation."""
+        if window in self.windows.values():
+            self.active_window = window
 
     def get(self, wid):
         """Get window by ID."""

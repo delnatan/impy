@@ -7,11 +7,6 @@ Based on vispy and PyQt (via qtpy)
 from ._version import __version__
 from . import colormaps
 
-from .ui.annotation_manager import (
-    AnnotationManager,
-    get_annotation_manager,
-    show_annotation_manager,
-)
 from .data.colors import (
     DEFAULT_LABEL_PALETTE,
     SMART_LABEL_PALETTE,
@@ -108,9 +103,6 @@ __all__ = [
     "get_layer_manager",
     "show_layer_manager",
     # managers
-    "AnnotationManager",
-    "get_annotation_manager",
-    "show_annotation_manager",
     "WindowManager",
     "manager",
     # gel analysis

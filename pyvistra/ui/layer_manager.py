@@ -4,9 +4,6 @@ Provides a single tree view showing shapes, points, tracks, and labels
 layers from the window's LayerList. Shape layers expand to show one row
 per shape with per-shape context-menu operations and a double-click that
 opens the numerical properties dialog.
-
-This is designed to work alongside the existing AnnotationManager during
-migration. Once migration is complete, AnnotationManager can be removed.
 """
 
 from __future__ import annotations

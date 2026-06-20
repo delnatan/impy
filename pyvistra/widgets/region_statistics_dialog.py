@@ -33,17 +33,12 @@ from ..data.shapes import (
     RECTANGLE,
     get_outline,
     polyline_is_closed,
+    rectangle_bounds,
 )
 
 
 def _rect_mask(rec, Y: int, X: int) -> np.ndarray | None:
-    p = rec.params
-    x0, x1 = sorted((float(p[0]), float(p[2])))
-    y0, y1 = sorted((float(p[1]), float(p[3])))
-    x0 = max(0, int(np.floor(x0)))
-    x1 = min(X, int(np.ceil(x1)))
-    y0 = max(0, int(np.floor(y0)))
-    y1 = min(Y, int(np.ceil(y1)))
+    x0, y0, x1, y1 = rectangle_bounds(rec, (Y, X))
     if x1 <= x0 or y1 <= y0:
         return None
     mask = np.zeros((Y, X), dtype=bool)

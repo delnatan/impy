@@ -1,12 +1,25 @@
+from dataclasses import dataclass
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from pyvistra.widgets.decon_recipe import PreparedInputs
 from pyvistra.widgets.deconvolution_worker import (
     MemDeconvolutionWorker,
+    _build_blur_op_from_recipe,
+    _raise_if_nonfinite,
     _write_to_buffer,
 )
+
+
+@dataclass
+class _FakeOperatorFactoryArgs:
+    psf: object
+    optics: object
+    geometry: object
+    recipe: object
+    likelihood: str
 
 
 def _prepared_inputs():
@@ -74,3 +87,70 @@ def test_write_to_buffer_targets_requested_channel():
     np.testing.assert_array_equal(buffer[0, :, 2, :, :], arr)
     assert not np.any(buffer[0, :, 0, :, :])
     assert not np.any(buffer[0, :, 1, :, :])
+
+
+def test_raise_if_nonfinite_reports_solver_divergence():
+    arr = np.array([1.0, np.nan, np.inf], dtype=np.float32)
+
+    try:
+        _raise_if_nonfinite(arr, "Richardson-Lucy result")
+    except ValueError as exc:
+        assert "1 NaN and 1 Inf" in str(exc)
+        assert "solver diverged" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for non-finite result")
+
+
+def test_build_blur_op_from_recipe_uses_public_registry():
+    blur_op = object()
+    seen = {}
+
+    def builder(args):
+        seen["args"] = args
+        return {"blur_op": blur_op}
+
+    fake_deconlib = SimpleNamespace(
+        OperatorFactoryArgs=_FakeOperatorFactoryArgs,
+        RECIPE_REGISTRY={"example": builder},
+    )
+    recipe = SimpleNamespace(kind="example")
+    psf = object()
+    optics = object()
+    geometry = object()
+
+    with patch.dict("sys.modules", {"deconlib": fake_deconlib}):
+        result = _build_blur_op_from_recipe(
+            recipe,
+            psf=psf,
+            optics=optics,
+            geometry=geometry,
+            likelihood="poisson",
+        )
+
+    assert result is blur_op
+    assert seen["args"].recipe is recipe
+    assert seen["args"].psf is psf
+    assert seen["args"].optics is optics
+    assert seen["args"].geometry is geometry
+    assert seen["args"].likelihood == "poisson"
+
+
+def test_build_blur_op_from_recipe_rejects_missing_blur_op():
+    fake_deconlib = SimpleNamespace(
+        OperatorFactoryArgs=_FakeOperatorFactoryArgs,
+        RECIPE_REGISTRY={"example": lambda _args: {}},
+    )
+
+    with patch.dict("sys.modules", {"deconlib": fake_deconlib}):
+        try:
+            _build_blur_op_from_recipe(
+                SimpleNamespace(kind="example"),
+                psf=object(),
+                optics=object(),
+                geometry=object(),
+                likelihood="poisson",
+            )
+        except ValueError as exc:
+            assert "does not expose an MLX blur_op" in str(exc)
+        else:
+            raise AssertionError("expected ValueError for recipe without blur_op")

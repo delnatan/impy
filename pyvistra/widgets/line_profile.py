@@ -68,6 +68,7 @@ class LineProfileWidget(QWidget):
 
         # List of dicts: label, color, distances, values, visible
         self.series = []
+        self.x_axis_label = "Distance (px)"
 
         # Plot margins
         self.margin_left = 56
@@ -83,6 +84,11 @@ class LineProfileWidget(QWidget):
     def clear(self):
         """Clear all profile data."""
         self.series = []
+        self.x_axis_label = "Distance (px)"
+        self.update()
+
+    def set_x_axis_label(self, label):
+        self.x_axis_label = str(label)
         self.update()
 
     def _get_plot_rect(self):
@@ -121,8 +127,6 @@ class LineProfileWidget(QWidget):
             )
             return
 
-        plot_x, plot_y, plot_w, plot_h = self._get_plot_rect()
-
         x_min = min(float(np.nanmin(s["distances"])) for s in visible_series)
         x_max = max(float(np.nanmax(s["distances"])) for s in visible_series)
 
@@ -135,21 +139,27 @@ class LineProfileWidget(QWidget):
 
         if y_arrays:
             all_visible = np.concatenate(y_arrays)
-            y_min = float(np.min(all_visible))
-            y_max = float(np.max(all_visible))
+            y_min_data = float(np.min(all_visible))
+            y_max_data = float(np.max(all_visible))
         else:
-            y_min, y_max = 0.0, 1.0
+            y_min_data, y_max_data = 0.0, 1.0
 
-        y_range = y_max - y_min
-        if y_range > 0:
-            y_min -= y_range * 0.05
-            y_max += y_range * 0.05
-        else:
-            y_min -= 0.5
-            y_max += 0.5
+        y_min, y_max = self._padded_y_range(y_min_data, y_max_data)
+        y_ticks = self._nice_ticks(y_min, y_max)
+
+        plot_x, plot_y, plot_w, plot_h = self._get_plot_rect()
 
         self._draw_axes(
-            painter, plot_x, plot_y, plot_w, plot_h, x_min, x_max, y_min, y_max
+            painter,
+            plot_x,
+            plot_y,
+            plot_w,
+            plot_h,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            y_ticks,
         )
 
         for idx, s in enumerate(visible_series):
@@ -167,7 +177,19 @@ class LineProfileWidget(QWidget):
                 y_max,
             )
 
-    def _draw_axes(self, painter, plot_x, plot_y, plot_w, plot_h, x_min, x_max, y_min, y_max):
+    def _draw_axes(
+        self,
+        painter,
+        plot_x,
+        plot_y,
+        plot_w,
+        plot_h,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        y_ticks,
+    ):
         border_pen = QPen(QColor(80, 80, 80))
         border_pen.setWidth(1)
         painter.setPen(border_pen)
@@ -177,21 +199,29 @@ class LineProfileWidget(QWidget):
         grid_pen.setStyle(Qt.DotLine)
         painter.setPen(grid_pen)
 
-        for i in range(1, 4):
-            y = plot_y + (i / 4) * plot_h
+        for y_val in y_ticks:
+            y = self._y_to_px(y_val, y_min, y_max, plot_y, plot_h)
+            if y <= plot_y or y >= plot_y + plot_h:
+                continue
             painter.drawLine(int(plot_x), int(y), int(plot_x + plot_w), int(y))
 
         for i in range(1, 4):
             x = plot_x + (i / 4) * plot_w
             painter.drawLine(int(x), int(plot_y), int(x), int(plot_y + plot_h))
 
+        if y_min < 0 < y_max:
+            zero_pen = QPen(QColor(100, 100, 100))
+            zero_pen.setWidth(1)
+            painter.setPen(zero_pen)
+            y = self._y_to_px(0.0, y_min, y_max, plot_y, plot_h)
+            painter.drawLine(int(plot_x), int(y), int(plot_x + plot_w), int(y))
+
         painter.setPen(TEXT_COLOR)
         font = QFont()
         font.setPointSize(9)
         painter.setFont(font)
 
-        y_labels = [y_min, (y_min + y_max) / 2, y_max]
-        for y_val in y_labels:
+        for y_val in y_ticks:
             y_px = self._y_to_px(y_val, y_min, y_max, plot_y, plot_h)
             label = self._format_value(y_val)
             painter.drawText(
@@ -206,7 +236,7 @@ class LineProfileWidget(QWidget):
         x_labels = [x_min, (x_min + x_max) / 2, x_max]
         for x_val in x_labels:
             x_px = self._x_to_px(x_val, x_min, x_max, plot_x, plot_w)
-            label = f"{x_val:.0f}"
+            label = self._format_distance(x_val, self.x_axis_label)
             painter.drawText(
                 int(x_px - 25),
                 int(plot_y + plot_h + 5),
@@ -222,7 +252,7 @@ class LineProfileWidget(QWidget):
             90,
             15,
             Qt.AlignCenter,
-            "Distance (px)",
+            self.x_axis_label,
         )
 
     def _draw_series(
@@ -265,7 +295,71 @@ class LineProfileWidget(QWidget):
             painter.drawPolyline(QPolygonF(points))
 
     @staticmethod
+    def _padded_y_range(y_min, y_max):
+        if not np.isfinite(y_min) or not np.isfinite(y_max):
+            return 0.0, 1.0
+
+        if y_max < y_min:
+            y_min, y_max = y_max, y_min
+
+        y_range = y_max - y_min
+        if y_range > 0:
+            pad = y_range * 0.05
+            view_min = y_min - pad
+            view_max = y_max + pad
+        else:
+            pad = max(abs(y_min) * 0.05, 0.5)
+            view_min = y_min - pad
+            view_max = y_max + pad
+
+        if y_min >= 0 and view_min < 0:
+            view_min = 0.0
+
+        if view_max <= view_min:
+            view_max = view_min + 1.0
+        return view_min, view_max
+
+    @staticmethod
+    def _nice_ticks(v_min, v_max, max_ticks=5):
+        if not np.isfinite(v_min) or not np.isfinite(v_max) or v_max <= v_min:
+            return [0.0, 1.0]
+
+        raw_step = (v_max - v_min) / max(1, max_ticks - 1)
+        magnitude = 10 ** np.floor(np.log10(raw_step))
+        residual = raw_step / magnitude
+        if residual <= 1:
+            step = magnitude
+        elif residual <= 2:
+            step = 2 * magnitude
+        elif residual <= 5:
+            step = 5 * magnitude
+        else:
+            step = 10 * magnitude
+
+        first = np.ceil(v_min / step) * step
+        last = np.floor(v_max / step) * step
+        ticks = []
+        tick = first
+        while tick <= last + step * 0.5:
+            if abs(tick) < step * 1e-10:
+                tick = 0.0
+            ticks.append(float(tick))
+            tick += step
+
+        if not ticks:
+            ticks = [v_min, v_max]
+        return ticks
+
+    @staticmethod
+    def _format_distance(value, axis_label):
+        if axis_label.endswith("(px)"):
+            return f"{value:.0f}"
+        return LineProfileWidget._format_value(value)
+
+    @staticmethod
     def _format_value(value):
+        if abs(value) < 1e-12:
+            return "0"
         if abs(value) < 0.01 or abs(value) >= 10000:
             return f"{value:.1e}"
         if abs(value) < 1:
@@ -790,6 +884,11 @@ class LineProfileDialog(QDialog):
         distances_um = None
         if length_um is not None and length_px > 0:
             distances_um = distances_px * (length_um / length_px)
+            distances_plot = distances_um
+            x_axis_label = "Distance (um)"
+        else:
+            distances_plot = distances_px
+            x_axis_label = "Distance (px)"
 
         all_channels = self.all_channels_cb.isChecked()
         plot_series = []
@@ -828,7 +927,7 @@ class LineProfileDialog(QDialog):
                     {
                         "label": ch_label,
                         "color": color,
-                        "distances": distances_px,
+                        "distances": distances_plot,
                         "values": profile,
                         "visible": visible,
                     }
@@ -864,6 +963,7 @@ class LineProfileDialog(QDialog):
             self._refresh_series_list()
 
         self._computed_series = computed_series
+        self.profile_widget.set_x_axis_label(x_axis_label)
         self.profile_widget.set_series(plot_series)
 
         n_visible = sum(1 for s in plot_series if s.get("visible", True))

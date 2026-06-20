@@ -323,6 +323,31 @@ def _set_record_params(rec: ShapeRecord, params: np.ndarray | tuple | list) -> N
     rec.params[:len(p)] = p
 
 
+def rectangle_bounds(
+    rec: ShapeRecord, yx_shape: tuple[int, int] | tuple | None = None
+) -> tuple[int, int, int, int]:
+    """Return a rectangle's half-open integer bounds as ``(x0, y0, x1, y1)``.
+
+    The bounds use the same exclusive end convention as numpy slices.
+    Existing fractional rectangle payloads are rounded to the nearest
+    integer coordinates before sorting/clamping.
+    """
+    if rec.shape_type != RECTANGLE:
+        raise ValueError(
+            f"rectangle_bounds requires a {RECTANGLE} shape, got {rec.shape_type!r}"
+        )
+    p = snap_rectangle_params(rec.params)
+    x0, x1 = sorted((int(p[0]), int(p[2])))
+    y0, y1 = sorted((int(p[1]), int(p[3])))
+    if yx_shape is not None:
+        H, W = int(yx_shape[-2]), int(yx_shape[-1])
+        x0 = max(0, min(W, x0))
+        x1 = max(0, min(W, x1))
+        y0 = max(0, min(H, y0))
+        y1 = max(0, min(H, y1))
+    return x0, y0, x1, y1
+
+
 def get_handles(rec: ShapeRecord) -> dict[str, tuple[float, float]]:
     """Return handle positions for a shape as {name: (x, y)}.
 
@@ -459,6 +484,19 @@ def square_from_corner(
     return (fx + sx * s, fy + sy * s)
 
 
+def integer_square_from_corner(
+    fx: float, fy: float, x: float, y: float
+) -> tuple[float, float]:
+    """Return the opposite corner for an integer-snapped square bbox."""
+    dx, dy = x - fx, y - fy
+    side = int(np.rint(max(abs(dx), abs(dy))))
+    sx = 1 if dx >= 0 else -1
+    sy = 1 if dy >= 0 else -1
+    ax = int(np.rint(fx))
+    ay = int(np.rint(fy))
+    return float(ax + sx * side), float(ay + sy * side)
+
+
 def rect_opposite_corner(
     params: np.ndarray, handle: str
 ) -> tuple[float, float] | None:
@@ -481,7 +519,7 @@ def crop_rect(source, rec: ShapeRecord) -> np.ndarray:
     """Cookie-cut the YX plane of a 5D source with a rectangle shape.
 
     Always keeps full T, Z, C; the rect's (x1, y1, x2, y2) is clamped
-    to the source's YX shape, rounded outward to integer pixel indices,
+    to the source's YX shape, rounded to integer pixel indices,
     and applied as ``source[:, :, :, y0:y1, x0:x1]``. The result is
     realized as a numpy array — large proxies will be materialized.
     """
@@ -489,15 +527,7 @@ def crop_rect(source, rec: ShapeRecord) -> np.ndarray:
         raise ValueError(
             f"crop_rect requires a {RECTANGLE} shape, got {rec.shape_type!r}"
         )
-    p = rec.params
-    x0, x1 = sorted((float(p[0]), float(p[2])))
-    y0, y1 = sorted((float(p[1]), float(p[3])))
-
-    H, W = int(source.shape[-2]), int(source.shape[-1])
-    x0 = max(0, int(np.floor(x0)))
-    x1 = min(W, int(np.ceil(x1)))
-    y0 = max(0, int(np.floor(y0)))
-    y1 = min(H, int(np.ceil(y1)))
+    x0, y0, x1, y1 = rectangle_bounds(rec, source.shape[-2:])
 
     if x1 <= x0 or y1 <= y0:
         raise ValueError(

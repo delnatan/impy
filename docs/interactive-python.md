@@ -14,11 +14,10 @@ Then:
 
 ```python
 from pyvistra.io import load_image
-from pyvistra import imshow, show_annotation_manager
+from pyvistra import imshow
 
 data, meta = load_image("movie.czi")
 viewer = imshow(data, meta)
-annotation_mgr = show_annotation_manager(viewer)
 ```
 
 ## Script setup

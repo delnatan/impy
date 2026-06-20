@@ -13,9 +13,12 @@ Naming:
 - `rect.svg` or `rect.png`
 - `circle.svg` or `circle.png`
 - `line.svg` or `line.png`
+- `polyline.svg` or `polyline.png`
+- `point.svg` or `point.png`
 - `brush.svg` or `brush.png`
 - `eraser.svg` or `eraser.png`
 - `annotations.svg` or `annotations.png`
+- `layers.svg` or `layers.png`
 - `console.svg` or `console.png`
 
 If a custom file is missing, pyvistra falls back to a built-in Qt icon.

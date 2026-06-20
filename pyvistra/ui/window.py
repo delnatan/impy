@@ -58,10 +58,10 @@ from ..data.shapes import (
     SetShapeVertices,
     _apply_handle_adjustment,
     crop_rect,
+    integer_square_from_corner,
     polyline_is_closed,
     rect_opposite_corner,
     snap_rectangle_params,
-    square_from_corner,
 )
 from ..layers.base import Layer, LayerList
 from .manager import manager
@@ -116,6 +116,7 @@ class ImageWindow(QMainWindow):
     # New layer system signals
     layer_added = Signal(object)  # Emits Layer when added
     layer_removed = Signal(object)  # Emits Layer when removed
+    shape_selection_changed = Signal(object, object)  # Emits (Layer, shape_id) or (None, None)
 
     # Internal — marshals ImageBuffer change notifications from any worker
     # thread onto the GUI thread (Qt.QueuedConnection in __init__).
@@ -298,6 +299,9 @@ class ImageWindow(QMainWindow):
         self._editing_shape_start_pos = None
         # For POLYLINE edits the original vertex array snapshot.
         self._editing_shape_start_vertices = None
+        self._dragging_gel_marker_layer = None
+        self._dragging_gel_marker_shape_id = None
+        self._dragging_gel_marker_idx = None
 
         # Live buffer updates: dispatch from any thread to the GUI thread.
         self._buffer_unsubscribe = None
@@ -1185,7 +1189,7 @@ class ImageWindow(QMainWindow):
         self.canvas.update()
 
     def set_active_track_layer(self, name):
-        """Switch which track layer is active in the annotation manager."""
+        """Switch which track layer is active."""
         if name in self._track_layers:
             self._active_track_layer = name
 
@@ -1310,7 +1314,7 @@ class ImageWindow(QMainWindow):
         self.canvas.update()
 
     def set_active_point_layer(self, name):
-        """Switch which point layer is active in the annotation manager."""
+        """Switch which point layer is active."""
         if name in self._point_layers:
             self._active_point_layer = name
             self.canvas.update()
@@ -1379,6 +1383,8 @@ class ImageWindow(QMainWindow):
         # safe. The unsubscribe handle is stashed in ``layer.style`` so the
         # subscription is dropped on remove.
         def _on_shape_event(_event_kind, _shape_id, _layer=layer):
+            if str(_event_kind).startswith("gel_marker_"):
+                return
             if _layer.visual is None:
                 return
             _layer.visual.update(
@@ -1470,9 +1476,11 @@ class ImageWindow(QMainWindow):
                 lyr.visual.update(
                     lyr.data, lyr.selected_ids, self.t_idx, self.z_idx
                 )
+        self.shape_selection_changed.emit(layer, shape_id)
 
     def _clear_shape_selection(self):
         """Deselect all shapes across all shape layers."""
+        had_selection = any(lyr.selected_ids for lyr in self.layers.by_type("shapes"))
         for lyr in self.layers.by_type("shapes"):
             if not lyr.selected_ids:
                 continue
@@ -1481,6 +1489,66 @@ class ImageWindow(QMainWindow):
                 lyr.visual.update(
                     lyr.data, lyr.selected_ids, self.t_idx, self.z_idx
                 )
+        if had_selection:
+            self.shape_selection_changed.emit(None, None)
+
+    def _hit_test_gel_marker(self, rec, x: float, y: float) -> int | None:
+        """Return gel marker index under the pointer for a gel-lane shape."""
+        if rec.shape_type != RECTANGLE or not rec.properties.get("gel_lane"):
+            return None
+        markers = rec.properties.get("gel_markers") or []
+        if not markers:
+            return None
+        x1, y1, x2, y2 = rec.params[:4]
+        x_min, x_max = min(x1, x2), max(x1, x2)
+        y_min = min(y1, y2)
+        if not (x_min <= x <= x_max):
+            return None
+        for i, marker in enumerate(markers):
+            try:
+                y_global = y_min + float(marker.get("y_local", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if abs(y - y_global) < 5:
+                return i
+        return None
+
+    def _add_gel_marker(self, layer, shape_id: int, y: float) -> None:
+        rec = layer.data.get(shape_id)
+        x1, y1, x2, y2 = rec.params[:4]
+        y_min, y_max = min(y1, y2), max(y1, y2)
+        y_local = max(0.0, min(float(y - y_min), float(y_max - y_min)))
+        markers = list(rec.properties.get("gel_markers") or [])
+        color = rec.properties.get("gel_marker_color", "#00BCD4")
+        markers.append({"y_local": y_local, "label": "", "color": color})
+        rec.properties["gel_lane"] = True
+        rec.properties["gel_markers"] = markers
+        layer.data._emit(EVT_EDITED, shape_id)
+        self.canvas.update()
+
+    def _remove_gel_marker(self, layer, shape_id: int, marker_idx: int) -> None:
+        rec = layer.data.get(shape_id)
+        markers = list(rec.properties.get("gel_markers") or [])
+        if 0 <= marker_idx < len(markers):
+            markers.pop(marker_idx)
+            rec.properties["gel_markers"] = markers
+            layer.data._emit("gel_marker_changed", shape_id)
+            self.canvas.update()
+
+    def _move_gel_marker(self, layer, shape_id: int, marker_idx: int, y: float) -> None:
+        rec = layer.data.get(shape_id)
+        markers = list(rec.properties.get("gel_markers") or [])
+        if not (0 <= marker_idx < len(markers)):
+            return
+        x1, y1, x2, y2 = rec.params[:4]
+        y_min, y_max = min(y1, y2), max(y1, y2)
+        y_local = max(0.0, min(float(y - y_min), float(y_max - y_min)))
+        marker = dict(markers[marker_idx])
+        marker["y_local"] = y_local
+        markers[marker_idx] = marker
+        rec.properties["gel_markers"] = markers
+        layer.data._emit("gel_marker_moved", shape_id)
+        self.canvas.update()
 
     def _polyline_segment_insert_index(self, rec, x, y, tolerance=8.0):
         """If ``(x, y)`` is near a polyline segment, return the index at
@@ -1716,6 +1784,7 @@ class ImageWindow(QMainWindow):
 
         act_crop = None
         act_stats = None
+        act_gel = None
         act_kymo = None
         act_close = None
         smooth_actions: dict = {}
@@ -1723,6 +1792,7 @@ class ImageWindow(QMainWindow):
             menu.addSeparator()
             if rec.shape_type == RECTANGLE:
                 act_crop = menu.addAction("Crop…")
+                act_gel = menu.addAction("Gel Analyzer…")
             act_stats = menu.addAction("Region Statistics…")
         act_profile = None
         if rec.shape_type in (LINE, POLYLINE):
@@ -1762,6 +1832,11 @@ class ImageWindow(QMainWindow):
             self.delete_selected_shape()
         elif act_crop is not None and chosen is act_crop:
             self._crop_with_rect(layer, shape_id)
+        elif act_gel is not None and chosen is act_gel:
+            from ..apps.gel_analyzer import show_gel_analyzer
+            manager.set_active_window(self)
+            show_gel_analyzer(manager)
+            self._select_shape(layer, shape_id)
         elif act_stats is not None and chosen is act_stats:
             from ..widgets.region_statistics_dialog import RegionStatisticsDialog
             dlg = RegionStatisticsDialog(self, layer, shape_id, parent=self)
@@ -3044,12 +3119,6 @@ class ImageWindow(QMainWindow):
             self.overlay.set_config(dlg.get_config())
             self.canvas.update()
 
-    def show_annotation_manager(self):
-        """Open AnnotationManager focused on this window."""
-        from .annotation_manager import show_annotation_manager
-
-        return show_annotation_manager(self)
-
     def _map_event_to_image(self, event):
         tr = self.canvas.scene.node_transform(self.renderer.layers[0])
         pos = tr.map(event.pos)
@@ -3174,6 +3243,28 @@ class ImageWindow(QMainWindow):
                 layer, shape_id, handle = shape_hit
                 rec = layer.data.get(shape_id)
                 has_alt = "Alt" in event.modifiers
+                has_ctrl_or_cmd = (
+                    "Control" in event.modifiers or "Meta" in event.modifiers
+                )
+                gel_marker_idx = self._hit_test_gel_marker(rec, x, y)
+
+                if rec.shape_type == RECTANGLE and rec.properties.get("gel_lane"):
+                    if has_ctrl_or_cmd and gel_marker_idx is not None:
+                        self._select_shape(layer, shape_id)
+                        self._remove_gel_marker(layer, shape_id, gel_marker_idx)
+                        return
+                    if "Shift" in event.modifiers:
+                        self._select_shape(layer, shape_id)
+                        self._add_gel_marker(layer, shape_id, y)
+                        return
+                    if gel_marker_idx is not None:
+                        self._select_shape(layer, shape_id)
+                        self._dragging_gel_marker_layer = layer
+                        self._dragging_gel_marker_shape_id = shape_id
+                        self._dragging_gel_marker_idx = gel_marker_idx
+                        self.view.camera.interactive = False
+                        self.canvas.update()
+                        return
 
                 # Polyline-specific shortcuts before drag init.
                 if rec.shape_type == POLYLINE:
@@ -3503,10 +3594,26 @@ class ImageWindow(QMainWindow):
             sx, sy = self.start_pos
             rec = layer.data.get(self._drawing_shape_id)
             if rec.shape_type == RECTANGLE and "Shift" in event.modifiers:
-                x, y = square_from_corner(sx, sy, x, y)
+                x, y = integer_square_from_corner(sx, sy, x, y)
             layer.data.update(self._drawing_shape_id, [sx, sy, x, y])
             layer.visual.update(layer.data, layer.selected_ids, self.t_idx, self.z_idx)
             self.canvas.update()
+
+        # 5a. Gel marker drag on a shape-backed lane.
+        if (
+            self._dragging_gel_marker_layer is not None
+            and self._dragging_gel_marker_shape_id is not None
+            and self._dragging_gel_marker_idx is not None
+            and event.button == 1
+        ):
+            _x, y = self._map_event_to_image(event)
+            self._move_gel_marker(
+                self._dragging_gel_marker_layer,
+                self._dragging_gel_marker_shape_id,
+                self._dragging_gel_marker_idx,
+                y,
+            )
+            return
 
         # 5b. Point-tool drag — update x/y of the dragged point in place
         # (no command pushed yet; we push a single MovePoint on release).
@@ -3561,7 +3668,7 @@ class ImageWindow(QMainWindow):
                         start_params, self._editing_shape_handle
                     )
                     if anchor is not None:
-                        nx, ny = square_from_corner(anchor[0], anchor[1], x, y)
+                        nx, ny = integer_square_from_corner(anchor[0], anchor[1], x, y)
                 _apply_handle_adjustment(rec, self._editing_shape_handle, nx, ny)
             # Notify subscribers (e.g. region-stats / line-profile dialogs)
             # so derived calculations refresh live during the drag.
@@ -3602,6 +3709,17 @@ class ImageWindow(QMainWindow):
         if self._drawing_shape_layer is not None:
             self._finalize_shape_drawing()
             self.view.camera.interactive = manager.active_tool == "pointer"
+
+        if self._dragging_gel_marker_layer is not None:
+            layer = self._dragging_gel_marker_layer
+            shape_id = self._dragging_gel_marker_shape_id
+            if shape_id is not None:
+                layer.data._emit("gel_marker_released", shape_id)
+            self._dragging_gel_marker_layer = None
+            self._dragging_gel_marker_shape_id = None
+            self._dragging_gel_marker_idx = None
+            if manager.active_tool == "pointer":
+                self.view.camera.interactive = True
 
         # Point drag finalization — push a single MovePoint command.
         if (

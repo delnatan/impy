@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
 
@@ -36,8 +36,8 @@ class DecondialogState:
     algorithm: str                          # "memsolve_mem" | "richardson_lucy"
 
     # Forward model — independent lateral (XY) and axial (Z) controls.
-    # deconlib's recipe registry currently derives detector domains from
-    # integer super-res factors, so the dialog exposes whole-number factors.
+    # Non-integer factors are implemented through deconlib's fractional
+    # integrated-detector operator; the shape is derived from data + margin.
     super_res_xy: float = 1.0
     super_res_z: float = 1.0
     pad_xy: int = 0                         # symmetric per lateral axis
@@ -88,22 +88,27 @@ class DecondialogState:
 def build_recipe(state: DecondialogState, ndim: int):
     """Translate `state` into a `deconlib.ForwardRecipe`.
 
-    The recipe's `super_res_factor` is informational (the actual hidden
-    shape lives in the geometry); we round per-axis floats to ints for
-    serialization. The recipe's `detector_padding` IS consumed by the
-    builder, so it's already integer.
+    Integer super-resolution uses deconlib's built-in ``super_res_idc``
+    recipe. Non-integer factors use pyvistra's registered
+    ``fractional_idc`` recipe, which derives detector integration from
+    geometry instead of from an integer ``super_res_factor``.
     """
     from deconlib import ForwardRecipe
 
     factor_tuple = _per_axis_factor(state, ndim)
     pad_tuple = _per_axis_pad(state, ndim)
-    _validate_integral_super_res(factor_tuple)
 
     is_super_res = any(abs(f - 1.0) > 1e-6 for f in factor_tuple)
     has_pad = any(p > 0 for p in pad_tuple)
     if is_super_res:
-        kind = "super_res_idc"
-        srf: Tuple[int, ...] = tuple(int(round(f)) for f in factor_tuple)
+        is_integral = all(abs(f - round(f)) <= 1e-6 for f in factor_tuple)
+        if is_integral:
+            kind = "super_res_idc"
+            srf: Tuple[int, ...] = tuple(int(round(f)) for f in factor_tuple)
+        else:
+            _ensure_fractional_idc_recipe_registered()
+            kind = "fractional_idc"
+            srf = ()
         pad: Tuple[int, ...] = pad_tuple
     else:
         kind = "fft_conv"
@@ -126,6 +131,207 @@ def build_recipe(state: DecondialogState, ndim: int):
         psf_source="embedded",
         icf=icf,
     )
+
+
+_FRACTIONAL_IDC_REGISTERED = False
+
+
+def _ensure_fractional_idc_recipe_registered() -> None:
+    """Register pyvistra's geometry-driven fractional IDC recipe once.
+
+    deconlib's built-in ``super_res_idc`` persists integer
+    ``super_res_factor`` values and reconstructs the detector domain by
+    exact division. This recipe uses the same low-level operator but takes
+    ``visible_shape`` and the low-resolution finite-detector padding from
+    ``BundleGeometry``/``ForwardRecipe`` instead, allowing ratios such as
+    1.25 or 1.5.
+    """
+    global _FRACTIONAL_IDC_REGISTERED
+    if _FRACTIONAL_IDC_REGISTERED:
+        return
+
+    try:
+        from deconlib import register_recipe
+    except ImportError:
+        # Unit tests may patch in a tiny fake deconlib module containing
+        # only ForwardRecipe. In the real workflow, prepare/run imports
+        # deconlib and this registration succeeds before the recipe is used.
+        return
+
+    @register_recipe("fractional_idc")
+    def _build_fractional_idc(args):
+        from deconlib.deconvolution.composition import as_numpy_op, compose
+        from deconlib.deconvolution.linops_mlx import (
+            FiniteDetector,
+            IntegratedDetectorConvolver,
+        )
+
+        visible_shape = tuple(args.geometry.visible_shape)
+        data_shape = tuple(args.geometry.data_shape)
+        recipe_padding = tuple(args.recipe.detector_padding or ())
+        if recipe_padding:
+            detector_domain_shape = tuple(
+                int(d) + 2 * int(p) for d, p in zip(data_shape, recipe_padding)
+            )
+        else:
+            detector_domain_shape = data_shape
+
+        detector_padding = _detector_padding_from_geometry(
+            data_shape=data_shape,
+            detector_domain_shape=detector_domain_shape,
+            recipe_padding=recipe_padding,
+        )
+        psf_arr = _resolve_psf_array(args)
+        idc = IntegratedDetectorConvolver(
+            kernel=psf_arr,
+            output_shape=detector_domain_shape,
+            normalize=True,
+            signal_shape=visible_shape,
+        )
+
+        if any(before or after for before, after in detector_padding):
+            detector = FiniteDetector(
+                detector_shape=data_shape,
+                padding=detector_padding,
+            )
+            blur_op = compose(detector, idc)
+        else:
+            blur_op = idc
+        R, Rt = as_numpy_op(blur_op)
+
+        icf_ops = _make_icf_ops(
+            args.recipe.icf,
+            visible_shape,
+            tuple(args.geometry.voxel_spacing),
+        )
+        _validate_icf_hidden_shape(args.geometry.hidden_shape, icf_ops, visible_shape)
+        return {"R": R, "Rt": Rt, "blur_op": blur_op, **icf_ops}
+
+    _FRACTIONAL_IDC_REGISTERED = True
+
+
+def _normalize_detector_padding(
+    padding: Tuple[Any, ...],
+    ndim: int,
+) -> Tuple[Tuple[int, int], ...]:
+    if not padding:
+        return tuple((0, 0) for _ in range(ndim))
+    if len(padding) != ndim:
+        raise ValueError("detector_padding length must match data_shape ndim")
+    pairs = []
+    for item in padding:
+        if isinstance(item, (tuple, list, np.ndarray)):
+            raise ValueError("detector_padding entries must be symmetric integers")
+        pad_i = int(item)
+        if pad_i < 0:
+            raise ValueError("detector_padding values must be non-negative")
+        pairs.append((pad_i, pad_i))
+    return tuple(pairs)
+
+
+def _detector_padding_from_geometry(
+    *,
+    data_shape: Tuple[int, ...],
+    detector_domain_shape: Tuple[int, ...],
+    recipe_padding: Tuple[Any, ...],
+) -> Tuple[Tuple[int, int], ...]:
+    if len(data_shape) != len(detector_domain_shape):
+        raise ValueError("data_shape and detector domain shape must have same ndim")
+    if any(v < d for d, v in zip(data_shape, detector_domain_shape)):
+        raise ValueError("detector domain shape cannot be smaller than data_shape")
+
+    explicit = _normalize_detector_padding(recipe_padding, len(data_shape))
+    if any(before or after for before, after in explicit):
+        expected = tuple(
+            int(d) + before + after
+            for d, (before, after) in zip(data_shape, explicit)
+        )
+        if expected != detector_domain_shape:
+            raise ValueError(
+                "detector_padding implies detector domain shape "
+                f"{expected}, but geometry implies {detector_domain_shape}"
+            )
+        return explicit
+
+    inferred = []
+    for d, v in zip(data_shape, detector_domain_shape):
+        extra = int(v) - int(d)
+        before = extra // 2
+        inferred.append((before, extra - before))
+    return tuple(inferred)
+
+
+def _resolve_psf_array(args) -> np.ndarray:
+    if args.psf is None:
+        raise ValueError(
+            f"recipe.kind={args.recipe.kind!r} requires an embedded PSF"
+        )
+    return np.asarray(args.psf.psf, dtype=np.float32)
+
+
+def _make_icf_ops(
+    spec: Optional[dict],
+    shape: Tuple[int, ...],
+    spacings: Tuple[float, ...],
+) -> dict[str, Any]:
+    if spec is None:
+        return {"C": None, "Ct": None}
+    kind = spec.get("kind")
+    if kind == "gaussian":
+        sigmas = tuple(float(s) for s in spec["sigmas_um"])
+        if len(sigmas) != len(shape):
+            raise ValueError(
+                f"ICF sigmas_um has {len(sigmas)} entries; expected {len(shape)}"
+            )
+        if len(spacings) != len(shape):
+            raise ValueError(
+                f"voxel_spacing has {len(spacings)} entries; expected {len(shape)}"
+            )
+        from deconlib.deconvolution import GaussianICF, as_numpy_op
+
+        icf_mlx = GaussianICF(
+            shape=shape,
+            sigmas=sigmas,
+            spacings=spacings,
+            normalize=True,
+        )
+        C, Ct = as_numpy_op(icf_mlx)
+        return {"C": C, "Ct": Ct}
+    if kind == "atrous":
+        from deconlib.deconvolution import AtrousTransform, as_numpy_op
+
+        levels = int(spec["levels"])
+        kernel = str(spec.get("kernel", "b3spline"))
+        axes = spec.get("axes")
+        axes_tuple = None if axes is None else tuple(int(a) for a in axes)
+        weights = spec.get("weights")
+        weights_arr = None if weights is None else np.asarray(weights, dtype=float)
+        transform = AtrousTransform(
+            levels=levels,
+            kernel=kernel,  # type: ignore[arg-type]
+            axes=axes_tuple,
+            weights=weights_arr,
+        )
+        C, Ct = as_numpy_op(transform)
+        return {
+            "C": C,
+            "Ct": Ct,
+            "entropy": "positive_negative",
+            "hidden_shape": transform.hidden_shape(shape),
+        }
+    raise ValueError(f"unknown ICF kind {kind!r}")
+
+
+def _validate_icf_hidden_shape(
+    hidden_shape: Tuple[int, ...],
+    icf_ops: dict[str, Any],
+    visible_shape: Tuple[int, ...],
+) -> None:
+    expected = tuple(icf_ops.get("hidden_shape", visible_shape))
+    if tuple(hidden_shape) != expected:
+        raise ValueError(
+            f"ICF expects hidden_shape {expected}, got {tuple(hidden_shape)}"
+        )
 
 
 def build_mem_config(state: DecondialogState):
@@ -152,8 +358,10 @@ def build_rl_config(state: DecondialogState):
     """
     from deconlib import RichardsonLucyConfig
 
-    factor_tuple = _per_axis_factor(state, ndim=2)  # axis count irrelevant here
-    is_super_res = any(abs(f - 1.0) > 1e-6 for f in factor_tuple)
+    is_super_res = (
+        abs(float(state.super_res_xy) - 1.0) > 1e-6
+        or abs(float(state.super_res_z) - 1.0) > 1e-6
+    )
     pad_any = state.pad_xy > 0 or state.pad_z > 0
     # "valid" cropping is meaningful whenever there is something to crop —
     # super-res, detector padding, or both. fft_conv (no sr, no pad) is the
@@ -228,6 +436,162 @@ class PreparedInputs:
     output_slices: Optional[Tuple[slice, ...]] = None
 
 
+def compact_psf_shape_for_data(
+    data_shape: Tuple[int, ...],
+    factor: Tuple[float, ...],
+    *,
+    min_shape: Tuple[int, ...] | None = None,
+    max_shape: Tuple[int, ...] | None = None,
+) -> Tuple[int, ...]:
+    """Return a compact odd PSF support shape at fine-grid sampling.
+
+    The PSF support is not the detector field and not the object domain. This
+    helper chooses a conservative compact default, bounded by the selected
+    data region so bead distillation can still use the same preset.
+    """
+    if len(data_shape) != len(factor):
+        raise ValueError("data_shape and factor must have the same ndim")
+    default_min = (17,) * len(data_shape)
+    default_max = (65,) * len(data_shape)
+    min_shape = default_min if min_shape is None else tuple(min_shape)
+    max_shape = default_max if max_shape is None else tuple(max_shape)
+    if len(min_shape) != len(data_shape) or len(max_shape) != len(data_shape):
+        raise ValueError("min_shape/max_shape must match data_shape ndim")
+
+    out = []
+    for d, f, n_min, n_max in zip(data_shape, factor, min_shape, max_shape):
+        # Roughly one quarter of the detector span on the fine grid, clipped to
+        # a compact default support and made odd so there is a clear centre.
+        target = int(round(float(d) * max(float(f), 1.0) / 4.0))
+        n = max(int(n_min), min(int(n_max), target))
+        n = min(n, int(round(float(d) * max(float(f), 1.0))))
+        n = max(1, n)
+        if n > 1 and n % 2 == 0:
+            n -= 1
+        out.append(n)
+    return tuple(out)
+
+
+def psf_support_radius(
+    psf_array: np.ndarray,
+    *,
+    dc_corner: bool = True,
+    energy_fraction: float = 0.995,
+) -> Tuple[int, ...]:
+    """Estimate per-axis positive PSF support radius in PSF pixels."""
+    psf = np.asarray(psf_array, dtype=np.float32)
+    if psf.ndim == 0:
+        return ()
+    if not np.all(np.isfinite(psf)):
+        raise ValueError("PSF contains NaN or Inf values")
+    h = np.maximum(psf, 0.0)
+    total = float(np.sum(h, dtype=np.float64))
+    if total <= 0.0:
+        return tuple(0 for _ in range(psf.ndim))
+
+    frac = min(max(float(energy_fraction), 0.0), 1.0)
+    radii: list[int] = []
+    for axis, n in enumerate(psf.shape):
+        reduce_axes = tuple(i for i in range(psf.ndim) if i != axis)
+        marginal = np.sum(h, axis=reduce_axes, dtype=np.float64)
+        idx = np.arange(n)
+        if dc_corner:
+            dist = np.minimum(idx, n - idx)
+        else:
+            dist = np.abs(idx - (n // 2))
+        order = np.argsort(dist, kind="stable")
+        cumulative = np.cumsum(marginal[order])
+        threshold = frac * total
+        hit = int(np.searchsorted(cumulative, threshold, side="left"))
+        hit = min(hit, len(order) - 1)
+        radii.append(int(dist[order[hit]]))
+    return tuple(radii)
+
+
+def object_margin_from_psf_support(
+    psf_radius: Tuple[int, ...],
+    factor: Tuple[float, ...],
+    data_shape: Tuple[int, ...],
+    *,
+    max_fraction: float = 0.10,
+    max_margin: int = 32,
+) -> Tuple[int, ...]:
+    """Convert fine-grid PSF radii to bounded detector-pixel object margins."""
+    if not (len(psf_radius) == len(factor) == len(data_shape)):
+        raise ValueError("psf_radius, factor, and data_shape must have same ndim")
+    out = []
+    for r, f, d in zip(psf_radius, factor, data_shape):
+        raw = int(np.ceil(max(int(r), 0) / max(float(f), 1.0)))
+        cap = max(0, min(int(max_margin), int(np.floor(max_fraction * int(d)))))
+        out.append(min(raw, cap))
+    return tuple(out)
+
+
+def linear_convolution_shape(
+    signal_shape: Tuple[int, ...],
+    kernel_shape: Tuple[int, ...],
+) -> Tuple[int, ...]:
+    """Minimum canvas shape for non-circular convolution.
+
+    This is a computational canvas: it is large enough for a signal of
+    ``signal_shape`` and a PSF/kernel of ``kernel_shape`` to convolve
+    without wrap-around. It does not add unknown object pixels; the
+    modeled object/visible domain is still ``signal_shape``.
+    """
+    if len(signal_shape) != len(kernel_shape):
+        raise ValueError(
+            "signal_shape and kernel_shape must have the same dimensionality"
+        )
+    return tuple(
+        max(1, int(n)) + max(1, int(m)) - 1
+        for n, m in zip(signal_shape, kernel_shape)
+    )
+
+
+def _prepare_psf_kernel(psf_array: np.ndarray) -> np.ndarray:
+    """Return a finite, nonnegative, unit-flux PSF for positive solvers."""
+    psf = np.asarray(psf_array, dtype=np.float32)
+    if not np.all(np.isfinite(psf)):
+        raise ValueError("PSF contains NaN or Inf values")
+
+    min_value = float(psf.min()) if psf.size else 0.0
+    negative_count = int(np.count_nonzero(psf < 0))
+    if negative_count:
+        log.warning(
+            "PSF contains %d negative values (min %.6g); clipping to zero "
+            "before normalization for positive deconvolution",
+            negative_count, min_value,
+        )
+        psf = np.maximum(psf, 0.0)
+
+    total = float(np.sum(psf, dtype=np.float64))
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("PSF must have positive finite flux after clipping")
+    return np.ascontiguousarray(psf / total, dtype=np.float32)
+
+
+def _prepare_observation(state: DecondialogState, y_obs: np.ndarray) -> np.ndarray:
+    """Validate data and enforce nonnegative support for Poisson solvers."""
+    y = np.ascontiguousarray(y_obs, dtype=np.float32)
+    if not np.all(np.isfinite(y)):
+        raise ValueError("Observation contains NaN or Inf values")
+
+    uses_poisson = (
+        state.algorithm == "richardson_lucy"
+        or state.likelihood == "poisson"
+    )
+    if uses_poisson:
+        negative_count = int(np.count_nonzero(y < 0))
+        if negative_count:
+            log.warning(
+                "observation contains %d negative values (min %.6g); "
+                "clipping to zero for Poisson deconvolution",
+                negative_count, float(y.min()),
+            )
+            y = np.maximum(y, 0.0).astype(np.float32, copy=False)
+    return y
+
+
 def prepare_inputs(
     *,
     state: DecondialogState,
@@ -289,7 +653,7 @@ def prepare_inputs(
             "the current super-res factors and detector padding (use the "
             "“Compute PSF…” button)."
         )
-    psf_padded = np.asarray(psf_array, dtype=np.float32)
+    psf_padded = _prepare_psf_kernel(psf_array)
 
     # The PSF is supplied at hidden-grid sampling (this is what the
     # "Compute PSF…" preset produces, dividing the data spacing by the
@@ -310,7 +674,7 @@ def prepare_inputs(
         pixel_size=voxel_spacing,
     )
 
-    y = np.ascontiguousarray(y_obs, dtype=np.float32)
+    y = _prepare_observation(state, y_obs)
     # Keep the default model flat, but preserve the observed total
     # intensity when the hidden grid has more pixels due to super-res
     # and/or detector padding.
@@ -389,9 +753,8 @@ def output_5d_shape(state: DecondialogState, data_shape: Tuple[int, ...], n_chan
 
     When ``state.return_region == "valid"`` and the reconstruction
     extends beyond the detector field, the output is cropped to the
-    detector field on the fine grid — i.e. ``round(data * factor)`` per
-    axis — so the output buffer must be sized to that crop, not to
-    ``hidden_shape``.
+    detector field on the fine grid, so the output buffer must be sized
+    to that crop, not to ``hidden_shape``.
     Applies to both MEM (cropped manually in the worker) and RL
     (cropped by deconlib via ``RichardsonLucyConfig.return_region``).
     """
@@ -404,7 +767,11 @@ def output_5d_shape(state: DecondialogState, data_shape: Tuple[int, ...], n_chan
     if not (is_super_res or has_pad):
         out = tuple(data_shape)
     elif state.return_region == "valid":
-        out = tuple(int(round(d * f)) for d, f in zip(data_shape, factor_tuple))
+        slices = valid_slices_for_state(state, data_shape)
+        if slices is None:
+            out = tuple(data_shape)
+        else:
+            out = tuple(int(s.stop) - int(s.start) for s in slices)
     else:
         out = expected_hidden_shape(state, data_shape)
 
@@ -433,16 +800,6 @@ def _per_axis_pad(state: DecondialogState, ndim: int) -> Tuple[int, ...]:
     if ndim == 3:
         return (pz, pxy, pxy)
     return (pxy, pxy)
-
-
-def _validate_integral_super_res(factors: Tuple[float, ...]) -> None:
-    if any(abs(float(f) - round(float(f))) > 1e-6 for f in factors):
-        pretty = " × ".join(f"{float(f):g}" for f in factors)
-        raise ValueError(
-            "Super-res factors must be whole numbers with the current "
-            f"deconlib recipe builder (got {pretty}). Choose 1, 2, 3, ... "
-            "or disable super-res."
-        )
 
 
 def _fit_psf_corner(psf: np.ndarray, target_shape: Tuple[int, ...]) -> np.ndarray:

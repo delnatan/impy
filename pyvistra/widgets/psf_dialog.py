@@ -509,7 +509,8 @@ class PSFComputeDialog(QDialog):
         """Pre-fill output shape, spacing and optics from external context.
 
         Used by the deconvolution dialog to spawn a PSF compute dialog
-        already sized to the recipe's hidden-grid expectations. Any
+        already sampled on the recipe's fine/object grid. The PSF shape
+        is kernel support, not the deconvolution object canvas; any
         keyword left as None is untouched.
 
         `shape` is `(Nz, Ny, Nx)` (3D) or `(Ny, Nx)` (2D).

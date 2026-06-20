@@ -19,10 +19,6 @@ from qtpy.QtWidgets import (
 from vispy import app
 
 from .._version import get_version
-from .annotation_manager import (
-    annotation_manager_exists,
-    get_annotation_manager,
-)
 from ..apps.console import console_exists, get_console
 from .manager import manager
 
@@ -154,21 +150,8 @@ class Toolbar(QMainWindow):
         self.tools.addAction(self.act_brush)
         self.tools.addAction(self.act_eraser)
 
-        # Manager Button
-        self.tools.addSeparator()
-        self.act_annotation_mgr = QAction(
-            self._load_tool_icon(
-                "annotations",
-                self.style().standardIcon(QStyle.SP_FileDialogContentsView),
-            ),
-            "",
-            self,
-        )
-        self.act_annotation_mgr.setToolTip("Annotations")
-        self.act_annotation_mgr.triggered.connect(self.show_annotation_manager)
-        self.tools.addAction(self.act_annotation_mgr)
-
         # Layer Manager Button (unified shapes/points/tracks/labels panel)
+        self.tools.addSeparator()
         self.act_layer_mgr = QAction(
             self._load_tool_icon(
                 "layers",
@@ -236,6 +219,11 @@ class Toolbar(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        analyze_menu = menubar.addMenu("Analyze")
+        gel_action = QAction("Gel Analyzer...", self)
+        gel_action.triggered.connect(self.show_gel_analyzer)
+        analyze_menu.addAction(gel_action)
+
         manager.tool_changed.connect(self._on_tool_changed)
         self._on_tool_changed(manager.active_tool)
 
@@ -273,15 +261,15 @@ class Toolbar(QMainWindow):
         label = self._tool_labels.get(tool_name, tool_name.title())
         self.mode_indicator.setText(f"Mode: {label}")
 
-    def show_annotation_manager(self):
-        mgr = get_annotation_manager()
-        mgr.show()
-        mgr.raise_()
-
     def show_layer_manager(self):
         from .layer_manager import show_layer_manager
 
         show_layer_manager()
+
+    def show_gel_analyzer(self):
+        from ..apps.gel_analyzer import show_gel_analyzer
+
+        show_gel_analyzer(manager)
 
     def show_console(self):
         console = get_console()
@@ -383,14 +371,6 @@ class Toolbar(QMainWindow):
             self.spawn_viewer(fname)
 
     def closeEvent(self, event):
-        # Signal Annotation Manager to stop processing updates BEFORE closing windows
-        if annotation_manager_exists():
-            try:
-                mgr = get_annotation_manager()
-                mgr.cleanup()
-            except Exception:
-                pass
-
         # Signal Line Profile dialog to stop processing updates
         from ..widgets import (
             get_line_profile_dialog,

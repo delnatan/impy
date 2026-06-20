@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none">
+  <!-- Back layers -->
+  <path d="M4 13.5 12 18l8-4.5"
+        fill="none" stroke="#e0e0e0" stroke-width="1.5"
+        stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.62"/>
+  <path d="M4 9.5 12 14l8-4.5"
+        fill="none" stroke="#e0e0e0" stroke-width="1.5"
+        stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.78"/>
+  <!-- Front layer -->
+  <path d="M12 3.5 21 8.5 12 13.5 3 8.5 12 3.5Z"
+        fill="#e0e0e0" fill-opacity="0.08"
+        stroke="#e0e0e0" stroke-width="1.5"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Small selected item chip -->
+  <circle cx="12" cy="8.5" r="1.5" fill="#e0e0e0" fill-opacity="0.9"/>
+</svg>

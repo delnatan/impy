@@ -270,10 +270,7 @@ class RLDeconvolutionWorker(QObject):
         try:
             import mlx.core as mx
             from deconlib.deconvolution import richardson_lucy_with_operator
-            from deconlib.workflow import (
-                RichardsonLucyResult,
-                _blur_op_from_recipe,
-            )
+            from deconlib.workflow import RichardsonLucyResult
 
             log.info(
                 "RL run: y=%s hidden=%s psf=%s num_iter=%d "
@@ -286,7 +283,7 @@ class RLDeconvolutionWorker(QObject):
             self.status.emit("Running Richardson–Lucy…")
             self.progress.emit(0, self._rl_config.num_iter)
 
-            blur_op = _blur_op_from_recipe(
+            blur_op = _build_blur_op_from_recipe(
                 self._p.recipe,
                 psf=self._p.psf,
                 optics=self._p.optics,
@@ -296,6 +293,7 @@ class RLDeconvolutionWorker(QObject):
 
             def callback(iteration: int, estimate) -> bool:
                 restored = np.asarray(estimate, dtype=np.float32)
+                _raise_if_nonfinite(restored, "Richardson-Lucy estimate")
                 if self._p.output_slices is not None:
                     restored = restored[self._p.output_slices]
                 _write_to_buffer(
@@ -322,6 +320,7 @@ class RLDeconvolutionWorker(QObject):
             )
 
             restored_np = np.asarray(rl_result.restored, dtype=np.float32)
+            _raise_if_nonfinite(restored_np, "Richardson-Lucy result")
             full_for_pred_mx = mx.array(np.asarray(rl_result.restored, dtype=np.float32))
             if (
                 self._rl_config.return_region == "valid"
@@ -369,6 +368,53 @@ class RLDeconvolutionWorker(QObject):
 
 # --------------------------------------------------------------------------- #
 # Helpers
+
+def _build_blur_op_from_recipe(
+    recipe,
+    *,
+    psf,
+    optics,
+    geometry,
+    likelihood: str,
+):
+    """Build the MLX blur operator through deconlib's public recipe registry."""
+    from deconlib import OperatorFactoryArgs, RECIPE_REGISTRY
+
+    try:
+        builder = RECIPE_REGISTRY[recipe.kind]
+    except KeyError as exc:
+        registered = ", ".join(sorted(RECIPE_REGISTRY)) or "(none)"
+        raise KeyError(
+            f"no recipe builder registered for kind={recipe.kind!r}. "
+            f"Registered kinds: {registered}."
+        ) from exc
+
+    args = OperatorFactoryArgs(
+        psf=psf,
+        optics=optics,
+        geometry=geometry,
+        recipe=recipe,
+        likelihood=likelihood,
+    )
+    ops = builder(args)
+    blur_op = ops.get("blur_op")
+    if blur_op is None:
+        raise ValueError(
+            f"recipe.kind={recipe.kind!r} does not expose an MLX blur_op; "
+            "Richardson-Lucy requires one."
+        )
+    return blur_op
+
+
+def _raise_if_nonfinite(arr: np.ndarray, label: str) -> None:
+    nan_count = int(np.isnan(arr).sum())
+    inf_count = int(np.isinf(arr).sum())
+    if nan_count or inf_count:
+        raise ValueError(
+            f"{label} contains {nan_count} NaN and {inf_count} Inf values; "
+            "the solver diverged before producing a usable result"
+        )
+
 
 def _write_to_buffer(
     buffer, arr: np.ndarray, *, channel: int = 0, log_stats: bool = True

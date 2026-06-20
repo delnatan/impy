@@ -22,6 +22,8 @@ from pyvistra.data.shapes import (
     ShapeData,
     get_handles,
     get_outline,
+    integer_square_from_corner,
+    rectangle_bounds,
 )
 from pyvistra.layers.commands import UndoStack
 
@@ -47,6 +49,17 @@ def test_rectangle_params_snap_to_integer_pixels():
 
     sd.update(sid, [1.4, 2.5, 9.6, 10.2])
     np.testing.assert_allclose(sd.get(sid).params[:4], [1, 2, 10, 10])
+
+
+def test_rectangle_bounds_round_legacy_float_payloads_consistently():
+    sd = ShapeData()
+    sid = sd.add(RECTANGLE, [0, 0, 1, 1])
+    rec = sd.get(sid)
+    rec.params[:4] = [10.2, 20.6, 93.2, 103.6]
+
+    assert rectangle_bounds(rec) == (10, 21, 93, 104)
+    x0, y0, x1, y1 = rectangle_bounds(rec, (80, 90))
+    assert (x0, y0, x1, y1) == (10, 21, 90, 80)
 
 
 def test_shape_data_remove():
@@ -134,6 +147,12 @@ def test_get_outline_line():
     sid = sd.add(LINE, [0, 0, 100, 100])
     outline = get_outline(sd.get(sid))
     assert outline.shape == (2, 2)
+
+
+def test_integer_square_from_corner_preserves_equal_integer_side():
+    x, y = integer_square_from_corner(10.2, 20.7, 93.8, 102.1)
+    assert (x, y) == (94.0, 105.0)
+    assert abs(x - round(10.2)) == abs(y - round(20.7))
 
 
 # ---------------------------------------------------------------------------

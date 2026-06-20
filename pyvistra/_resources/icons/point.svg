@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none">
+  <!-- Point target -->
+  <circle cx="12" cy="12" r="4.2"
+          fill="#e0e0e0" fill-opacity="0.12"
+          stroke="#e0e0e0" stroke-width="1.5"/>
+  <circle cx="12" cy="12" r="2" fill="#e0e0e0"/>
+  <!-- Crosshair ticks -->
+  <line x1="12" y1="3" x2="12" y2="6.5" stroke="#e0e0e0" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="12" y1="17.5" x2="12" y2="21" stroke="#e0e0e0" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="3" y1="12" x2="6.5" y2="12" stroke="#e0e0e0" stroke-width="1.5" stroke-linecap="round"/>
+  <line x1="17.5" y1="12" x2="21" y2="12" stroke="#e0e0e0" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

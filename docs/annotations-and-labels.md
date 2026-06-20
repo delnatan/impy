@@ -2,45 +2,44 @@
 
 This section covers script-friendly annotation patterns. Task-specific workflows such as gel analysis are intentionally GUI-centric and described separately.
 
-## Open the annotation manager in interactive sessions
+## Work with shape annotations
 
 ```python
 from pyvistra.io import load_image
-from pyvistra import imshow, show_annotation_manager
+from pyvistra import imshow
+from pyvistra.data.shapes import RECTANGLE, rectangle_bounds
 
 data, meta = load_image("input.ims")
 viewer = imshow(data, meta)
-annotation_mgr = show_annotation_manager(viewer)
 
-# You can also open it from the window instance:
-# annotation_mgr = viewer.show_annotation_manager()
-
-# After drawing ROIs in the viewer, inspect them from Python
-rois = viewer.rois
-print(len(rois))
+# After drawing shapes in the viewer, inspect them from Python.
+shape_layers = viewer.layers.by_type("shapes")
+print(sum(len(layer.data) for layer in shape_layers))
 ```
 
-### Rectangle ROI example
+### Rectangle shape example
 
 ```python
 cache = viewer.renderer.current_slice_cache  # (C, Y, X)
-rect = viewer.rois[0]
-crop = rect.get_region(cache)                # (C, h, w)
+layer = viewer.layers.active("shapes")
+sid = layer.data.shape_ids[0]
+rec = layer.data.get(sid)
+
+if rec.shape_type == RECTANGLE:
+    x0, y0, x1, y1 = rectangle_bounds(rec, cache.shape[-2:])
+    crop = cache[:, y0:y1, x0:x1]            # (C, h, w)
 ```
 
-### Circle ROI example
+### Other shape types
 
 ```python
-circle = viewer.rois[1]
-region, mask = circle.get_region(cache)
-mean_per_channel = [region[c][mask].mean() for c in range(region.shape[0])]
-```
+from pyvistra.data.shapes import CIRCLE, LINE, get_outline
 
-### Line ROI example
-
-```python
-line = viewer.rois[2]
-profile = line.get_profile(cache)            # (C, n_points)
+for sid in layer.data.shape_ids:
+    rec = layer.data.get(sid)
+    if rec.shape_type in (CIRCLE, LINE):
+        outline_xy = get_outline(rec)
+        print(rec.label, outline_xy.shape)
 ```
 
 ## Sparse label files
@@ -65,7 +64,7 @@ Supported extensions:
 Use `PointTable` to store per-point localization data (position + properties):
 
 ```python
-from pyvistra.points import PointTable
+from pyvistra.data.points import PointTable
 
 points = PointTable.from_arrays(
     x=[32.4, 80.1],
@@ -81,7 +80,9 @@ points = PointTable.from_arrays(
 viewer.add_point_layer("Peaks", points=points)
 ```
 
-Point layers can also be loaded/saved from the Annotation Manager as CSV/JSON.
+Point tables can also be loaded/saved as CSV/JSON with
+`load_points_csv`, `load_points_json`, `save_points_csv`, and
+`save_points_json` from `pyvistra.data.points`.
 
 ### Point layer styling and metadata
 

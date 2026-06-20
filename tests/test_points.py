@@ -2,13 +2,13 @@ import json
 
 import numpy as np
 
-from pyvistra.ui.annotation_manager import AnnotationManager
-from pyvistra.data.points import PointTable
-
-
-def _mgr_stub():
-    # Parser/save helpers do not rely on QWidget state.
-    return AnnotationManager.__new__(AnnotationManager)
+from pyvistra.data.points import (
+    PointTable,
+    load_points_csv,
+    load_points_json,
+    save_points_csv,
+    save_points_json,
+)
 
 
 def test_point_table_required_only_defaults():
@@ -127,7 +127,6 @@ def test_point_table_dataframe_roundtrip_with_properties():
 
 
 def test_point_csv_json_roundtrip_preserves_properties(tmp_path):
-    mgr = _mgr_stub()
     points = PointTable.from_arrays(
         point_id=[1, 2],
         t=[0, 1],
@@ -140,11 +139,11 @@ def test_point_csv_json_roundtrip_preserves_properties(tmp_path):
     csv_path = tmp_path / "points.csv"
     json_path = tmp_path / "points.json"
 
-    mgr._save_points_to_csv(str(csv_path), points)
-    mgr._save_points_to_json(str(json_path), points)
+    save_points_csv(str(csv_path), points)
+    save_points_json(str(json_path), points)
 
-    csv_loaded = mgr._load_points_from_csv(str(csv_path))
-    json_loaded = mgr._load_points_from_json(str(json_path))
+    csv_loaded = load_points_csv(str(csv_path))
+    json_loaded = load_points_json(str(json_path))
 
     assert csv_loaded.n_rows == points.n_rows
     assert csv_loaded.point_id.tolist() == [1, 2]
@@ -158,7 +157,6 @@ def test_point_csv_json_roundtrip_preserves_properties(tmp_path):
 
 
 def test_point_json_dict_of_columns(tmp_path):
-    mgr = _mgr_stub()
     data = {
         "x": [1.0, 2.0],
         "y": [3.0, 4.0],
@@ -171,7 +169,7 @@ def test_point_json_dict_of_columns(tmp_path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f)
 
-    points = mgr._load_points_from_json(str(path))
+    points = load_points_json(str(path))
 
     assert points.point_id.tolist() == [9, 10]
     assert points.t.tolist() == [0, 1]

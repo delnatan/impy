@@ -38,6 +38,8 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..data.shapes import rectangle_bounds
+
 
 class RegionSelector(QGroupBox):
     """Group box exposing an optional rectangle bbox + Z range.
@@ -174,12 +176,9 @@ class RegionSelector(QGroupBox):
                     rec = data.get(sid)
                     if rec.shape_type != "rectangle":
                         continue
-                    p = rec.params
-                    x1, y1, x2, y2 = float(p[0]), float(p[1]), float(p[2]), float(p[3])
-                    x0i = int(max(0, min(x1, x2)))
-                    x1i = int(max(x1, x2))
-                    y0i = int(max(0, min(y1, y2)))
-                    y1i = int(max(y1, y2))
+                    img = getattr(self._source, "img_data", None)
+                    yx_shape = getattr(img, "shape", None)
+                    x0i, y0i, x1i, y1i = rectangle_bounds(rec, yx_shape)
                     if y1i <= y0i or x1i <= x0i:
                         continue
                     bbox = (y0i, x0i, y1i, x1i)

@@ -71,7 +71,6 @@ pyvistra/
 │   ├── window.py            # ImageWindow (main viewer)
 │   ├── toolbar.py           # Toolbar
 │   ├── manager.py           # WindowManager singleton
-│   ├── annotation_manager.py # AnnotationManager
 │   ├── label_manager.py     # LabelManager
 │   └── layer_manager.py     # Unified LayerManager (new)
 │
@@ -256,7 +255,7 @@ Each `ImageWindow` owns a `LayerList` at `self.layers`. Methods like `add_shape_
 ### ROI System (Legacy)
 
 The legacy ROI system in `rois.py` is being replaced by `data/shapes.py` + `visuals/shapes.py`. During migration, both coexist:
-- Legacy: `rois.py` ROI subclasses with coupled geometry+visuals, `AnnotationManager`
+- Legacy: `rois.py` ROI subclasses with coupled geometry+visuals
 - New: `ShapeData` (pure data) + `ShapeLayerVisual` (pure renderer) + `LayerManager`
 
 ## Development Guidelines

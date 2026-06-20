@@ -43,7 +43,7 @@ from qtpy.QtWidgets import (
 )
 
 from pyvistra.ui.manager import manager
-from pyvistra.data.shapes import RECTANGLE
+from pyvistra.data.shapes import RECTANGLE, rectangle_bounds
 
 from .output_selector import ImageOutputSelector
 from .processing_helper import BufferProcessingRunner
@@ -54,9 +54,13 @@ from .decon_recipe import (
     build_posterior,
     build_rl_config,
     build_wavelet_config,
+    compact_psf_shape_for_data,
+    linear_convolution_shape,
     log,
+    object_margin_from_psf_support,
     output_5d_shape,
     prepare_inputs,
+    psf_support_radius,
 )
 from .deconvolution_worker import (
     MemDeconvolutionWorker,
@@ -81,6 +85,7 @@ class DeconvolutionDialog(QDialog):
         self._last_icf_sigma_um: Optional[float] = None
         self._running_status_base: Optional[str] = None
         self._run_started_at: Optional[float] = None
+        self._syncing_margin_from_psf = False
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._refresh_running_status)
@@ -294,8 +299,8 @@ class DeconvolutionDialog(QDialog):
         self.compute_psf_btn = QPushButton("Compute PSF…")
         self.compute_psf_btn.setToolTip(
             "Open the Compute PSF dialog with shape, spacing, and optics "
-            "pre-filled for the current ROI, super-res factor, and detector "
-            "padding."
+            "pre-filled for the current fine-grid sampling. PSF support is "
+            "editable and does not need to match the object canvas."
         )
         self.compute_psf_btn.clicked.connect(self._spawn_psf_dialog)
         compute_layout.addWidget(self.compute_psf_btn)
@@ -360,27 +365,29 @@ class DeconvolutionDialog(QDialog):
         sr_layout.setContentsMargins(0, 0, 0, 0)
         sr_layout.setSpacing(6)
         sr_layout.addWidget(QLabel("XY ×:"))
-        self.sr_xy_spin = QSpinBox()
-        self.sr_xy_spin.setRange(1, 8)
-        self.sr_xy_spin.setSingleStep(1)
-        self.sr_xy_spin.setValue(1)
+        self.sr_xy_spin = QDoubleSpinBox()
+        self.sr_xy_spin.setRange(1.0, 8.0)
+        self.sr_xy_spin.setDecimals(3)
+        self.sr_xy_spin.setSingleStep(0.25)
+        self.sr_xy_spin.setValue(1.0)
         self.sr_xy_spin.setFixedWidth(72)
         self.sr_xy_spin.valueChanged.connect(self._on_sr_changed)
         self.sr_xy_spin.setToolTip(
             "Fine-grid reconstruction factor in X/Y. 1 keeps native "
-            "camera sampling; whole-number values above 1 use detector-area integration."
+            "camera sampling; fractional values use detector-area integration."
         )
         sr_layout.addWidget(self.sr_xy_spin)
         sr_layout.addSpacing(10)
         sr_layout.addWidget(QLabel("Z ×:"))
-        self.sr_z_spin = QSpinBox()
-        self.sr_z_spin.setRange(1, 8)
-        self.sr_z_spin.setSingleStep(1)
-        self.sr_z_spin.setValue(1)
+        self.sr_z_spin = QDoubleSpinBox()
+        self.sr_z_spin.setRange(1.0, 8.0)
+        self.sr_z_spin.setDecimals(3)
+        self.sr_z_spin.setSingleStep(0.25)
+        self.sr_z_spin.setValue(1.0)
         self.sr_z_spin.setFixedWidth(72)
         self.sr_z_spin.valueChanged.connect(self._on_sr_changed)
         self.sr_z_spin.setToolTip(
-            "Axial fine-grid factor for 3D data. Disabled for single-plane data."
+            "Axial fine-grid ratio for 3D data. Disabled for single-plane data."
         )
         if not is_3d:
             # ndim=2 recipe path drops sr_z entirely; disable so the user
@@ -393,10 +400,11 @@ class DeconvolutionDialog(QDialog):
         sr_layout.addStretch()
         fm_form.addRow("Super-res:", sr_row)
 
-        self.margin_check = QCheckBox("Model signal just outside detector")
+        self.margin_check = QCheckBox("Model object outside detector")
         self.margin_check.setToolTip(
-            "Adds an unknown border around the measured detector field so "
-            "edge photons can be explained without wrap-around artifacts."
+            "Adds unknown visible/object pixels around the measured detector "
+            "field so edge photons can be explained by signal outside the "
+            "recorded boundary."
         )
         self.margin_check.setChecked(True)
         self.margin_check.toggled.connect(self._on_margin_toggled)
@@ -406,14 +414,17 @@ class DeconvolutionDialog(QDialog):
         pad_layout = QHBoxLayout(pad_row)
         pad_layout.setContentsMargins(0, 0, 0, 0)
         pad_layout.setSpacing(6)
-        # Pad defaults: pick non-zero values so the first call to
-        # "Compute PSF…" already passes a padded shape to the PSF dialog.
+        # Non-zero defaults make edge modeling available immediately.
+        # This margin expands the unknown object domain; it is not the
+        # PSF support and is not the FFT padding canvas.
         pad_layout.addWidget(QLabel("XY:"))
         self.pad_xy_spin = QSpinBox()
         self.pad_xy_spin.setRange(0, 256)
         self.pad_xy_spin.setValue(16)
         self.pad_xy_spin.setFixedWidth(56)
-        self.pad_xy_spin.setToolTip("Symmetric lateral margin in camera pixels.")
+        self.pad_xy_spin.setToolTip(
+            "Symmetric lateral object margin, measured in camera pixels."
+        )
         self.pad_xy_spin.valueChanged.connect(self._on_margin_value_changed)
         pad_layout.addWidget(self.pad_xy_spin)
         pad_layout.addSpacing(10)
@@ -422,7 +433,9 @@ class DeconvolutionDialog(QDialog):
         self.pad_z_spin.setRange(0, 256)
         self.pad_z_spin.setValue(4 if is_3d else 0)
         self.pad_z_spin.setFixedWidth(56)
-        self.pad_z_spin.setToolTip("Symmetric axial margin in camera pixels.")
+        self.pad_z_spin.setToolTip(
+            "Symmetric axial object margin, measured in camera pixels."
+        )
         self.pad_z_spin.valueChanged.connect(self._on_margin_value_changed)
         if not is_3d:
             # ndim=2 recipe path drops pad_z; lock to 0 to match the recipe.
@@ -432,10 +445,13 @@ class DeconvolutionDialog(QDialog):
             )
         pad_layout.addWidget(self.pad_z_spin)
         self.margin_auto_btn = QPushButton("Auto")
+        self.margin_auto_btn.setCheckable(True)
+        self.margin_auto_btn.setChecked(True)
         self.margin_auto_btn.setToolTip(
-            "Use half of the selected PSF kernel size as the finite-detector margin."
+            "Estimate a bounded object margin from the selected PSF's positive "
+            "support. PSF array size itself is not used as the margin."
         )
-        self.margin_auto_btn.clicked.connect(self._auto_margin_from_psf)
+        self.margin_auto_btn.clicked.connect(self._on_margin_auto_clicked)
         pad_layout.addWidget(self.margin_auto_btn)
         pad_layout.addStretch()
         self._margin_row_widget = pad_row
@@ -448,7 +464,7 @@ class DeconvolutionDialog(QDialog):
         region_layout = QHBoxLayout(region_row)
         region_layout.setContentsMargins(0, 0, 0, 0)
         region_layout.setSpacing(8)
-        self.region_full_radio = QRadioButton("Full canvas")
+        self.region_full_radio = QRadioButton("Full object")
         self.region_full_radio.setChecked(True)
         self.region_valid_radio = QRadioButton("Detector field")
         region_layout.addWidget(self.region_full_radio)
@@ -461,7 +477,7 @@ class DeconvolutionDialog(QDialog):
             lambda *_: self._refresh_workflow_summary()
         )
         self.region_full_radio.setToolTip(
-            "Keep the full reconstructed domain, including any finite-detector margin."
+            "Keep the full reconstructed object domain, including any margin."
         )
         self.region_valid_radio.setToolTip(
             "Crop the result to the measured detector field after convergence."
@@ -595,7 +611,7 @@ class DeconvolutionDialog(QDialog):
         diag_grp.setCheckable(True)
         diag_grp.setChecked(False)
         diag_grp.setToolTip(
-            "Shows derived array sizes, including the computed FFT canvas. "
+            "Shows derived array sizes, including the convolution canvas. "
             "There is no manual FFT padding control."
         )
         diag_form = QFormLayout(diag_grp)
@@ -603,18 +619,21 @@ class DeconvolutionDialog(QDialog):
         diag_form.setVerticalSpacing(3)
         diag_form.setContentsMargins(8, 6, 8, 6)
         self.detector_domain_label = QLabel("—")
-        self.hidden_canvas_label = QLabel("—")
+        self.object_domain_label = QLabel("—")
         self.psf_kernel_label = QLabel("—")
+        self.linear_canvas_label = QLabel("—")
         self.fft_canvas_label = QLabel("—")
-        diag_form.addRow("Detector domain:", self.detector_domain_label)
-        diag_form.addRow("Hidden canvas:", self.hidden_canvas_label)
+        diag_form.addRow("Detector field:", self.detector_domain_label)
+        diag_form.addRow("Object domain:", self.object_domain_label)
         diag_form.addRow("PSF kernel:", self.psf_kernel_label)
+        diag_form.addRow("Linear conv min:", self.linear_canvas_label)
         diag_form.addRow("FFT canvas:", self.fft_canvas_label)
         self._diagnostics_group = diag_grp
         self._diagnostics_widgets = [
             self.detector_domain_label,
-            self.hidden_canvas_label,
+            self.object_domain_label,
             self.psf_kernel_label,
+            self.linear_canvas_label,
             self.fft_canvas_label,
         ]
         diag_grp.toggled.connect(self._on_diagnostics_toggled)
@@ -772,29 +791,79 @@ class DeconvolutionDialog(QDialog):
         self.margin_auto_btn.setEnabled(bool(checked))
         is_3d = self.viewer.img_data.shape[1] > 1
         self.pad_z_spin.setEnabled(bool(checked) and is_3d)
+        if (
+            checked
+            and self.margin_auto_btn.isChecked()
+            and not self._syncing_margin_from_psf
+        ):
+            self._auto_margin_from_psf(show_warning=False)
         self._refresh_workflow_summary()
 
     def _on_margin_value_changed(self, _value) -> None:
+        if not self._syncing_margin_from_psf and self.margin_auto_btn.isChecked():
+            self.margin_auto_btn.setChecked(False)
         self._refresh_workflow_summary()
         win = self.psf_combo.currentData()
         if win is not None:
             self._check_scale_match(win)
 
-    def _auto_margin_from_psf(self) -> None:
-        kernel = self._current_psf_kernel_shape()
-        if kernel is None:
-            self._set_status("Select a PSF window before using Auto margin.", warn=True)
+    def _on_margin_auto_clicked(self, checked: bool) -> None:
+        if checked:
+            self._auto_margin_from_psf(show_warning=True)
+        else:
+            self._refresh_workflow_summary()
+
+    def _auto_margin_from_psf(self, *, show_warning: bool = True) -> None:
+        psf_data, dc_corner = self._current_psf_array_for_margin()
+        plan = self._current_shape_plan()
+        if psf_data is None or plan is None:
+            if show_warning:
+                self._set_status(
+                    "Select a PSF window before using Auto margin.", warn=True
+                )
             return
-        if len(kernel) == 2:
-            py = px = max(0, int(kernel[-1]) // 2)
+
+        try:
+            radius = psf_support_radius(psf_data, dc_corner=dc_corner)
+            max_margin = 16 if self.rl_radio.isChecked() else 32
+            margin = object_margin_from_psf_support(
+                radius,
+                plan["factors"],
+                plan["data"],
+                max_margin=max_margin,
+            )
+            uncapped = object_margin_from_psf_support(
+                radius,
+                plan["factors"],
+                plan["data"],
+                max_fraction=1.0,
+                max_margin=10_000,
+            )
+        except Exception as exc:
+            if show_warning:
+                self._set_status(f"Could not estimate PSF support: {exc}", warn=True)
+            return
+
+        if len(margin) == 2:
+            py = px = max(int(margin[-2]), int(margin[-1]))
             pz = 0
         else:
-            pz = max(0, int(kernel[0]) // 2)
-            py = px = max(0, int(kernel[-1]) // 2)
-        self.margin_check.setChecked(True)
-        self.pad_xy_spin.setValue(max(py, px))
-        self.pad_z_spin.setValue(pz if self.viewer.img_data.shape[1] > 1 else 0)
+            pz = int(margin[0])
+            py = px = max(int(margin[-2]), int(margin[-1]))
+        self._syncing_margin_from_psf = True
+        try:
+            self.margin_check.setChecked(True)
+            self.pad_xy_spin.setValue(max(py, px))
+            self.pad_z_spin.setValue(pz if self.viewer.img_data.shape[1] > 1 else 0)
+        finally:
+            self._syncing_margin_from_psf = False
         self._refresh_workflow_summary()
+        if show_warning and tuple(margin) != tuple(uncapped):
+            self._set_status(
+                "Auto margin was capped for numerical stability; increase it "
+                "manually only if edge signal requires it.",
+                warn=True,
+            )
 
     def _on_diagnostics_toggled(self, checked: bool) -> None:
         for child in self._diagnostics_group.findChildren(QWidget):
@@ -816,9 +885,11 @@ class DeconvolutionDialog(QDialog):
             if idx < 0 or idx >= len(self._rect_shapes):
                 return None
             _, rec = self._rect_shapes[idx]
-            p = rec.params
-            n_y = int(abs(p[3] - p[1]))
-            n_x = int(abs(p[2] - p[0]))
+            x0, y0, x1, y1 = rectangle_bounds(
+                rec, self.viewer.img_data.shape[-2:]
+            )
+            n_y = y1 - y0
+            n_x = x1 - x0
             if Z > 1 and self.around_z_radio.isChecked():
                 half = self.z_half_spin.value()
                 n_z = min(Z, rec.z + half + 1) - max(0, rec.z - half)
@@ -861,6 +932,16 @@ class DeconvolutionDialog(QDialog):
             return (Yp, Xp)
         return (Zp, Yp, Xp)
 
+    def _current_psf_array_for_margin(self) -> tuple[Optional[np.ndarray], bool]:
+        win = self.psf_combo.currentData()
+        if win is None:
+            return None, True
+        c_psf = max(0, min(int(self.psf_channel_spin.value()), win.img_data.shape[2] - 1))
+        psf = np.asarray(win.img_data[0, :, c_psf, :, :], dtype=np.float32)
+        if self.viewer.img_data.shape[1] <= 1 or psf.shape[0] <= 1:
+            psf = psf[0]
+        return psf, bool(win.meta.get("psf_dc_corner", True))
+
     def _format_shape(self, shape: Optional[tuple[int, ...]]) -> str:
         if shape is None:
             return "—"
@@ -897,7 +978,15 @@ class DeconvolutionDialog(QDialog):
             return
         pad_any = any(int(p) > 0 for p in plan["pads"])
         sr_any = any(abs(float(f) - 1.0) > 1e-6 for f in plan["factors"])
-        recipe_kind = "super_res_idc" if sr_any else "fft_conv"
+        sr_integral = all(
+            abs(float(f) - round(float(f))) <= 1e-6
+            for f in plan["factors"]
+        )
+        recipe_kind = (
+            "fractional_idc" if sr_any and not sr_integral
+            else "super_res_idc" if sr_any
+            else "fft_conv"
+        )
         output_shape = (
             plan["valid"] if self.region_valid_radio.isChecked() else plan["hidden"]
         )
@@ -922,9 +1011,9 @@ class DeconvolutionDialog(QDialog):
         lines = [
             f"{solver}",
             f"{recipe_kind}: data {self._format_shape(plan['data'])} -> "
-            f"hidden {self._format_shape(plan['hidden'])} -> "
+            f"object {self._format_shape(plan['hidden'])} -> "
             f"output {self._format_shape(output_shape)}",
-            f"super-res {sr_text}; finite margin {pad_text}",
+            f"super-res {sr_text}; object margin {pad_text}",
         ]
         self.recipe_preview.setPlainText("\n".join(lines))
 
@@ -934,9 +1023,15 @@ class DeconvolutionDialog(QDialog):
             if kernel is not None and len(kernel) == len(plan["hidden"])
             else None
         )
-        self.detector_domain_label.setText(self._format_shape(plan["detector_domain"]))
-        self.hidden_canvas_label.setText(self._format_shape(plan["hidden"]))
+        self.detector_domain_label.setText(self._format_shape(plan["data"]))
+        self.object_domain_label.setText(self._format_shape(plan["hidden"]))
         self.psf_kernel_label.setText(self._format_shape(kernel))
+        linear_shape = (
+            linear_convolution_shape(plan["hidden"], kernel)
+            if kernel is not None and len(kernel) == len(plan["hidden"])
+            else None
+        )
+        self.linear_canvas_label.setText(self._format_shape(linear_shape))
         self.fft_canvas_label.setText(self._format_shape(fft_shape))
 
     def _on_algorithm_changed(self, *_):
@@ -944,6 +1039,21 @@ class DeconvolutionDialog(QDialog):
         self._icf_group_widget.setVisible(is_mem)
         self._mem_box.setVisible(is_mem)
         self._rl_box.setVisible(not is_mem)
+        if (
+            not is_mem
+            and self.margin_check.isChecked()
+            and self.margin_auto_btn.isChecked()
+        ):
+            self._syncing_margin_from_psf = True
+            try:
+                self.margin_check.setChecked(False)
+            finally:
+                self._syncing_margin_from_psf = False
+            self._set_status(
+                "Richardson-Lucy defaults to no object margin; enable finite "
+                "detector margin manually only when edge signal requires it.",
+                warn=True,
+            )
         self._refresh_recipe_preview()
 
     def _on_icf_mode_changed(self, *_):
@@ -983,11 +1093,15 @@ class DeconvolutionDialog(QDialog):
     # PSF compute spawn
 
     def _expected_psf_shape_spacing(self):
-        """Return (shape, spacing) the PSF needs given the current ROI + recipe.
+        """Return (shape, spacing) for the PSF compute preset.
 
         Both are returned in `(Nz, Ny, Nx)` / `(dz, dy, dx)` order when 3D,
         falling back to 2D `(Ny, Nx)` / `(dy, dx)` when the ROI has a
         single Z plane. Returns `(None, None)` if no ROI is resolvable.
+
+        The preset uses the fine-grid sampling implied by super-resolution,
+        but it intentionally does not include the finite-detector/object
+        margin. PSF support is independent from the object canvas.
         """
         data_shape = self._current_data_shape()
         if data_shape is None:
@@ -1000,11 +1114,6 @@ class DeconvolutionDialog(QDialog):
 
         f_xy = max(float(self.sr_xy_spin.value()), 1.0)
         f_z = max(float(self.sr_z_spin.value()), 1.0)
-        pad_xy, pad_z = self._effective_pad()
-        n_y_h = int(round((n_y + 2 * pad_xy) * f_xy))
-        n_x_h = int(round((n_x + 2 * pad_xy) * f_xy))
-        n_z_h = int(round((n_z + 2 * pad_z) * f_z))
-
         scale = self.viewer.meta.get("scale", (1.0, 1.0, 1.0))
         dz, dy, dx = float(scale[0]), float(scale[1]), float(scale[2])
         dy /= f_xy
@@ -1012,8 +1121,10 @@ class DeconvolutionDialog(QDialog):
         dz /= f_z
 
         if n_z <= 1:
-            return (n_y_h, n_x_h), (dy, dx)
-        return (n_z_h, n_y_h, n_x_h), (dz, dy, dx)
+            shape = compact_psf_shape_for_data((n_y, n_x), (f_xy, f_xy))
+            return shape, (dy, dx)
+        shape = compact_psf_shape_for_data((n_z, n_y, n_x), (f_z, f_xy, f_xy))
+        return shape, (dz, dy, dx)
 
     def _refresh_compute_target_hint(self):
         shape, spacing = self._expected_psf_shape_spacing()
@@ -1022,12 +1133,12 @@ class DeconvolutionDialog(QDialog):
             return
         if len(shape) == 2:
             self.compute_target_label.setText(
-                f"{shape[0]}×{shape[1]} px, "
+                f"PSF support preset {shape[0]}×{shape[1]} px, "
                 f"{spacing[0]*1000:.0f}×{spacing[1]*1000:.0f} nm"
             )
         else:
             self.compute_target_label.setText(
-                f"{shape[0]}×{shape[1]}×{shape[2]} px, "
+                f"PSF support preset {shape[0]}×{shape[1]}×{shape[2]} px, "
                 f"{spacing[0]*1000:.0f}×{spacing[1]*1000:.0f}×{spacing[2]*1000:.0f} nm"
             )
 
@@ -1088,6 +1199,8 @@ class DeconvolutionDialog(QDialog):
         _T, _Zp, C, _Yp, _Xp = win.img_data.shape
         self.psf_channel_spin.setRange(0, max(0, C - 1))
         self._check_scale_match(win)
+        if self.margin_check.isChecked() and self.margin_auto_btn.isChecked():
+            self._auto_margin_from_psf(show_warning=False)
         self._refresh_recipe_preview()
 
     def _check_scale_match(self, psf_win):
@@ -1153,10 +1266,9 @@ class DeconvolutionDialog(QDialog):
             for rec in (layer.data.get(sid) for sid in layer.data.shape_ids):
                 if rec.shape_type == RECTANGLE:
                     self._rect_shapes.append((layer.name, rec))
-                    p = rec.params
-                    x1, y1, x2, y2 = p[0], p[1], p[2], p[3]
-                    xl, xr = int(min(x1, x2)), int(max(x1, x2))
-                    yt, yb = int(min(y1, y2)), int(max(y1, y2))
+                    xl, yt, xr, yb = rectangle_bounds(
+                        rec, self.viewer.img_data.shape[-2:]
+                    )
                     self.shape_combo.addItem(
                         f"{layer.name} #{rec.shape_id} "
                         f"({xr-xl}×{yb-yt})"
@@ -1181,10 +1293,7 @@ class DeconvolutionDialog(QDialog):
             self._z_row_widget.setVisible(False)
             return
         _, rec = self._rect_shapes[idx]
-        p = rec.params
-        x1, y1, x2, y2 = p[0], p[1], p[2], p[3]
-        xl, xr = int(min(x1, x2)), int(max(x1, x2))
-        yt, yb = int(min(y1, y2)), int(max(y1, y2))
+        xl, yt, xr, yb = rectangle_bounds(rec, self.viewer.img_data.shape[-2:])
         _T, Z, _C, _Y, _X = self.viewer.img_data.shape
         self.bounds_label.setText(
             f"y [{yt}:{yb}]  x [{xl}:{xr}]  →  {yb-yt} × {xr-xl} px"
@@ -1285,10 +1394,9 @@ class DeconvolutionDialog(QDialog):
                 self._set_status("No rectangle shape selected.", error=True)
                 return None
             _, rec = self._rect_shapes[idx]
-            p = rec.params
-            x1, y1, x2, y2 = p[0], p[1], p[2], p[3]
-            yl, yr = int(min(y1, y2)), int(max(y1, y2))
-            xl, xr = int(min(x1, x2)), int(max(x1, x2))
+            xl, yl, xr, yr = rectangle_bounds(
+                rec, self.viewer.img_data.shape[-2:]
+            )
             if yl == yr or xl == xr:
                 self._set_status("Shape has zero area.", error=True)
                 return None

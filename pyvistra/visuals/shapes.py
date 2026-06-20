@@ -82,6 +82,10 @@ class ShapeLayerVisual:
         connects = []
         offset = 0
         for rec in shapes:
+            if rec.properties.get("gel_lane") and not rec.properties.get(
+                "gel_show_border", True
+            ):
+                continue
             outline = get_outline(rec)
             n = len(outline)
             if n < 2:

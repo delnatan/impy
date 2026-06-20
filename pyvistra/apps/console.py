@@ -179,7 +179,6 @@ class PythonConsole(QWidget):
 
     Provides a REPL with access to application state including:
     - manager: WindowManager singleton
-    - annotation_mgr: AnnotationManager singleton
     - windows: dict of all open ImageWindow instances
     - np: numpy
 
@@ -276,31 +275,16 @@ class PythonConsole(QWidget):
 
     def _update_namespace(self):
         """Update namespace with current pyvistra state."""
-        from ..ui.annotation_manager import (
-            annotation_manager_exists,
-            get_annotation_manager,
-        )
         from ..ui.manager import manager
 
         self.namespace["manager"] = manager
         self.namespace["windows"] = manager.get_all()
 
-        # Expose the annotation manager directly.
-        if annotation_manager_exists():
-            self.namespace["annotation_mgr"] = get_annotation_manager()
-        else:
-            # Lazy accessor
-            self.namespace["annotation_mgr"] = property(
-                lambda self: get_annotation_manager()
-            )
-
         # Add helper function to get current/active window
         def get_active_window():
             """Get the currently active ImageWindow, or None."""
-            if annotation_manager_exists():
-                mgr = get_annotation_manager()
-                return mgr.active_window
-            # Fallback: return first window
+            if manager.active_window is not None:
+                return manager.active_window
             windows = manager.get_all()
             if windows:
                 return list(windows.values())[0]
@@ -369,7 +353,6 @@ class PythonConsole(QWidget):
 Available objects:
   manager     - WindowManager (tracks all windows)
   windows     - dict of all ImageWindow instances
-  annotation_mgr - AnnotationManager (when available)
   aw()        - Get active window (shortcut for active_window())
   np          - numpy
   imshow()    - Display array as image
