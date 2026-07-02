@@ -35,10 +35,7 @@ from .convergence_plot import (
 )
 from .z_projection_dialog import ZProjectionDialog
 from .deconvolution_dialog import DeconvolutionDialog
-from .deconvolution_worker import (
-    MemDeconvolutionWorker,
-    RLDeconvolutionWorker,
-)
+from .deconvolution_worker import NLCGDeconvolutionWorker
 from .processing_helper import BufferProcessingRunner
 from .overlay_settings import OverlaySettingsDialog
 
@@ -68,8 +65,7 @@ __all__ = [
     "AxesDialog",
     "ZProjectionDialog",
     "DeconvolutionDialog",
-    "MemDeconvolutionWorker",
-    "RLDeconvolutionWorker",
+    "NLCGDeconvolutionWorker",
     "OverlaySettingsDialog",
     "BufferProcessingRunner",
     "LineProfileDialog",

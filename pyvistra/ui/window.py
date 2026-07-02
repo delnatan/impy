@@ -1903,34 +1903,87 @@ class ImageWindow(QMainWindow):
     def _crop_with_rect(self, layer, shape_id):
         """Crop ``self.img_data`` to a rectangle's XY bounds and route the
         result through ``ImageOutputSelector`` (reuse window / new window /
-        save). Always preserves full T, Z, C.
+        save). Supports optional T, Z, and C subranges.
         """
-        from qtpy.QtWidgets import QDialog, QDialogButtonBox
+        from qtpy.QtWidgets import (
+            QDialog,
+            QDialogButtonBox,
+            QFormLayout,
+            QGroupBox,
+            QSpinBox,
+        )
         from ..widgets.output_selector import ImageOutputSelector
 
         rec = layer.data.get(shape_id)
         try:
-            cropped = crop_rect(self.img_data, rec)
+            # Get the XY cropped data first to determine available dimensions
+            xy_cropped = crop_rect(self.img_data, rec)
         except ValueError as e:
             QMessageBox.warning(self, "Crop", str(e))
             return
 
+        T, Z, C, Yc, Xc = xy_cropped.shape
+        
+        meta_channels = (self.meta or {}).get("channels") or []
+        
         dlg = QDialog(self)
         dlg.setWindowTitle("Crop region")
         dlg_layout = QVBoxLayout(dlg)
         label = rec.label or f"shape {shape_id}"
-        T, Z, C, Yc, Xc = cropped.shape
         dlg_layout.addWidget(
             QLabel(f"Cropping {Yc}×{Xc} (Y×X) from '{label}' — T={T}, Z={Z}, C={C}")
         )
+
+        # Channel range
+        c_group = QGroupBox(f"Channel range (C = {C})")
+        c_form = QFormLayout(c_group)
+        c_from = QSpinBox()
+        c_from.setRange(0, C - 1)
+        c_from.setValue(0)
+        c_to = QSpinBox()
+        c_to.setRange(0, C - 1)
+        c_to.setValue(C - 1)
+        c_form.addRow("From:", c_from)
+        c_form.addRow("To:", c_to)
+        c_group.setEnabled(C > 1)
+        dlg_layout.addWidget(c_group)
+
+        # T-range
+        t_group = QGroupBox(f"Time range (T = {T})")
+        t_form = QFormLayout(t_group)
+        t_from = QSpinBox()
+        t_from.setRange(0, T - 1)
+        t_from.setValue(0)
+        t_to = QSpinBox()
+        t_to.setRange(0, T - 1)
+        t_to.setValue(T - 1)
+        t_form.addRow("From:", t_from)
+        t_form.addRow("To:", t_to)
+        t_group.setEnabled(T > 1)
+        dlg_layout.addWidget(t_group)
+
+        # Z-range
+        z_group = QGroupBox(f"Z range (Z = {Z})")
+        z_form = QFormLayout(z_group)
+        z_from = QSpinBox()
+        z_from.setRange(0, Z - 1)
+        z_from.setValue(0)
+        z_to = QSpinBox()
+        z_to.setRange(0, Z - 1)
+        z_to.setValue(Z - 1)
+        z_form.addRow("From:", z_from)
+        z_form.addRow("To:", z_to)
+        z_group.setEnabled(Z > 1)
+        dlg_layout.addWidget(z_group)
+
+        # Output destination.
         default_title = f"{self.windowTitle()} [crop]"
         selector = ImageOutputSelector(
             parent=dlg, default_title=default_title, formats=[".tif", ".ims"]
         )
         dlg_layout.addWidget(selector)
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
         dlg_layout.addWidget(buttons)
@@ -1938,9 +1991,44 @@ class ImageWindow(QMainWindow):
         if dlg.exec_() != QDialog.Accepted:
             return
 
+        c0, c1 = sorted((int(c_from.value()), int(c_to.value())))
+        t0, t1 = sorted((int(t_from.value()), int(t_to.value())))
+        z0, z1 = sorted((int(z_from.value()), int(z_to.value())))
+
+        # Apply the full 5D crop: T, Z, C, Y, X
+        try:
+            cropped = np.asarray(xy_cropped[t0:t1 + 1, z0:z1 + 1, c0:c1 + 1, :, :])
+        except Exception as e:
+            QMessageBox.warning(self, "Crop", f"Could not crop: {e}")
+            return
+
+        # Build channel metadata pared down to the selected range.
         metadata = dict(self.meta or {})
+        if meta_channels and c0 <= c1 and c1 < len(meta_channels):
+            metadata["channels"] = [dict(meta_channels[c]) for c in range(c0, c1 + 1)]
         base_name = metadata.get("filename") or self.windowTitle() or "crop"
-        metadata["filename"] = f"{base_name} [crop]"
+        
+        # Build a descriptive suffix for the crop
+        suffix_parts = []
+        if t0 > 0 or t1 < T - 1:
+            suffix_parts.append(f"T{t0}-{t1}")
+        if z0 > 0 or z1 < Z - 1:
+            suffix_parts.append(f"Z{z0}-{z1}")
+        if c0 > 0 or c1 < C - 1:
+            if c0 == c1:
+                ch_name = ""
+                if meta_channels and c0 < len(meta_channels):
+                    ch_name = (meta_channels[c0] or {}).get("name") or ""
+                suffix_parts.append(f"ch{c0}" + (f" {ch_name}" if ch_name else ""))
+            else:
+                suffix_parts.append(f"C{c0}-{c1}")
+        
+        suffix = " ".join(suffix_parts)
+        if suffix:
+            metadata["filename"] = f"{base_name} [{suffix}]"
+        else:
+            metadata["filename"] = f"{base_name} [crop]"
+
         selector.send(cropped, metadata)
 
     def _save_channel_dialog(self):
