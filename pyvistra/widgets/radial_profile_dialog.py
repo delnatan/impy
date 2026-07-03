@@ -33,7 +33,12 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
-from .line_profile import LineProfileWidget, FALLBACK_COLORS, _to_qcolor
+from .line_profile import (
+    LineProfileWidget,
+    FALLBACK_COLORS,
+    _to_qcolor,
+    window_is_frequency_space,
+)
 from ..ui.manager import manager
 from ..data.shapes import CIRCLE, EVT_EDITED, EVT_REMOVED, EVT_BULK
 
@@ -476,9 +481,7 @@ class RadialProfileDialog(QDialog):
         radius = self.current_circle_data["radius"]
         mode = self.mode_combo.currentData()
 
-        is_frequency_space = (
-            getattr(self.source_window, "pixel_space", "real") == "frequency"
-        )
+        is_frequency_space = window_is_frequency_space(self.source_window)
         src_scale = (
             getattr(self.source_window, "meta", {}).get("scale")
             if self.source_window
@@ -527,7 +530,7 @@ class RadialProfileDialog(QDialog):
             cfg["label"] = label
 
             if has_phys:
-                win_is_freq = window.pixel_space == "frequency"
+                win_is_freq = window_is_frequency_space(window)
                 if win_is_freq != is_frequency_space:
                     # Real-space distance and spatial frequency aren't the
                     # same physical quantity -- skip rather than mislabel.
@@ -673,9 +676,7 @@ class RadialProfileDialog(QDialog):
 
         mode = visible[0]["mode"]
         x_col = "radius_px" if mode == _MODE_RADIAL else "angle_deg"
-        is_frequency_space = (
-            getattr(self.source_window, "pixel_space", "real") == "frequency"
-        )
+        is_frequency_space = window_is_frequency_space(self.source_window)
         x_phys_col = None
         if mode == _MODE_RADIAL and not np.array_equal(
             visible[0]["x_raw"], visible[0]["x_plot"]

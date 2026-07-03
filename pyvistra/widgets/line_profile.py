@@ -884,9 +884,7 @@ class LineProfileDialog(QDialog):
         # same px->physical conversion means something different on the
         # axis label, and it isn't the same physical quantity as a
         # real-space distance from another window (handled below).
-        is_frequency_space = (
-            getattr(self.source_window, "pixel_space", "real") == "frequency"
-        )
+        is_frequency_space = window_is_frequency_space(self.source_window)
         src_scale = (
             getattr(self.source_window, "meta", {}).get("scale")
             if self.source_window
@@ -939,7 +937,7 @@ class LineProfileDialog(QDialog):
             cfg["label"] = label
 
             if path_phys is not None:
-                win_is_freq = window.pixel_space == "frequency"
+                win_is_freq = window_is_frequency_space(window)
                 if win_is_freq != is_frequency_space:
                     # Real-space distance and spatial frequency aren't the
                     # same physical quantity -- comparing them on one axis
@@ -1107,9 +1105,7 @@ class LineProfileDialog(QDialog):
             distances_um = np.asarray(distances_um, dtype=float)
 
         scale = getattr(self.source_window, "meta", {}).get("scale") if self.source_window else None
-        is_frequency_space = (
-            getattr(self.source_window, "pixel_space", "real") == "frequency"
-        )
+        is_frequency_space = window_is_frequency_space(self.source_window)
         phys_unit = "1/um" if is_frequency_space else "um"
         phys_col = "spatial_freq_1_per_um" if is_frequency_space else "distance_um"
         phys_length_key = "spatial_freq_1_per_um" if is_frequency_space else "length_um"
@@ -1190,6 +1186,15 @@ class LineProfileDialog(QDialog):
         self.source_window = None
         self.current_roi = None
         self.current_line_data = None
+
+
+def window_is_frequency_space(window) -> bool:
+    """Whether ``window`` (or ``None``) is FFT/frequency-space output.
+
+    See ``ImageWindow.pixel_space`` / fft_dialog.py. Tolerates ``None`` so
+    callers don't need a separate check for a not-yet-set source window.
+    """
+    return getattr(window, "pixel_space", "real") == "frequency"
 
 
 def _to_qcolor(value, default):
