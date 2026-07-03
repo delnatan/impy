@@ -23,7 +23,6 @@ dependencies = [
     "h5py",
     "superqt",
     "magicgui",
-    "matplotlib",
     "zarr>=3.0",
     "scipy",
     "pyopengl>=3.1.10",

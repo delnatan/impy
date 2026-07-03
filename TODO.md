@@ -226,11 +226,16 @@ Now the abstractions are in place; cut the dead weight.
       were the only consumers. Line Profile + Gel Analyzer entries kept.
 - [x] Removed optional matplotlib import in `apps/console.py`.
 - [x] Fixed stale "via matplotlib" docstring in `io.py`.
+- [x] Removed the leftover `matplotlib` dependency declaration from
+      `requirements.txt` and `pyproject.toml` (graphify audit caught it
+      — no import ever remained, just the unused declaration).
 
 ### 4b. Unify shape/ROI tool paths in `window.py` ✅
 - [x] Removed the `coordinate` tool (toolbar action, dispatch branch,
       F-key flip handler). `CoordinateROI` class lingers in `rois.py`
       until 4d.
+- [x] Deleted the now-orphaned `coordinate.svg` icon resource and its
+      naming-convention line in `_resources/icons/README.md`.
 - [x] Toolbar tools `rect/circle/line` now drive the `ShapeData` /
       `AddShape` path. Deleted the legacy `RectangleROI`/`CircleROI`/
       `LineROI` interactive-creation branches in `on_mouse_press`.

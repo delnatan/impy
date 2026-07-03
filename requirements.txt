@@ -6,4 +6,3 @@ tifffile
 h5py
 superqt
 magicgui
-matplotlib

@@ -9,7 +9,6 @@ Supported formats:
 
 Naming:
 - `pointer.svg` or `pointer.png`
-- `coordinate.svg` or `coordinate.png`
 - `rect.svg` or `rect.png`
 - `circle.svg` or `circle.png`
 - `line.svg` or `line.png`
