@@ -82,3 +82,36 @@ def test_load_tiff_reads_imagej_frame_interval_seconds(tmp_path):
     _, meta = load_image(str(out), use_memmap=False)
 
     assert meta["frame_interval_s"] == 1.5
+
+
+def test_save_tiff_labels_frequency_space_scale_correctly(tmp_path):
+    """FFT output tags itself space="frequency" (see fft_dialog.py) --
+    saving it to file must not silently claim its cycles/um scale is a
+    real-space "um" pixel size.
+    """
+    data = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+    out = tmp_path / "fft_result.tif"
+
+    save_tiff(
+        str(out),
+        data,
+        scale=(1.0, 0.1, 0.1),
+        metadata={"space": "frequency"},
+    )
+
+    with tifffile.TiffFile(str(out)) as tif:
+        ij = tif.imagej_metadata or {}
+
+    assert ij.get("unit") == "1/um"
+
+
+def test_save_tiff_labels_real_space_scale_as_um(tmp_path):
+    data = np.zeros((1, 1, 1, 8, 8), dtype=np.float32)
+    out = tmp_path / "real_space.tif"
+
+    save_tiff(str(out), data, scale=(1.0, 0.1, 0.1), metadata={})
+
+    with tifffile.TiffFile(str(out)) as tif:
+        ij = tif.imagej_metadata or {}
+
+    assert ij.get("unit") == "um"

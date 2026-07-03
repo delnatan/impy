@@ -142,7 +142,7 @@ class ImarisWriter:
         _set_attr(img_grp, "ExtMax0", f"{X * vx:.6f}")
         _set_attr(img_grp, "ExtMax1", f"{Y * vy:.6f}")
         _set_attr(img_grp, "ExtMax2", f"{Z * vz:.6f}")
-        _set_attr(img_grp, "Unit", "um")
+        _set_attr(img_grp, "Unit", "1/um" if meta.get("space") == "frequency" else "um")
         _set_attr(img_grp, "Name", str(dataset_name))
         _set_attr(
             img_grp,
@@ -445,7 +445,7 @@ def save_imaris(
         _set_attr(img_grp, "ExtMax0", f"{ext_max_x:.6f}")
         _set_attr(img_grp, "ExtMax1", f"{ext_max_y:.6f}")
         _set_attr(img_grp, "ExtMax2", f"{ext_max_z:.6f}")
-        _set_attr(img_grp, "Unit", "um")
+        _set_attr(img_grp, "Unit", "1/um" if metadata.get("space") == "frequency" else "um")
         _set_attr(img_grp, "Name", str(dataset_name))
         _set_attr(
             img_grp,

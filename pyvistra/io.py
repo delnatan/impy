@@ -1117,10 +1117,15 @@ def save_tiff(
     rx = 1.0 / sx if sx > 0 else 1.0
     ry = 1.0 / sy if sy > 0 else 1.0
 
+    # FFT output (see fft_dialog.py) tags itself "frequency" space and
+    # replaces "scale" with the DFT's frequency spacing (cycles/unit per
+    # pixel) -- same role in the resolution math above as a real-space
+    # pixel size, but the calibration unit is 1/um, not um.
+    is_frequency_space = (metadata or {}).get("space") == "frequency"
     ij_metadata = {
         "axes": axes,
         "spacing": sz,
-        "unit": "um",
+        "unit": "1/um" if is_frequency_space else "um",
     }
     frame_interval_s = _extract_frame_interval_seconds(
         metadata or {}, image.shape[0]
