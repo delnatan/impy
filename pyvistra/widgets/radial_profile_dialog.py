@@ -44,6 +44,44 @@ _MODE_RADIAL = "radial"
 _MODE_PERIMETER = "perimeter"
 
 
+def radial_profile(image_2d, cx, cy, radius):
+    """Bin pixel-to-center distance into 1-px shells and average.
+
+    Pure numpy: takes a 2D array and returns ``(radii, profile)``, both
+    length ``floor(max(1, radius)) + 1``. Restricted to the bounding box
+    around the circle for efficiency rather than scanning the whole image.
+    """
+    H, W = image_2d.shape
+    max_r = max(1.0, float(radius))
+    y0 = max(0, int(np.floor(cy - max_r)))
+    y1 = min(H, int(np.ceil(cy + max_r)) + 1)
+    x0 = max(0, int(np.floor(cx - max_r)))
+    x1 = min(W, int(np.ceil(cx + max_r)) + 1)
+    if y1 <= y0 or x1 <= x0:
+        return None, None
+
+    n_bins = int(np.floor(max_r)) + 1
+    sub = np.asarray(image_2d[y0:y1, x0:x1], dtype=np.float64)
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    r = np.hypot(xx - cx, yy - cy)
+    r_bin = r.astype(np.int64)
+    # The crop is a square bounding box, so its corners are up to
+    # radius*sqrt(2) away -- outside the actual circle. Exclude them rather
+    # than clipping them into the outermost bin, which would otherwise
+    # contaminate the edge-ring average with background pixels that were
+    # never inside the requested radius.
+    in_range = r_bin < n_bins
+    r_bin = r_bin[in_range]
+    vals = sub[in_range]
+
+    sums = np.bincount(r_bin, weights=vals, minlength=n_bins)
+    counts = np.bincount(r_bin, minlength=n_bins)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        profile = sums / counts
+    radii = np.arange(n_bins, dtype=float)
+    return radii, profile
+
+
 def get_radial_profile_dialog():
     """Get or create the singleton RadialProfileDialog instance."""
     global _radial_profile_dialog
@@ -524,35 +562,12 @@ class RadialProfileDialog(QDialog):
         )
 
     def _sample_radial(self, window, cx, cy, radius, channel_idx):
-        """Bin pixel-to-center distance into 1-px shells and average.
-
-        Restricted to the bounding box around the circle for efficiency
-        rather than scanning the whole image.
-        """
         image_2d, channel_used = self._get_channel_slice(window, channel_idx)
         if image_2d is None:
             return None, None, channel_idx
-
-        H, W = image_2d.shape
-        max_r = max(1.0, float(radius))
-        y0 = max(0, int(np.floor(cy - max_r)))
-        y1 = min(H, int(np.ceil(cy + max_r)) + 1)
-        x0 = max(0, int(np.floor(cx - max_r)))
-        x1 = min(W, int(np.ceil(cx + max_r)) + 1)
-        if y1 <= y0 or x1 <= x0:
+        radii, profile = radial_profile(image_2d, cx, cy, radius)
+        if radii is None:
             return None, None, channel_used
-
-        sub = np.asarray(image_2d[y0:y1, x0:x1], dtype=np.float64)
-        yy, xx = np.mgrid[y0:y1, x0:x1]
-        r = np.hypot(xx - cx, yy - cy)
-        n_bins = int(np.floor(max_r)) + 1
-        r_bin = np.clip(r.astype(np.int64), 0, n_bins - 1)
-
-        sums = np.bincount(r_bin.ravel(), weights=sub.ravel(), minlength=n_bins)
-        counts = np.bincount(r_bin.ravel(), minlength=n_bins)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            profile = sums / counts
-        radii = np.arange(n_bins, dtype=float)
         return radii, profile, channel_used
 
     def _sample_perimeter(self, window, cx, cy, radius, channel_idx, n_samples):
