@@ -153,12 +153,13 @@ class FFTDialog(QDialog):
             # convert correctly instead of treating it as real-space um.
             sz, sy, sx = coerce_scale_zyx(out_meta.get("scale"))
             fy, fx = 1.0 / (Y * sy), 1.0 / (X * sx)
+            dc_yx = (Y // 2, 0 if kind == _KIND_REAL else X // 2)
             if mode == _MODE_3D:
                 fz = 1.0 / (Z * sz)
-                dc_index = (Z // 2, Y // 2, 0 if kind == _KIND_REAL else X // 2)
+                dc_index = (Z // 2,) + dc_yx
             else:
                 fz = sz  # Z axis isn't transformed in 2D mode -- keep real space
-                dc_index = (None, Y // 2, 0 if kind == _KIND_REAL else X // 2)
+                dc_index = dc_yx  # no Z entry -- disambiguated by "mode" below
             out_meta["scale"] = (fz, fy, fx)
             out_meta["space"] = "frequency"
             out_meta["fft"] = {
