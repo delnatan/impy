@@ -2941,6 +2941,7 @@ class ImageWindow(QMainWindow):
             self.playback_fps_spin.setSingleStep(0.25)
             self.playback_fps_spin.setValue(self._playback_fps)
             self.playback_fps_spin.setSuffix(" fps")
+            self.playback_fps_spin.setFocusPolicy(Qt.NoFocus)  # see c_slider above
             self.playback_fps_spin.valueChanged.connect(
                 self.on_playback_fps_changed
             )
@@ -2979,6 +2980,7 @@ class ImageWindow(QMainWindow):
             self.z_range_slider_layout = QHBoxLayout()
             self.z_range_slider_layout.setContentsMargins(0, 0, 0, 0)
             self.z_range_slider = QRangeSlider(Qt.Horizontal)
+            self.z_range_slider.setFocusPolicy(Qt.NoFocus)  # see c_slider above
             self.z_range_slider_min_label = QLabel("0")
             self.z_range_slider_max_label = QLabel(f"{self.Z - 1}")
             self.z_range_slider.setRange(0, self.Z - 1)
