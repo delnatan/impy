@@ -19,7 +19,7 @@ The key goal is to be able to quickly compose 'parts' — data proxies, computat
 - **Layers** (`layers/`): Layer abstraction and command/undo system. Depends only on `data/`.
 - **Visuals** (`visuals/`): Vispy renderers — image composite, shapes, points, tracks, labels, overlays. No Qt widgets.
 - **UI** (`ui/`): Core viewer, toolbar, managers. Depends on everything above + Qt.
-- **Viewers** (`viewers/`): Specialized multi-panel viewers (ortho, volume, tiled).
+- **Viewers** (`viewers/`): Specialized multi-panel viewers (ortho, volume, tiled, z-montage).
 - **Widgets** (`widgets/`): Reusable Qt dialogs/widgets (no vispy).
 - **Apps** (`apps/`): Standalone applications (gel analyzer, console) — not core.
 
@@ -77,7 +77,8 @@ pyvistra/
 ├── viewers/                 # Specialized multi-panel viewers
 │   ├── ortho.py             # OrthoViewer (3-panel orthogonal)
 │   ├── volume.py            # VolumeViewer
-│   └── tiled.py             # TiledViewer
+│   ├── tiled.py             # TiledViewer (gallery of N separate files)
+│   └── zmontage.py          # ZMontageViewer (grid of one image's Z-slices)
 │
 ├── widgets/                 # Reusable Qt dialogs/widgets
 │   ├── line_profile.py      # Gold standard: pure Qt painting, no matplotlib
@@ -203,7 +204,7 @@ cmap.register('MyArray', my_256x4_lut_array)
 
 ### Per-Channel Display State
 
-Every multi-channel renderer (`CompositeImageVisual`, `VolumeRendererProxy`, `TiledVisualProxy`, `OrthoVisualProxy` via its primary view) owns a `ChannelDisplayList` at `renderer.display` (defined in `data/channel_state.py`). Each entry is a `ChannelDisplayState` dataclass with `clim`, `gamma`, `colormap_name`, `visible` — plus a derived `display_color()` that consults the colormap registry.
+Every multi-channel renderer (`CompositeImageVisual`, `VolumeRendererProxy`, `TiledVisualProxy`, `MultiViewChannelProxy` via its primary view) owns a `ChannelDisplayList` at `renderer.display` (defined in `data/channel_state.py`). Each entry is a `ChannelDisplayState` dataclass with `clim`, `gamma`, `colormap_name`, `visible` — plus a derived `display_color()` that consults the colormap registry.
 
 - **Mutations**: `display.set_clim(c, lo, hi)`, `set_gamma`, `set_colormap_name`, `set_visible`.
 - **Notifications**: `display.subscribe(callback)` registers `callback(channel_idx, field)` fired on every mutation. Returns an unsubscribe function.
@@ -355,6 +356,9 @@ Follow the pattern in `widgets/z_projection_dialog.py` + `widgets/processing_hel
 3. In the dialog, instantiate `ImageOutputSelector` + `BufferProcessingRunner`; call `runner.prepare_output(...)` to get `(source, buffer)`, then `runner.start_worker(...)`.
 4. The same dialog works for "reuse window / new window / save to file" — that's the `ImageOutputSelector` contract.
 
+### PSF Picker Convention
+Dialogs that let the user pick an existing window as a PSF (`DeconvolutionDialog`, `PSFDistillationDialog`) list **every** open window (excluding `self.viewer`), not just ones flagged `is_psf=True`. A PSF loaded from disk into a plain window is just as valid an input as one computed via `PSFComputeDialog` — restricting the combo to `is_psf`-flagged windows only blocks that. Windows that *are* flagged get a `"  (PSF)"` label suffix so they're still easy to spot; see `_refresh_psf_combo()` in either dialog for the canonical implementation. `ImageWindow.is_psf` (default `False`, set `True` by `PSFComputeDialog`/`PSFDistillationDialog` on publish) exists purely for this annotation — never use it as a hard filter.
+
 ### Adding a Standalone Application
 Place in `apps/` — not in core. Apps can import from core freely; core must not import from apps.
 
@@ -372,4 +376,4 @@ Place in `apps/` — not in core. Apps can import from core freely; core must no
 
 ---
 
-*Last Updated: 2026-06-04 (Stage V — visual adjustment refactor)*
+*Last Updated: 2026-07-02 (PSF distillation dialog + PSF picker convention)*

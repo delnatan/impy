@@ -601,12 +601,8 @@ class TileWidget(QFrame):
                 layer.parent = None
             self.renderer = None
 
-        # Close data if it has a close method (ImageBuffer, Imaris5DProxy)
-        if self.data is not None and hasattr(self.data, "close"):
-            try:
-                self.data.close()
-            except Exception:
-                pass
+        if self.data is not None:
+            self.data.release()
 
         self.data = None
         self.meta = None

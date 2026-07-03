@@ -339,3 +339,84 @@ class CompositeImageVisual:
         self._translate_x = 0.0
         self._translate_y = 0.0
         self._apply_transform_to_layers()
+
+
+class MultiViewChannelProxy:
+    """
+    Proxies calls to multiple CompositeImageVisual instances to keep them in
+    sync. Used by ChannelPanel to control several views/tiles simultaneously
+    (e.g. OrthoViewer's 3 panels, or ZMontageViewer's per-Z-slice tiles).
+    """
+
+    def __init__(self, visuals):
+        self.visuals = visuals
+        # We treat the first visual as the "primary" for reading state.
+        self.primary = visuals[0]
+
+    @property
+    def layers(self):
+        # Return layers of primary so dialog can iterate them
+        return self.primary.layers
+
+    @property
+    def current_slice_cache(self):
+        return self.primary.current_slice_cache
+
+    @property
+    def channel_colors(self):
+        return self.primary.channel_colors
+
+    @property
+    def display(self):
+        """Shared :class:`ChannelDisplayList` (the primary view's).
+
+        Panels should subscribe here. The other views are kept in sync by
+        this proxy's broadcast setters.
+        """
+        return self.primary.display
+
+    def set_clim(self, channel_idx, vmin, vmax):
+        for v in self.visuals:
+            v.set_clim(channel_idx, vmin, vmax)
+            # Re-push the cached plane so vispy's CPU-scaled texture is
+            # rebuilt with the new clim; without this the uniform-only
+            # update path doesn't reliably redraw all views.
+            cache = v.current_slice_cache
+            if (
+                cache is not None
+                and channel_idx < cache.shape[0]
+                and channel_idx < len(v.layers)
+            ):
+                v.layers[channel_idx].set_data(cache[channel_idx])
+
+    def get_clim(self, channel_idx):
+        return self.primary.get_clim(channel_idx)
+
+    def set_gamma(self, channel_idx, gamma):
+        for v in self.visuals:
+            v.set_gamma(channel_idx, gamma)
+
+    def get_gamma(self, channel_idx):
+        return self.primary.get_gamma(channel_idx)
+
+    def set_mode(self, mode):
+        for v in self.visuals:
+            v.set_mode(mode)
+
+    def set_active_channel(self, idx):
+        for v in self.visuals:
+            v.set_active_channel(idx)
+
+    def set_colormap(self, channel_idx, cmap_name):
+        for v in self.visuals:
+            v.set_colormap(channel_idx, cmap_name)
+
+    def get_colormap_name(self, channel_idx):
+        return self.primary.get_colormap_name(channel_idx)
+
+    def set_channel_visible(self, channel_idx, visible):
+        for v in self.visuals:
+            v.set_channel_visible(channel_idx, visible)
+
+    def get_channel_visible(self, channel_idx):
+        return self.primary.get_channel_visible(channel_idx)

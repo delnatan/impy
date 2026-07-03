@@ -206,6 +206,20 @@ class PointTable:
             out[key] = values[idx].item() if hasattr(values[idx], "item") else values[idx]
         return out
 
+    def get_time_slice(self, t_idx: int) -> slice | None:
+        idx = np.searchsorted(self._time_values, int(t_idx))
+        if idx >= len(self._time_values) or self._time_values[idx] != int(t_idx):
+            return None
+        start = int(self._time_starts[idx])
+        end = start + int(self._time_counts[idx])
+        return slice(start, end)
+
+    def iter_time_slices(self):
+        for i, t_val in enumerate(self._time_values):
+            start = int(self._time_starts[i])
+            end = start + int(self._time_counts[i])
+            yield int(t_val), slice(start, end)
+
     def remove_point(self, point_id: int) -> "PointTable":
         keep = self.point_id != int(point_id)
         return PointTable.from_arrays(
@@ -448,17 +462,3 @@ def save_points_json(path, points: PointTable) -> None:
             f,
             indent=2,
         )
-
-    def get_time_slice(self, t_idx: int) -> slice | None:
-        idx = np.searchsorted(self._time_values, int(t_idx))
-        if idx >= len(self._time_values) or self._time_values[idx] != int(t_idx):
-            return None
-        start = int(self._time_starts[idx])
-        end = start + int(self._time_counts[idx])
-        return slice(start, end)
-
-    def iter_time_slices(self):
-        for i, t_val in enumerate(self._time_values):
-            start = int(self._time_starts[i])
-            end = start + int(self._time_counts[i])
-            yield int(t_val), slice(start, end)

@@ -36,8 +36,11 @@ from .convergence_plot import (
 from .z_projection_dialog import ZProjectionDialog
 from .deconvolution_dialog import DeconvolutionDialog
 from .deconvolution_worker import NLCGDeconvolutionWorker
+from .psf_distillation_dialog import PSFDistillationDialog
+from .psf_distillation_worker import PSFDistillationWorker
 from .processing_helper import BufferProcessingRunner
 from .overlay_settings import OverlaySettingsDialog
+from .zmontage_settings import ZMontageSettingsDialog
 
 __all__ = [
     # Theme constants
@@ -66,7 +69,10 @@ __all__ = [
     "ZProjectionDialog",
     "DeconvolutionDialog",
     "NLCGDeconvolutionWorker",
+    "PSFDistillationDialog",
+    "PSFDistillationWorker",
     "OverlaySettingsDialog",
+    "ZMontageSettingsDialog",
     "BufferProcessingRunner",
     "LineProfileDialog",
     "get_line_profile_dialog",

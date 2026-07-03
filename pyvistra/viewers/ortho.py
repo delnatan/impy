@@ -15,92 +15,12 @@ from vispy import scene
 from vispy.visuals.transforms import STTransform
 
 from ..visuals.overlays import ScaleTimestampOverlay
-from ..visuals.image import CompositeImageVisual
+from ..visuals.image import CompositeImageVisual, MultiViewChannelProxy
 from ..widgets import (
     ChannelPanel,
     MetadataDialog,
     OverlaySettingsDialog,
 )
-
-
-class OrthoVisualProxy:
-    """
-    Proxies calls to multiple CompositeImageVisual instances to keep them in sync.
-    Used by ChannelPanel to control all 3 views simultaneously.
-    """
-
-    def __init__(self, visuals):
-        self.visuals = visuals  # [yx, zy, zx]
-        # We treat the first visual (YX) as the "primary" for reading state
-        self.primary = visuals[0]
-
-    @property
-    def layers(self):
-        # Return layers of primary so dialog can iterate them
-        return self.primary.layers
-
-    @property
-    def current_slice_cache(self):
-        return self.primary.current_slice_cache
-
-    @property
-    def channel_colors(self):
-        return self.primary.channel_colors
-
-    @property
-    def display(self):
-        """Shared :class:`ChannelDisplayList` (the primary view's).
-
-        Panels should subscribe here. The other two views are kept in
-        sync by this proxy's broadcast setters.
-        """
-        return self.primary.display
-
-    def set_clim(self, channel_idx, vmin, vmax):
-        for v in self.visuals:
-            v.set_clim(channel_idx, vmin, vmax)
-            # Re-push the cached plane so vispy's CPU-scaled texture is
-            # rebuilt with the new clim; without this the uniform-only
-            # update path doesn't reliably redraw all three ortho views.
-            cache = v.current_slice_cache
-            if (
-                cache is not None
-                and channel_idx < cache.shape[0]
-                and channel_idx < len(v.layers)
-            ):
-                v.layers[channel_idx].set_data(cache[channel_idx])
-
-    def get_clim(self, channel_idx):
-        return self.primary.get_clim(channel_idx)
-
-    def set_gamma(self, channel_idx, gamma):
-        for v in self.visuals:
-            v.set_gamma(channel_idx, gamma)
-
-    def get_gamma(self, channel_idx):
-        return self.primary.get_gamma(channel_idx)
-
-    def set_mode(self, mode):
-        for v in self.visuals:
-            v.set_mode(mode)
-
-    def set_active_channel(self, idx):
-        for v in self.visuals:
-            v.set_active_channel(idx)
-
-    def set_colormap(self, channel_idx, cmap_name):
-        for v in self.visuals:
-            v.set_colormap(channel_idx, cmap_name)
-
-    def get_colormap_name(self, channel_idx):
-        return self.primary.get_colormap_name(channel_idx)
-
-    def set_channel_visible(self, channel_idx, visible):
-        for v in self.visuals:
-            v.set_channel_visible(channel_idx, visible)
-
-    def get_channel_visible(self, channel_idx):
-        return self.primary.get_channel_visible(channel_idx)
 
 
 class TransposedProxy:
@@ -285,7 +205,7 @@ class OrthoViewer(QMainWindow):
             self.view_zx, data_zx, scale=(sz, sx)
         )
 
-        self.proxy = OrthoVisualProxy([self.vis_yx, self.vis_zy, self.vis_zx])
+        self.proxy = MultiViewChannelProxy([self.vis_yx, self.vis_zy, self.vis_zx])
         self._init_overlays()
 
         # Apply colormaps from source window if provided
@@ -901,7 +821,7 @@ class OrthoViewer(QMainWindow):
         # Ideally, we should update ALL canvases.
         # We can wrap this in a dummy object or just return one canvas
         # and ensure our proxy updates the others.
-        # Since OrthoVisualProxy updates all visuals, calling update() on one canvas
+        # Since MultiViewChannelProxy updates all visuals, calling update() on one canvas
         # might not be enough if they are on different canvases?
         # Actually, they ARE on different canvases.
         # So we need a CanvasProxy that updates all 3.

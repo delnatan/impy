@@ -157,8 +157,10 @@ class ImageWindow(QMainWindow):
         # Register with Manager
         self.window_id = manager.register(self)
 
-        # Set True by PSFComputeDialog so deconvolution dialogs can filter
-        # PSF windows from the general window list.
+        # Set True by PSFComputeDialog/PSFDistillationDialog so the PSF
+        # picker in deconvolution/distillation dialogs can annotate windows
+        # that are actually PSFs (the picker itself lists every open window,
+        # not just these -- a PSF loaded from disk is just as valid).
         self.is_psf = False
 
         self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
@@ -235,6 +237,7 @@ class ImageWindow(QMainWindow):
         self.transform_dialog = None
         self.z_projection_dialog = None
         self._deconvolution_dialog = None
+        self._psf_distillation_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
 
@@ -686,6 +689,10 @@ class ImageWindow(QMainWindow):
         volume_action.triggered.connect(self.show_volume_view)
         image_menu.addAction(volume_action)
 
+        zmontage_action = QAction("Z-Montage View...", self)
+        zmontage_action.triggered.connect(self.show_zmontage_view)
+        image_menu.addAction(zmontage_action)
+
         image_menu.addSeparator()
 
         transform_action = QAction("Transform...", self)
@@ -704,6 +711,10 @@ class ImageWindow(QMainWindow):
         decon_action = QAction("Deconvolution...", self)
         decon_action.triggered.connect(self.show_deconvolution_dialog)
         image_menu.addAction(decon_action)
+
+        psf_distill_action = QAction("PSF Distillation (NLCG)...", self)
+        psf_distill_action.triggered.connect(self.show_psf_distillation_dialog)
+        image_menu.addAction(psf_distill_action)
 
         image_menu.addSeparator()
 
@@ -2598,6 +2609,29 @@ class ImageWindow(QMainWindow):
         )
         self.volume_viewer.show()
 
+    def show_zmontage_view(self):
+        """Open the Z-montage view (every Z-slice tiled into a grid)."""
+        from ..viewers import ZMontageViewer
+
+        # Copy colormap settings from current renderer
+        colormaps = {}
+        for c in range(self.renderer.num_channels):
+            colormaps[c] = self.renderer.get_colormap_name(c)
+
+        # Acquire reference if proxy supports ref counting (for shared file handles)
+        data = self.img_data
+        if hasattr(data, "acquire"):
+            data = data.acquire()
+
+        self.zmontage_viewer = ZMontageViewer(
+            data,
+            self.meta,
+            title=f"Z-Montage - {self.windowTitle()}",
+            channel_colormaps=colormaps,
+            t_idx=self.t_idx if hasattr(self, "t_idx") else 0,
+        )
+        self.zmontage_viewer.show()
+
     def update_cursor(self):
         tool = manager.active_tool
         if tool == "pointer":
@@ -2637,6 +2671,13 @@ class ImageWindow(QMainWindow):
             self._deconvolution_dialog = DeconvolutionDialog(self, parent=self)
         self._deconvolution_dialog.show()
         self._deconvolution_dialog.raise_()
+
+    def show_psf_distillation_dialog(self):
+        from pyvistra.widgets.psf_distillation_dialog import PSFDistillationDialog
+        if self._psf_distillation_dialog is None:
+            self._psf_distillation_dialog = PSFDistillationDialog(self, parent=self)
+        self._psf_distillation_dialog.show()
+        self._psf_distillation_dialog.raise_()
 
     def show_line_profile(self):
         """Show the line profile dialog."""

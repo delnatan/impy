@@ -6,3 +6,4 @@ verify*.py
 .venv/
 uv.lock
 site/
+graphify-out/
