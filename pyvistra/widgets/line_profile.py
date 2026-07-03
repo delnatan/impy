@@ -873,6 +873,15 @@ class LineProfileDialog(QDialog):
             num_points = max(2, int(np.ceil(length_px)))
             distances_px = np.linspace(0.0, length_px, num_points)
 
+        # A source window computed from an FFT has "frequency" pixel space
+        # (see fft_dialog.py / ImageWindow.pixel_space) -- its "scale" is
+        # cycles/unit per pixel index, not a real-space distance, so the
+        # same px->physical conversion means something different on the
+        # axis label.
+        is_frequency_space = (
+            getattr(self.source_window, "pixel_space", "real") == "frequency"
+        )
+
         length_um = self._line_length_um_from_source(p1, p2)
         if path is not None and length_um is not None:
             # Re-derive length_um from arc length: avg of sx, sy applied to
@@ -885,10 +894,14 @@ class LineProfileDialog(QDialog):
         if length_um is not None and length_px > 0:
             distances_um = distances_px * (length_um / length_px)
             distances_plot = distances_um
-            x_axis_label = "Distance (um)"
+            x_axis_label = (
+                "Spatial freq. (1/um)" if is_frequency_space else "Distance (um)"
+            )
         else:
             distances_plot = distances_px
-            x_axis_label = "Distance (px)"
+            x_axis_label = (
+                "Spatial freq. (cycles/px)" if is_frequency_space else "Distance (px)"
+            )
 
         all_channels = self.all_channels_cb.isChecked()
         plot_series = []
@@ -968,8 +981,11 @@ class LineProfileDialog(QDialog):
 
         n_visible = sum(1 for s in plot_series if s.get("visible", True))
         if distances_um is not None:
+            unit_text = (
+                f"{length_um:.4g} 1/um" if is_frequency_space else f"{length_um:.2f} um"
+            )
             self.status_label.setText(
-                f"Line: {length_px:.1f} px ({length_um:.2f} um) | "
+                f"Line: {length_px:.1f} px ({unit_text}) | "
                 f"({p1[0]:.0f}, {p1[1]:.0f}) -> ({p2[0]:.0f}, {p2[1]:.0f}) | "
                 f"Series: {n_visible}/{len(plot_series)}"
             )
@@ -1070,6 +1086,12 @@ class LineProfileDialog(QDialog):
             distances_um = np.asarray(distances_um, dtype=float)
 
         scale = getattr(self.source_window, "meta", {}).get("scale") if self.source_window else None
+        is_frequency_space = (
+            getattr(self.source_window, "pixel_space", "real") == "frequency"
+        )
+        phys_unit = "1/um" if is_frequency_space else "um"
+        phys_col = "spatial_freq_1_per_um" if is_frequency_space else "distance_um"
+        phys_length_key = "spatial_freq_1_per_um" if is_frequency_space else "length_um"
 
         try:
             with open(path, "w", newline="") as f:
@@ -1077,10 +1099,10 @@ class LineProfileDialog(QDialog):
                 f.write(f"# p1_xy: ({p1[0]:.2f}, {p1[1]:.2f})\n")
                 f.write(f"# p2_xy: ({p2[0]:.2f}, {p2[1]:.2f})\n")
                 if scale is not None and len(scale) >= 3:
-                    f.write(f"# pixel_size_yx: ({float(scale[1]):.6g}, {float(scale[2]):.6g}) um\n")
+                    f.write(f"# pixel_size_yx: ({float(scale[1]):.6g}, {float(scale[2]):.6g}) {phys_unit}\n")
                 f.write(f"# line_length_px: {float(distances_px[-1]):.2f}\n")
                 if has_um:
-                    f.write(f"# line_length_um: {float(distances_um[-1]):.4f}\n")
+                    f.write(f"# line_{phys_length_key}: {float(distances_um[-1]):.4f}\n")
                 f.write(f"# all_channels: {self.all_channels_cb.isChecked()}\n")
                 f.write(f"#\n")
 
@@ -1092,7 +1114,7 @@ class LineProfileDialog(QDialog):
 
                 header = ["distance_px"]
                 if has_um:
-                    header.append("distance_um")
+                    header.append(phys_col)
                 header.extend(col_labels)
 
                 writer = csv.writer(f, delimiter=delimiter)

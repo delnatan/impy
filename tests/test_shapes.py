@@ -250,6 +250,39 @@ def test_add_shape_command():
     assert len(sd) == 1
 
 
+def test_pop_if_top_retracts_when_still_on_top():
+    sd = ShapeData()
+    stack = UndoStack()
+    cmd = AddShape(RECTANGLE, [10, 20, 50, 60])
+    stack.push(cmd, sd)
+    assert len(sd) == 1
+
+    assert stack.pop_if_top(cmd, sd) is True
+    assert len(sd) == 0
+    # Retracted, not undone -- must not be resurrectable via redo.
+    assert stack.can_redo is False
+    assert stack.redo(sd) is False
+    assert len(sd) == 0
+
+
+def test_pop_if_top_noop_when_another_command_pushed_since():
+    sd = ShapeData()
+    stack = UndoStack()
+    cmd = AddShape(RECTANGLE, [10, 20, 50, 60])
+    stack.push(cmd, sd)
+    other = sd.add(RECTANGLE, [0, 0, 5, 5])
+    stack.push(MoveShape(other, dx=1, dy=1), sd)
+
+    # `cmd` is no longer on top -- must not touch anything.
+    assert stack.pop_if_top(cmd, sd) is False
+    assert len(sd) == 2
+    np.testing.assert_allclose(sd.get(other).params[:4], [1, 1, 6, 6])
+
+    # The other command is still cleanly undoable.
+    stack.undo(sd)
+    np.testing.assert_allclose(sd.get(other).params[:4], [0, 0, 5, 5])
+
+
 def test_remove_shape_command():
     sd = ShapeData()
     sd.add(RECTANGLE, [10, 20, 50, 60])

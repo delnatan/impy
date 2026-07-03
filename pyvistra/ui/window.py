@@ -6,7 +6,7 @@ from datetime import datetime
 
 import numpy as np
 from qtpy import API_NAME
-from qtpy.QtCore import QPoint, Qt, QTimer, Signal
+from qtpy.QtCore import QEvent, QPoint, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QAction,
     QApplication,
@@ -82,6 +82,8 @@ from ..widgets import (
     AlignmentDialog,
     AxesDialog,
     ChannelPanel,
+    FFTDialog,
+    ImageMathDialog,
     MetadataDialog,
     OverlaySettingsDialog,
     TransformDialog,
@@ -163,6 +165,11 @@ class ImageWindow(QMainWindow):
         # not just these -- a PSF loaded from disk is just as valid).
         self.is_psf = False
 
+        # "real" (default) or "frequency" -- set on FFT output metadata
+        # (see fft_dialog.py) so unit-aware consumers (line profile, radial
+        # profile) know pixel indices mean cycles/unit, not distance.
+        self.pixel_space = self.meta.get("space", "real")
+
         self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
 
         # Title
@@ -236,6 +243,8 @@ class ImageWindow(QMainWindow):
         self.channel_panel = None
         self.transform_dialog = None
         self.z_projection_dialog = None
+        self._image_math_dialog = None
+        self._fft_dialog = None
         self._deconvolution_dialog = None
         self._psf_distillation_dialog = None
         self._alignment_dialog = None  # Shared singleton
@@ -285,6 +294,7 @@ class ImageWindow(QMainWindow):
         self.layers = LayerList()
         self._drawing_shape_layer = None  # Layer being drawn into
         self._drawing_shape_id = None  # Shape ID being drawn
+        self._drawing_shape_cmd = None  # AddShape command, to retract by identity
         # Multi-click polyline drawing state.
         self._polyline_drawing_layer = None
         self._polyline_drawing_id = None
@@ -322,6 +332,14 @@ class ImageWindow(QMainWindow):
         self.canvas.events.mouse_wheel.connect(self._on_view_transform_event)
         self.canvas.events.resize.connect(self._on_view_transform_event)
         manager.tool_changed.connect(self._on_active_tool_changed)
+        # Force a repaint whenever this window becomes active again. Edits
+        # made while a floating Qt.Tool dialog (Line/Radial Profile) had
+        # focus instead -- e.g. nudging a shape with arrow keys -- can leave
+        # the vispy canvas showing a stale frame until something explicitly
+        # asks it to redraw; canvas.update() alone (called from the shape's
+        # own edit-subscriber) isn't always enough once this window has lost
+        # and regained focus in between.
+        self.window_activated.connect(lambda _w: self.canvas.update())
 
         # 14. Hover tooltip (on-canvas Text visual for point info)
         self._hover_label = scene.visuals.Text(
@@ -396,6 +414,16 @@ class ImageWindow(QMainWindow):
     def focusInEvent(self, event):
         self.window_activated.emit(self)
         super().focusInEvent(event)
+
+    def changeEvent(self, event):
+        # ActivationChange fires on this top-level window regardless of
+        # which child widget (canvas, a slider, ...) actually holds keyboard
+        # focus, unlike focusInEvent -- which only fires here if *this*
+        # widget itself is the focus target. Needed to reliably catch
+        # "window became active again" for window_activated.
+        if event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            self.window_activated.emit(self)
+        super().changeEvent(event)
 
     def _on_vispy_key_press(self, event):
         """Block certain keys from reaching VisPy's camera handles"""
@@ -562,6 +590,7 @@ class ImageWindow(QMainWindow):
         self.img_data = new_data
         if metadata is not None:
             self.meta = metadata
+            self.pixel_space = self.meta.get("space", "real")
         self._subscribe_to_buffer(new_data)
 
         self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
@@ -707,6 +736,14 @@ class ImageWindow(QMainWindow):
         zproj_action = QAction("Z Projection...", self)
         zproj_action.triggered.connect(self.show_z_projection_dialog)
         image_menu.addAction(zproj_action)
+
+        image_math_action = QAction("Image Math...", self)
+        image_math_action.triggered.connect(self.show_image_math_dialog)
+        image_menu.addAction(image_math_action)
+
+        fft_action = QAction("FFT...", self)
+        fft_action.triggered.connect(self.show_fft_dialog)
+        image_menu.addAction(fft_action)
 
         decon_action = QAction("Deconvolution...", self)
         decon_action.triggered.connect(self.show_deconvolution_dialog)
@@ -1609,16 +1646,37 @@ class ImageWindow(QMainWindow):
             )
 
     def _finalize_shape_drawing(self) -> None:
-        """Clear active draw state and select the newly-created shape."""
+        """Clear active draw state and select the newly-created shape.
+
+        A click with no drag (press and release at the same point, e.g. a
+        fast click where no intermediate mouse-move ever arrives) leaves a
+        zero-extent rect/circle/line: invisible on canvas but still listed
+        in the layer manager. Discard it instead of keeping that stray
+        shape around.
+        """
         if self._drawing_shape_layer is None:
             return
         layer = self._drawing_shape_layer
         shape_id = self._drawing_shape_id
+        cmd = self._drawing_shape_cmd
         self._drawing_shape_layer = None
         self._drawing_shape_id = None
+        self._drawing_shape_cmd = None
         self.start_pos = None
-        if shape_id is not None and shape_id in layer.data:
-            self._select_shape(layer, shape_id)
+        if shape_id is None or shape_id not in layer.data:
+            return
+        rec = layer.data.get(shape_id)
+        x1, y1, x2, y2 = rec.params[:4]
+        if np.hypot(x2 - x1, y2 - y1) < 1e-6:
+            # Retract by identity, not a blind top-of-stack pop: if some
+            # other command got pushed onto this layer in between (e.g. a
+            # keyboard nudge/delete of a different, still-selected shape
+            # while the mouse was held down), pop_if_top() is a no-op and
+            # we leave the degenerate shape in place rather than risk
+            # reverting the wrong command.
+            layer.undo_stack.pop_if_top(cmd, layer.data)
+            return
+        self._select_shape(layer, shape_id)
 
     def _finalize_shape_edit(self) -> None:
         """Record the live shape edit as a single undoable command."""
@@ -1812,6 +1870,10 @@ class ImageWindow(QMainWindow):
             # Kymograph requires a time-series.
             if self.img_data.shape[0] > 1:
                 act_kymo = menu.addAction("Kymograph…")
+        act_radial_profile = None
+        if rec.shape_type == CIRCLE:
+            menu.addSeparator()
+            act_radial_profile = menu.addAction("Radial Profile…")
         if rec.shape_type == POLYLINE:
             menu.addSeparator()
             currently_closed = polyline_is_closed(rec)
@@ -1861,6 +1923,12 @@ class ImageWindow(QMainWindow):
         elif act_profile is not None and chosen is act_profile:
             from ..widgets import get_line_profile_dialog
             dlg = get_line_profile_dialog()
+            dlg.set_shape_source(self, layer, shape_id)
+            dlg.show()
+            dlg.raise_()
+        elif act_radial_profile is not None and chosen is act_radial_profile:
+            from ..widgets import get_radial_profile_dialog
+            dlg = get_radial_profile_dialog()
             dlg.set_shape_source(self, layer, shape_id)
             dlg.show()
             dlg.raise_()
@@ -2665,6 +2733,18 @@ class ImageWindow(QMainWindow):
         self.z_projection_dialog.show()
         self.z_projection_dialog.raise_()
 
+    def show_image_math_dialog(self):
+        if self._image_math_dialog is None:
+            self._image_math_dialog = ImageMathDialog(self, parent=self)
+        self._image_math_dialog.show()
+        self._image_math_dialog.raise_()
+
+    def show_fft_dialog(self):
+        if self._fft_dialog is None:
+            self._fft_dialog = FFTDialog(self, parent=self)
+        self._fft_dialog.show()
+        self._fft_dialog.raise_()
+
     def show_deconvolution_dialog(self):
         from pyvistra.widgets.deconvolution_dialog import DeconvolutionDialog
         if self._deconvolution_dialog is None:
@@ -2834,6 +2914,11 @@ class ImageWindow(QMainWindow):
             self.c_slider = QSlider(Qt.Horizontal)
             self.c_slider.setRange(0, self.C - 1)
             self.c_slider.setValue(self.c_idx)
+            # Arrow keys are the shape-nudge shortcut (see keyPressEvent) --
+            # a slider holding keyboard focus would otherwise steal them to
+            # step its own value instead, silently moving off the shape's
+            # t/z plane and making it look like it "disappeared".
+            self.c_slider.setFocusPolicy(Qt.NoFocus)
             self.c_slider.valueChanged.connect(self.on_channel_change)
             c_layout.addWidget(self.c_slider)
 
@@ -2854,6 +2939,7 @@ class ImageWindow(QMainWindow):
             self.t_slider = QSlider(Qt.Horizontal)
             self.t_slider.setRange(0, self.T - 1)
             self.t_slider.setValue(self.t_idx)
+            self.t_slider.setFocusPolicy(Qt.NoFocus)
             self.t_slider.valueChanged.connect(self.on_time_change)
             row.addWidget(self.t_slider)
 
@@ -2895,6 +2981,7 @@ class ImageWindow(QMainWindow):
             # Standard Slider
             self.z_slider = QSlider(Qt.Horizontal)
             self.z_slider.setRange(0, self.Z - 1)
+            self.z_slider.setFocusPolicy(Qt.NoFocus)
             self.z_slider.valueChanged.connect(self.on_z_change)
             row.addWidget(self.z_slider)
 
@@ -3528,6 +3615,7 @@ class ImageWindow(QMainWindow):
             layer.undo_stack.push(cmd, layer.data)
             self._drawing_shape_layer = layer
             self._drawing_shape_id = cmd.shape_id
+            self._drawing_shape_cmd = cmd
             layer.visual.update(layer.data, layer.selected_ids, self.t_idx, self.z_idx)
             self.view.camera.interactive = False
             self.canvas.update()

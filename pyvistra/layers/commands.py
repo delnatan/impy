@@ -53,6 +53,24 @@ class UndoStack:
         if len(self._undo) > self._max_size:
             self._undo.pop(0)
 
+    def pop_if_top(self, cmd: Command, data: Any) -> bool:
+        """Undo and permanently retract ``cmd``, but only if it is still the
+        most recently pushed command.
+
+        Unlike :meth:`undo`, the retracted command is *not* pushed onto the
+        redo stack -- it's meant for un-doing a command moments after it was
+        pushed because it turned out to be unwanted (e.g. a degenerate shape
+        from a click-with-no-drag), not for normal undo/redo navigation.
+        Returns False without touching the stack if another command has
+        been pushed on top of ``cmd`` in the meantime, since popping would
+        then undo the wrong thing.
+        """
+        if not self._undo or self._undo[-1] is not cmd:
+            return False
+        self._undo.pop()
+        cmd.undo(data)
+        return True
+
     def undo(self, data: Any) -> bool:
         """Undo the last command. Returns True if an undo was performed."""
         if not self._undo:

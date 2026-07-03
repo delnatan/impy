@@ -28,12 +28,19 @@ from .psf_dialog import PSFComputeDialog
 from .pupil_dialog import PupilComputeDialog
 from .axes_dialog import AxesDialog
 from .line_profile import LineProfileDialog, get_line_profile_dialog, line_profile_dialog_exists
+from .radial_profile_dialog import (
+    RadialProfileDialog,
+    get_radial_profile_dialog,
+    radial_profile_dialog_exists,
+)
 from .convergence_plot import (
     ConvergencePlotDialog,
     ConvergencePlotWidget,
     get_convergence_comparison_dialog,
 )
 from .z_projection_dialog import ZProjectionDialog
+from .image_math_dialog import ImageMathDialog
+from .fft_dialog import FFTDialog
 from .deconvolution_dialog import DeconvolutionDialog
 from .deconvolution_worker import NLCGDeconvolutionWorker
 from .psf_distillation_dialog import PSFDistillationDialog
@@ -67,6 +74,8 @@ __all__ = [
     "PupilComputeDialog",
     "AxesDialog",
     "ZProjectionDialog",
+    "ImageMathDialog",
+    "FFTDialog",
     "DeconvolutionDialog",
     "NLCGDeconvolutionWorker",
     "PSFDistillationDialog",
@@ -77,6 +86,9 @@ __all__ = [
     "LineProfileDialog",
     "get_line_profile_dialog",
     "line_profile_dialog_exists",
+    "RadialProfileDialog",
+    "get_radial_profile_dialog",
+    "radial_profile_dialog_exists",
     "ConvergencePlotWidget",
     "ConvergencePlotDialog",
     "get_convergence_comparison_dialog",

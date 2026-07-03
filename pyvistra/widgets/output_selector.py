@@ -145,8 +145,12 @@ class ImageOutputSelector(QWidget):
         self._combo.addItem("New Window", self._NEW_WINDOW)
         self._combo.addItem("Save to File", self._SAVE_FILE)
 
-        # Restore previous selection if it still exists; otherwise default to New Window
-        idx = self._combo.findData(previous_selection)
+        # Restore previous selection if it still exists; otherwise default to
+        # New Window. ``previous_selection`` is None both on the very first
+        # call and for the separator row -- findData(None) would otherwise
+        # match the separator (its data is also unset/None) and strand the
+        # combo there instead of falling through to New Window.
+        idx = self._combo.findData(previous_selection) if previous_selection is not None else -1
         if idx < 0:
             idx = self._combo.findData(self._NEW_WINDOW)
         self._combo.setCurrentIndex(idx)

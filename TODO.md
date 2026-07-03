@@ -123,6 +123,29 @@ sufficient. Revisit only if a concrete need for it shows up.
 
 ---
 
+## Stage 6 — Image math & FFT inspection ✅
+
+Two small, independent Image-menu dialogs, both one-shot GUI-thread
+compute (build an `ImageBuffer`, call `output_selector.send(...)` directly
+— no streaming worker, per CLAUDE.md "I/O Routing Contract").
+
+- **`widgets/image_math_dialog.py`** (`ImageMathDialog`): add/subtract/
+  multiply/divide against a constant or a second open window (picked via
+  a combo populated from `manager.get_all()`, excluding self — same
+  pattern as `DeconvolutionDialog._refresh_psf_combo()`). Only Y/X must
+  match between the two windows; T/Z/C broadcast via ordinary numpy rules.
+- **`widgets/fft_dialog.py`** (`FFTDialog`): 2D (per-Z-slice) or 3D
+  (full-volume) mode; real-input (`rfftn`) or full-complex (`fftn`)
+  transform. Result is always `fftshift`ed so DC sits at the array center
+  — the real-transform's compact last axis (no negative-frequency half)
+  is correctly excluded from the shift. Displayed as log-magnitude,
+  magnitude, or phase (vispy can't render complex data directly).
+
+Both reuse existing conventions only — `numpy.fft`, no matplotlib,
+existing window-picker and I/O-routing patterns.
+
+---
+
 ## Notes / conventions
 
 - The `data/` dir stays Qt-free and vispy-free. Notifications from
