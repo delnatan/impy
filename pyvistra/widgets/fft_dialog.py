@@ -11,6 +11,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..io import coerce_scale_zyx
 from .output_selector import ImageOutputSelector
 
 _MODE_2D = "2d"
@@ -40,13 +41,6 @@ def _transform(data, kind, axes):
         spectrum = np.fft.fftn(data, axes=axes)
         spectrum = np.fft.fftshift(spectrum, axes=axes)
     return spectrum
-
-
-def _coerce_scale(scale):
-    """Return ``scale`` as a ``(z, y, x)`` float triple, defaulting to 1.0."""
-    if isinstance(scale, (list, tuple, np.ndarray)) and len(scale) >= 3:
-        return float(scale[0]), float(scale[1]), float(scale[2])
-    return 1.0, 1.0, 1.0
 
 
 def _reduce(spectrum, display):
@@ -157,7 +151,7 @@ class FFTDialog(QDialog):
             # frequency spacing (1 / (N * pixel_size)) per transformed axis
             # so unit-aware consumers (line/radial profile) label and
             # convert correctly instead of treating it as real-space um.
-            sz, sy, sx = _coerce_scale(out_meta.get("scale"))
+            sz, sy, sx = coerce_scale_zyx(out_meta.get("scale"))
             fy, fx = 1.0 / (Y * sy), 1.0 / (X * sx)
             if mode == _MODE_3D:
                 fz = 1.0 / (Z * sz)

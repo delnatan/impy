@@ -186,7 +186,7 @@ def _normalize_time_seconds_for_t(timestamp_seconds, t_size):
     return out
 
 
-def _coerce_scale_zyx(scale):
+def coerce_scale_zyx(scale):
     """Return a numeric (vz, vy, vx) tuple with safe defaults."""
     if isinstance(scale, (list, tuple, np.ndarray)) and len(scale) >= 3:
         try:
@@ -244,7 +244,7 @@ def build_z_projection_metadata(
     z_depth = z1 - z0 + 1
 
     out_meta = dict(metadata or {})
-    vz, vy, vx = _coerce_scale_zyx(out_meta.get("scale", (1.0, 1.0, 1.0)))
+    vz, vy, vx = coerce_scale_zyx(out_meta.get("scale", (1.0, 1.0, 1.0)))
 
     # Keep XY spacing, encode the projected slab thickness in singleton Z scale.
     out_meta["scale"] = (vz * z_depth, vy, vx)
