@@ -6,7 +6,7 @@ from datetime import datetime
 
 import numpy as np
 from qtpy import API_NAME
-from qtpy.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from qtpy.QtCore import QPoint, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QAction,
     QApplication,
@@ -332,14 +332,6 @@ class ImageWindow(QMainWindow):
         self.canvas.events.mouse_wheel.connect(self._on_view_transform_event)
         self.canvas.events.resize.connect(self._on_view_transform_event)
         manager.tool_changed.connect(self._on_active_tool_changed)
-        # Force a repaint whenever this window becomes active again. Edits
-        # made while a floating Qt.Tool dialog (Line/Radial Profile) had
-        # focus instead -- e.g. nudging a shape with arrow keys -- can leave
-        # the vispy canvas showing a stale frame until something explicitly
-        # asks it to redraw; canvas.update() alone (called from the shape's
-        # own edit-subscriber) isn't always enough once this window has lost
-        # and regained focus in between.
-        self.window_activated.connect(lambda _w: self.canvas.update())
 
         # 14. Hover tooltip (on-canvas Text visual for point info)
         self._hover_label = scene.visuals.Text(
@@ -414,16 +406,6 @@ class ImageWindow(QMainWindow):
     def focusInEvent(self, event):
         self.window_activated.emit(self)
         super().focusInEvent(event)
-
-    def changeEvent(self, event):
-        # ActivationChange fires on this top-level window regardless of
-        # which child widget (canvas, a slider, ...) actually holds keyboard
-        # focus, unlike focusInEvent -- which only fires here if *this*
-        # widget itself is the focus target. Needed to reliably catch
-        # "window became active again" for window_activated.
-        if event.type() == QEvent.ActivationChange and self.isActiveWindow():
-            self.window_activated.emit(self)
-        super().changeEvent(event)
 
     def _on_vispy_key_press(self, event):
         """Block certain keys from reaching VisPy's camera handles"""
