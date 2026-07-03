@@ -939,16 +939,14 @@ class LineProfileDialog(QDialog):
             cfg["label"] = label
 
             if path_phys is not None:
-                win_is_freq = (
-                    getattr(window, "pixel_space", "real") == "frequency"
-                )
+                win_is_freq = window.pixel_space == "frequency"
                 if win_is_freq != is_frequency_space:
                     # Real-space distance and spatial frequency aren't the
                     # same physical quantity -- comparing them on one axis
                     # would be meaningless, so skip rather than mislabel.
                     skipped_labels.append(label)
                     continue
-                win_scale = getattr(window, "meta", {}).get("scale")
+                win_scale = window.meta.get("scale")
                 if win_scale is not None and len(win_scale) >= 3:
                     sy_w, sx_w = float(win_scale[1]), float(win_scale[2])
                 else:

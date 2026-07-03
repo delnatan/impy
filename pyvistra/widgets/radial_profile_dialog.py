@@ -206,8 +206,7 @@ class RadialProfileDialog(QDialog):
             return
         window.window_activated.connect(self._on_window_activated)
         window.window_closing.connect(self._on_window_closing)
-        if hasattr(window, "view_changed"):
-            window.view_changed.connect(self._on_view_changed)
+        window.view_changed.connect(self._on_view_changed)
         self._connected_windows.add(window)
 
     def _disconnect_window(self, window):
@@ -216,8 +215,7 @@ class RadialProfileDialog(QDialog):
         try:
             window.window_activated.disconnect(self._on_window_activated)
             window.window_closing.disconnect(self._on_window_closing)
-            if hasattr(window, "view_changed"):
-                window.view_changed.disconnect(self._on_view_changed)
+            window.view_changed.disconnect(self._on_view_changed)
         except (TypeError, RuntimeError):
             pass
         self._connected_windows.discard(window)
@@ -229,7 +227,7 @@ class RadialProfileDialog(QDialog):
 
     def _on_window_closing(self, window):
         self._disconnect_window(window)
-        wid = getattr(window, "window_id", None)
+        wid = window.window_id
         if wid in self.series_config:
             self.series_config.pop(wid, None)
             self._refresh_series_list()
@@ -244,9 +242,8 @@ class RadialProfileDialog(QDialog):
     def _on_view_changed(self, window):
         if self._is_shutting_down or self.current_circle_data is None:
             return
-        wid = getattr(window, "window_id", None)
         source_wid = getattr(self.source_window, "window_id", None)
-        if wid in self.series_config or wid == source_wid:
+        if window.window_id in self.series_config or window.window_id == source_wid:
             self._refresh_profiles()
 
     # ------------------------------------------------------------------
@@ -346,8 +343,8 @@ class RadialProfileDialog(QDialog):
         if wid in self.series_config:
             return
         if channel_idx is None:
-            channel_idx = int(getattr(window, "c_idx", 0))
-        num_channels = int(getattr(window, "C", 1))
+            channel_idx = int(window.c_idx)
+        num_channels = int(window.C)
         channel_idx = int(np.clip(channel_idx, 0, max(0, num_channels - 1)))
         color = self._get_window_channel_color(window, channel_idx, len(self.series_config))
         self.series_config[wid] = {
@@ -433,7 +430,7 @@ class RadialProfileDialog(QDialog):
             return
         cfg = self.series_config[wid]
         window = cfg["window"]
-        n_channels = int(getattr(window, "C", 1))
+        n_channels = int(window.C)
         ch = int(cfg.get("channel", 0)) + 1
         self.series_channel_spin.blockSignals(True)
         self.series_channel_spin.setRange(1, max(1, n_channels))
@@ -457,7 +454,7 @@ class RadialProfileDialog(QDialog):
             return
         cfg = self.series_config[wid]
         window = cfg["window"]
-        n_channels = int(getattr(window, "C", 1))
+        n_channels = int(window.C)
         new_channel = int(np.clip(value - 1, 0, max(0, n_channels - 1)))
         cfg["channel"] = new_channel
         cfg["color"] = self._get_window_channel_color(window, new_channel, 0)
@@ -530,15 +527,13 @@ class RadialProfileDialog(QDialog):
             cfg["label"] = label
 
             if has_phys:
-                win_is_freq = (
-                    getattr(window, "pixel_space", "real") == "frequency"
-                )
+                win_is_freq = window.pixel_space == "frequency"
                 if win_is_freq != is_frequency_space:
                     # Real-space distance and spatial frequency aren't the
                     # same physical quantity -- skip rather than mislabel.
                     skipped_labels.append(label)
                     continue
-                win_scale = getattr(window, "meta", {}).get("scale")
+                win_scale = window.meta.get("scale")
                 if win_scale is not None and len(win_scale) >= 3:
                     sy_w, sx_w = float(win_scale[1]), float(win_scale[2])
                 else:
@@ -651,10 +646,10 @@ class RadialProfileDialog(QDialog):
         cache = window.renderer.current_slice_cache
         if cache is not None and cache.ndim == 3:
             return cache.shape[0]
-        return int(getattr(window, "C", 1))
+        return int(window.C)
 
     def _get_window_channel_color(self, window, channel_idx, fallback_idx):
-        colors = getattr(window.renderer, "channel_colors", [])
+        colors = window.renderer.channel_colors
         if channel_idx < len(colors):
             return _to_qcolor(colors[channel_idx], QColor(FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)])).name()
         return FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)]
