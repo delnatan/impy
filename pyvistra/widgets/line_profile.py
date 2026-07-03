@@ -860,53 +860,72 @@ class LineProfileDialog(QDialog):
         path = self.current_line_data.get("path")
 
         if path is not None and len(path) >= 2:
-            seg = np.diff(path, axis=0)
-            seg_len = np.hypot(seg[:, 0], seg[:, 1])
-            cum = np.concatenate([[0.0], np.cumsum(seg_len)])
-            length_px = float(cum[-1])
-            num_points = max(2, len(path))
-            distances_px = cum
+            path_px_source = np.asarray(path, dtype=float)
         else:
-            length_px = float(
-                np.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
+            num_points = max(
+                2, int(np.ceil(np.hypot(p2[0] - p1[0], p2[1] - p1[1])))
             )
-            num_points = max(2, int(np.ceil(length_px)))
-            distances_px = np.linspace(0.0, length_px, num_points)
+            path_px_source = np.column_stack(
+                [
+                    np.linspace(p1[0], p2[0], num_points),
+                    np.linspace(p1[1], p2[1], num_points),
+                ]
+            )
+
+        seg = np.diff(path_px_source, axis=0)
+        distances_px = np.concatenate(
+            [[0.0], np.cumsum(np.hypot(seg[:, 0], seg[:, 1]))]
+        )
+        length_px = float(distances_px[-1])
 
         # A source window computed from an FFT has "frequency" pixel space
         # (see fft_dialog.py / ImageWindow.pixel_space) -- its "scale" is
         # cycles/unit per pixel index, not a real-space distance, so the
         # same px->physical conversion means something different on the
-        # axis label.
+        # axis label, and it isn't the same physical quantity as a
+        # real-space distance from another window (handled below).
         is_frequency_space = (
             getattr(self.source_window, "pixel_space", "real") == "frequency"
         )
+        src_scale = (
+            getattr(self.source_window, "meta", {}).get("scale")
+            if self.source_window
+            else None
+        )
+        has_phys = src_scale is not None and len(src_scale) >= 3
 
-        length_um = self._line_length_um_from_source(p1, p2)
-        if path is not None and length_um is not None:
-            # Re-derive length_um from arc length: avg of sx, sy applied to
-            # cumulative px distance.
-            scale = getattr(self.source_window, "meta", {}).get("scale")
-            if scale is not None and len(scale) >= 3:
-                sx, sy = float(scale[2]), float(scale[1])
-                length_um = length_px * 0.5 * (sx + sy)
-        distances_um = None
-        if length_um is not None and length_px > 0:
-            distances_um = distances_px * (length_um / length_px)
-            distances_plot = distances_um
+        if has_phys:
+            sy_src, sx_src = float(src_scale[1]), float(src_scale[2])
+            # Physical-space path: scales each axis independently, so
+            # anisotropic pixel sizes (sx != sy) and off-axis segments are
+            # handled correctly rather than approximated by an averaged
+            # sx/sy factor. This is also the coordinate space shared across
+            # windows with different pixel sizes (see the per-window
+            # conversion below) -- the x-axis is now genuinely physical,
+            # not borrowed from one specific window's pixel grid.
+            path_phys = path_px_source * np.array([sx_src, sy_src])
+            seg_phys = np.diff(path_phys, axis=0)
+            distances_plot = np.concatenate(
+                [[0.0], np.cumsum(np.hypot(seg_phys[:, 0], seg_phys[:, 1]))]
+            )
+            length_um = float(distances_plot[-1])
             x_axis_label = (
                 "Spatial freq. (1/um)" if is_frequency_space else "Distance (um)"
             )
         else:
+            path_phys = None
             distances_plot = distances_px
+            length_um = None
             x_axis_label = (
                 "Spatial freq. (cycles/px)" if is_frequency_space else "Distance (px)"
             )
+        distances_um = distances_plot if has_phys else None
 
         all_channels = self.all_channels_cb.isChecked()
         plot_series = []
         computed_series = []
         stale_wids = []
+        skipped_labels = []
         color_idx = 0
 
         for wid, cfg in self.series_config.items():
@@ -919,6 +938,29 @@ class LineProfileDialog(QDialog):
             label = f"[{window.window_id}] {window.windowTitle()}"
             cfg["label"] = label
 
+            if path_phys is not None:
+                win_is_freq = (
+                    getattr(window, "pixel_space", "real") == "frequency"
+                )
+                if win_is_freq != is_frequency_space:
+                    # Real-space distance and spatial frequency aren't the
+                    # same physical quantity -- comparing them on one axis
+                    # would be meaningless, so skip rather than mislabel.
+                    skipped_labels.append(label)
+                    continue
+                win_scale = getattr(window, "meta", {}).get("scale")
+                if win_scale is not None and len(win_scale) >= 3:
+                    sy_w, sx_w = float(win_scale[1]), float(win_scale[2])
+                else:
+                    sy_w, sx_w = 1.0, 1.0
+                # Convert the shared physical path into *this* window's own
+                # pixel grid -- sampling with the source window's raw pixel
+                # coordinates would land on the wrong physical location
+                # whenever pixel sizes differ between windows.
+                path_px_window = path_phys / np.array([sx_w, sy_w])
+            else:
+                path_px_window = path_px_source
+
             if all_channels:
                 n_ch = self._num_channels(window)
                 channels = range(n_ch)
@@ -926,9 +968,7 @@ class LineProfileDialog(QDialog):
                 channels = [int(cfg.get("channel", 0))]
 
             for ch in channels:
-                profile, ch_used = self._sample_profile(
-                    window, p1, p2, num_points, ch, path=path
-                )
+                profile, ch_used = self._sample_profile(window, path_px_window, ch)
                 if profile is None:
                     continue
 
@@ -980,37 +1020,26 @@ class LineProfileDialog(QDialog):
         self.profile_widget.set_series(plot_series)
 
         n_visible = sum(1 for s in plot_series if s.get("visible", True))
-        if distances_um is not None:
+        if has_phys:
             unit_text = (
                 f"{length_um:.4g} 1/um" if is_frequency_space else f"{length_um:.2f} um"
             )
-            self.status_label.setText(
+            status = (
                 f"Line: {length_px:.1f} px ({unit_text}) | "
                 f"({p1[0]:.0f}, {p1[1]:.0f}) -> ({p2[0]:.0f}, {p2[1]:.0f}) | "
                 f"Series: {n_visible}/{len(plot_series)}"
             )
         else:
-            self.status_label.setText(
+            status = (
                 f"Line: {length_px:.1f} px | "
                 f"({p1[0]:.0f}, {p1[1]:.0f}) -> ({p2[0]:.0f}, {p2[1]:.0f}) | "
                 f"Series: {n_visible}/{len(plot_series)}"
             )
+        if skipped_labels:
+            status += f" | {len(skipped_labels)} skipped (mismatched pixel space)"
+        self.status_label.setText(status)
 
-    def _line_length_um_from_source(self, p1, p2):
-        if self.source_window is None:
-            return None
-
-        scale = getattr(self.source_window, "meta", {}).get("scale")
-        if scale is None or len(scale) < 3:
-            return None
-
-        sy = float(scale[1])
-        sx = float(scale[2])
-        dx = float(p2[0] - p1[0])
-        dy = float(p2[1] - p1[1])
-        return float(np.sqrt((dx * sx) ** 2 + (dy * sy) ** 2))
-
-    def _sample_profile(self, window, p1, p2, num_points, channel_idx, *, path=None):
+    def _sample_profile(self, window, path_px, channel_idx):
         cache = window.renderer.current_slice_cache
         if cache is None:
             return None, channel_idx
@@ -1026,14 +1055,8 @@ class LineProfileDialog(QDialog):
 
         from scipy.ndimage import map_coordinates
 
-        if path is not None and len(path) >= 2:
-            xs = np.asarray(path[:, 0], dtype=float)
-            ys = np.asarray(path[:, 1], dtype=float)
-        else:
-            x1, y1 = p1
-            x2, y2 = p2
-            xs = np.linspace(x1, x2, num_points)
-            ys = np.linspace(y1, y2, num_points)
+        xs = np.asarray(path_px[:, 0], dtype=float)
+        ys = np.asarray(path_px[:, 1], dtype=float)
         coords = np.array([ys, xs], dtype=float)
 
         profile = map_coordinates(

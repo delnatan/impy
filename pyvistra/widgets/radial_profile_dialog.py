@@ -482,25 +482,41 @@ class RadialProfileDialog(QDialog):
         is_frequency_space = (
             getattr(self.source_window, "pixel_space", "real") == "frequency"
         )
-        scale = getattr(self.source_window, "meta", {}).get("scale") if self.source_window else None
-        radial_scale = None
-        if scale is not None and len(scale) >= 3:
-            radial_scale = 0.5 * (float(scale[1]) + float(scale[2]))
+        src_scale = (
+            getattr(self.source_window, "meta", {}).get("scale")
+            if self.source_window
+            else None
+        )
+        has_phys = src_scale is not None and len(src_scale) >= 3
+
+        if has_phys:
+            # Physical-space center/radius: the coordinate space shared
+            # across windows with different pixel sizes (see the
+            # per-window conversion below). Circles don't have a natural
+            # anisotropic generalization (that would make them ellipses),
+            # so radius uses the same averaged sx/sy approximation as the
+            # rest of this dialog.
+            radial_scale_src = 0.5 * (float(src_scale[1]) + float(src_scale[2]))
+            cx_phys = cx * float(src_scale[2])
+            cy_phys = cy * float(src_scale[1])
+            radius_phys = radius * radial_scale_src
+        else:
+            cx_phys = cy_phys = radius_phys = None
 
         if mode == _MODE_RADIAL:
-            if radial_scale is not None:
-                x_axis_label = "Spatial freq. (1/um)" if is_frequency_space else "Radius (um)"
-            else:
-                x_axis_label = "Spatial freq. (cycles/px)" if is_frequency_space else "Radius (px)"
+            x_axis_label = (
+                "Spatial freq. (1/um)" if is_frequency_space else "Radius (um)"
+            ) if has_phys else (
+                "Spatial freq. (cycles/px)" if is_frequency_space else "Radius (px)"
+            )
         else:
             x_axis_label = "Angle (degrees)"
-            n_samples = max(64, int(np.ceil(2 * np.pi * max(radius, 1.0))))
-            angles_deg = np.degrees(np.linspace(0.0, 2 * np.pi, n_samples, endpoint=False))
 
         all_channels = self.all_channels_cb.isChecked()
         plot_series = []
         computed_series = []
         stale_wids = []
+        skipped_labels = []
         color_idx = 0
 
         for wid, cfg in self.series_config.items():
@@ -513,19 +529,48 @@ class RadialProfileDialog(QDialog):
             label = f"[{window.window_id}] {window.windowTitle()}"
             cfg["label"] = label
 
+            if has_phys:
+                win_is_freq = (
+                    getattr(window, "pixel_space", "real") == "frequency"
+                )
+                if win_is_freq != is_frequency_space:
+                    # Real-space distance and spatial frequency aren't the
+                    # same physical quantity -- skip rather than mislabel.
+                    skipped_labels.append(label)
+                    continue
+                win_scale = getattr(window, "meta", {}).get("scale")
+                if win_scale is not None and len(win_scale) >= 3:
+                    sy_w, sx_w = float(win_scale[1]), float(win_scale[2])
+                else:
+                    sy_w, sx_w = 1.0, 1.0
+                radial_scale_w = 0.5 * (sy_w + sx_w)
+                # Convert the shared physical circle into *this* window's
+                # own pixel grid -- reusing the source window's raw pixel
+                # center/radius would sample the wrong physical region
+                # whenever pixel sizes differ between windows.
+                cx_w = cx_phys / sx_w
+                cy_w = cy_phys / sy_w
+                radius_w = radius_phys / radial_scale_w
+            else:
+                cx_w, cy_w, radius_w = cx, cy, radius
+                radial_scale_w = None
+
             channels = range(self._num_channels(window)) if all_channels else [int(cfg.get("channel", 0))]
 
             for ch in channels:
                 if mode == _MODE_RADIAL:
-                    x_raw, profile, ch_used = self._sample_radial(window, cx, cy, radius, ch)
+                    x_raw, profile, ch_used = self._sample_radial(window, cx_w, cy_w, radius_w, ch)
                     if x_raw is None:
                         continue
-                    x_plot = x_raw * radial_scale if radial_scale is not None else x_raw
+                    x_plot = x_raw * radial_scale_w if radial_scale_w is not None else x_raw
                 else:
-                    profile, ch_used = self._sample_perimeter(window, cx, cy, radius, ch, n_samples)
+                    n_samples_w = max(64, int(np.ceil(2 * np.pi * max(radius_w, 1.0))))
+                    profile, ch_used = self._sample_perimeter(window, cx_w, cy_w, radius_w, ch, n_samples_w)
                     if profile is None:
                         continue
-                    x_raw = x_plot = angles_deg
+                    x_raw = x_plot = np.degrees(
+                        np.linspace(0.0, 2 * np.pi, n_samples_w, endpoint=False)
+                    )
 
                 color = self._get_window_channel_color(window, ch_used, color_idx)
                 color_idx += 1
@@ -556,10 +601,13 @@ class RadialProfileDialog(QDialog):
         self.profile_widget.set_series(plot_series)
 
         n_visible = sum(1 for s in plot_series if s.get("visible", True))
-        self.status_label.setText(
+        status = (
             f"Circle: r={radius:.1f}px center=({cx:.0f}, {cy:.0f}) | "
             f"Series: {n_visible}/{len(plot_series)}"
         )
+        if skipped_labels:
+            status += f" | {len(skipped_labels)} skipped (mismatched pixel space)"
+        self.status_label.setText(status)
 
     def _sample_radial(self, window, cx, cy, radius, channel_idx):
         image_2d, channel_used = self._get_channel_slice(window, channel_idx)
@@ -629,15 +677,20 @@ class RadialProfileDialog(QDialog):
         delimiter = "\t" if (path.lower().endswith(".tsv") or "TSV" in selected_filter) else ","
 
         mode = visible[0]["mode"]
-        x_raw = np.asarray(visible[0]["x_raw"], dtype=float)
-        x_plot = np.asarray(visible[0]["x_plot"], dtype=float)
         x_col = "radius_px" if mode == _MODE_RADIAL else "angle_deg"
+        is_frequency_space = (
+            getattr(self.source_window, "pixel_space", "real") == "frequency"
+        )
         x_phys_col = None
-        if mode == _MODE_RADIAL and not np.array_equal(x_raw, x_plot):
-            is_frequency_space = (
-                getattr(self.source_window, "pixel_space", "real") == "frequency"
-            )
+        if mode == _MODE_RADIAL and not np.array_equal(
+            visible[0]["x_raw"], visible[0]["x_plot"]
+        ):
             x_phys_col = "spatial_freq_1_per_um" if is_frequency_space else "radius_um"
+
+        # Windows with different pixel sizes get their own radius_w/n_samples
+        # (see _refresh_profiles), so series can have different lengths --
+        # a single shared x column only works when they all match.
+        same_length = len({len(s["x_raw"]) for s in visible}) == 1
 
         try:
             with open(path, "w", newline="") as f:
@@ -646,26 +699,48 @@ class RadialProfileDialog(QDialog):
                 f.write(f"# radius_px: {self.current_circle_data['radius']:.2f}\n")
                 f.write(f"# all_channels: {self.all_channels_cb.isChecked()}\n#\n")
 
-                col_labels = [
-                    f"[{s['window_id']}] {s['window_title']} Ch{s['channel'] + 1}"
-                    for s in visible
-                ]
-                header = [x_col]
-                if x_phys_col is not None:
-                    header.append(x_phys_col)
-                header.extend(col_labels)
-
                 writer = csv.writer(f, delimiter=delimiter)
-                writer.writerow(header)
 
-                for i in range(len(x_raw)):
-                    row = [f"{float(x_raw[i]):.4f}"]
+                if same_length:
+                    x_raw = np.asarray(visible[0]["x_raw"], dtype=float)
+                    x_plot = np.asarray(visible[0]["x_plot"], dtype=float)
+                    col_labels = [
+                        f"[{s['window_id']}] {s['window_title']} Ch{s['channel'] + 1}"
+                        for s in visible
+                    ]
+                    header = [x_col]
                     if x_phys_col is not None:
-                        row.append(f"{float(x_plot[i]):.6g}")
+                        header.append(x_phys_col)
+                    header.extend(col_labels)
+                    writer.writerow(header)
+
+                    for i in range(len(x_raw)):
+                        row = [f"{float(x_raw[i]):.4f}"]
+                        if x_phys_col is not None:
+                            row.append(f"{float(x_plot[i]):.6g}")
+                        for s in visible:
+                            vals = np.asarray(s["values"], dtype=float)
+                            row.append(f"{float(vals[i]):.6g}")
+                        writer.writerow(row)
+                else:
+                    # Long format: one row per (series, sample) triple.
+                    header = ["series", x_col]
+                    if x_phys_col is not None:
+                        header.append(x_phys_col)
+                    header.append("value")
+                    writer.writerow(header)
+
                     for s in visible:
-                        vals = np.asarray(s["values"], dtype=float)
-                        row.append(f"{float(vals[i]):.6g}")
-                    writer.writerow(row)
+                        label = f"[{s['window_id']}] {s['window_title']} Ch{s['channel'] + 1}"
+                        x_raw_s = np.asarray(s["x_raw"], dtype=float)
+                        x_plot_s = np.asarray(s["x_plot"], dtype=float)
+                        vals_s = np.asarray(s["values"], dtype=float)
+                        for i in range(len(x_raw_s)):
+                            row = [label, f"{float(x_raw_s[i]):.4f}"]
+                            if x_phys_col is not None:
+                                row.append(f"{float(x_plot_s[i]):.6g}")
+                            row.append(f"{float(vals_s[i]):.6g}")
+                            writer.writerow(row)
         except Exception as e:
             self.status_label.setText(f"Export failed: {e}")
             return
