@@ -37,7 +37,7 @@ pyvistra/
 ├── __init__.py              # Public API (thin re-exports)
 ├── colormaps.py             # Colormap registry (no matplotlib)
 ├── io.py                    # load_image, save_*, normalize_to_5d (thin dispatcher)
-├── rois.py                  # ROI geometry + vispy visuals (legacy, being replaced by data/shapes.py)
+├── rois.py                  # ROI geometry + vispy visuals (mostly retired; PointROI still used for focused-point edit)
 ├── theme.py                 # Qt theme
 │
 ├── data/                    # Pure data models (no vispy, no Qt)
@@ -253,11 +253,9 @@ Each `ImageWindow` owns a `LayerList` at `self.layers`. Methods like `add_shape_
 3. **Window lifecycle**: `WindowManager` emits signals → managers update their window lists
 4. **Layer signals**: `layer_added`, `layer_removed`, `layer_data_changed`, `active_layer_changed`
 
-### ROI System (Legacy)
+### ROI System (Legacy, mostly retired)
 
-The legacy ROI system in `rois.py` is being replaced by `data/shapes.py` + `visuals/shapes.py`. During migration, both coexist:
-- Legacy: `rois.py` ROI subclasses with coupled geometry+visuals
-- New: `ShapeData` (pure data) + `ShapeLayerVisual` (pure renderer) + `LayerManager`
+`data/shapes.py` + `visuals/shapes.py` (`ShapeData` pure data + `ShapeLayerVisual` pure renderer + `LayerManager`) is the live annotation system; the toolbar's rect/circle/line/polyline/point tools all drive it. The old `rois.py` ROI subclasses are largely dead: `gel_analyzer.py` migrated off `LaneROI` onto `ShapeLane` (a thin wrapper tagging `ShapeData` rectangles as gel lanes), and `AnnotationManager` was deleted outright. `CircleROI`, `LineROI`, `CoordinateROI`, `LaneROI` have no remaining call sites. `ROI`/`RectangleROI`/`PointROI` are still load-bearing — `ImageWindow._focused_point_roi` constructs a `PointROI` to reuse `RectangleROI`'s handle/drag machinery for focused-point editing. See TODO.md Stage 4d for the remaining (non-blocking) cleanup.
 
 ## Development Guidelines
 
@@ -308,11 +306,6 @@ self.roi_added.emit(new_roi)
 2. Implement `get_handles()` and `get_outline()` cases for the new type
 3. Add draw/edit logic in `ui/window.py` mouse handlers
 4. Register tool button in `ui/toolbar.py`
-
-### Adding a New ROI Type (Legacy)
-1. Create class in `rois.py` inheriting from `ROI`
-2. Implement: `update()`, `hit_test()`, `move()`, `adjust()`, `to_dict()`, `_update_visuals_from_data()`
-3. Register tool button in `ui/toolbar.py`
 
 ### Adding a Custom Colormap (programmatic)
 ```python
