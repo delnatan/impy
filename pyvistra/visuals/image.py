@@ -21,6 +21,15 @@ RGB_COLORMAPS = ["Red", "Pure Green", "Blue"]
 # Fallback swatch color for multi-color colormaps (viridis, etc.)
 _NEUTRAL_SWATCH = "#888888"
 
+# Dtypes with a GL internal format under texture_format="auto"
+# (float64 is downcast to float32 by vispy itself).
+_GL_TEXTURE_DTYPES = (
+    np.dtype(np.uint8),
+    np.dtype(np.uint16),
+    np.dtype(np.float32),
+    np.dtype(np.float64),
+)
+
 
 def get_colormap(name):
     """Get a vispy Colormap by name. Returns (Colormap, display_color_or_None)."""
@@ -102,6 +111,7 @@ class CompositeImageVisual:
                 parent=self.view.scene,
                 method="auto",
                 interpolation="nearest",
+                texture_format="auto",
             )
             image_visual.clim = state.clim
             image_visual.gamma = state.gamma
@@ -152,19 +162,21 @@ class CompositeImageVisual:
         self._update_visibility()
 
     def _update_visibility(self):
+        # GL blend state is fixed at _setup_layers; only visibility varies.
         for i, layer in enumerate(self.layers):
             if self.mode == "composite":
                 layer.visible = self.display[i].visible
-                layer.set_gl_state(
-                    blend=True,
-                    blend_func=("one", "one"),
-                    depth_test=False,
-                )
             else:
                 # In single channel mode, only show active channel
                 layer.visible = i == self.active_channel_idx
 
     def update_slice(self, t_idx, z_idx):
+        """Slice ``self.data`` at (t, z) and display it.
+
+        Slicing happens on the caller's thread; callers with an async
+        loader should slice off-thread and hand the plane to
+        :meth:`set_slice` instead.
+        """
         try:
             volume_slice = self.data[t_idx, z_idx, :, :, :]
         except Exception as e:
@@ -181,8 +193,17 @@ class CompositeImageVisual:
         ):  # (Z, Y, X) -> (Y, X)
             volume_slice = np.max(volume_slice, axis=0)
 
+        self.set_slice(volume_slice)
+
+    def set_slice(self, volume_slice):
+        """Display an already-loaded (C, Y, X) plane."""
         if volume_slice.ndim == 2:
             volume_slice = volume_slice[np.newaxis, :, :]
+
+        # GPU-scaled textures (texture_format="auto") only have GL internal
+        # formats for these dtypes; anything else (signed/wide ints) casts.
+        if volume_slice.dtype not in _GL_TEXTURE_DTYPES:
+            volume_slice = volume_slice.astype(np.float32)
 
         self.current_slice_cache = volume_slice
 
@@ -378,16 +399,6 @@ class MultiViewChannelProxy:
     def set_clim(self, channel_idx, vmin, vmax):
         for v in self.visuals:
             v.set_clim(channel_idx, vmin, vmax)
-            # Re-push the cached plane so vispy's CPU-scaled texture is
-            # rebuilt with the new clim; without this the uniform-only
-            # update path doesn't reliably redraw all views.
-            cache = v.current_slice_cache
-            if (
-                cache is not None
-                and channel_idx < cache.shape[0]
-                and channel_idx < len(v.layers)
-            ):
-                v.layers[channel_idx].set_data(cache[channel_idx])
 
     def get_clim(self, channel_idx):
         return self.primary.get_clim(channel_idx)

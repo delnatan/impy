@@ -67,6 +67,7 @@ class VolumeRendererProxy:
                 method="mip",
                 cmap=cmap,
                 clim="auto",
+                texture_format="auto",
             )
             volume.transform = STTransform(scale=(sx, sy, sz))
             volume.set_gl_state(
