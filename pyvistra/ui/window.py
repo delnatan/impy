@@ -68,6 +68,7 @@ from .manager import manager
 from ..visuals.overlays import ScaleTimestampOverlay
 from ..viewers import OrthoViewer
 from ..data.points import PointTable
+from ..data.view_state import ViewState
 from ..visuals.points import DEFAULT_STYLE as POINT_DEFAULT_STYLE, PointLayerVisual
 from ..visuals.shapes import ShapeLayerVisual
 from ..rois import (
@@ -218,13 +219,18 @@ class ImageWindow(QMainWindow):
         self.controls_layout.setSpacing(5)
         self.layout.addWidget(self.controls_widget, 0)
 
-        self.t_idx = 0
-        self.z_idx = 0
+        # Navigation state (t, z, projection). Sliders write into it;
+        # its subscription drives label sync + update_view, so any writer
+        # (slider, playback, scripting) triggers exactly one redraw.
+        self.view_state = ViewState()
+        self._suspend_view_updates = False
         self.c_idx = 0  # Active channel index for Single mode
 
         # Control references are optional (depend on C/T/Z dimensionality).
         # Initialize eagerly so playback/control methods are safe when T == 1.
         self._init_control_refs()
+        # Subscribe only after control refs exist — the handler touches them.
+        self.view_state.subscribe(self._on_view_state_changed)
 
         # Timelapse playback state
         self._playback_fps = 5.0
@@ -359,6 +365,51 @@ class ImageWindow(QMainWindow):
         self.update_view()
         self.renderer.auto_contrast()
         self.canvas.update()
+
+    # ------------------------------------------------------------------
+    # Navigation state (ViewState-backed)
+    # ------------------------------------------------------------------
+
+    @property
+    def t_idx(self):
+        return self.view_state.t
+
+    @t_idx.setter
+    def t_idx(self, val):
+        self.view_state.set_t(val)
+
+    @property
+    def z_idx(self):
+        return self.view_state.z
+
+    @z_idx.setter
+    def z_idx(self, val):
+        self.view_state.set_z(val)
+
+    def _on_view_state_changed(self, field):
+        """Sync nav widgets to ViewState, then redraw.
+
+        Fires once per actual state change (setters no-op on unchanged
+        values), so a slider drag and a programmatic ``window.t_idx = 5``
+        take the same single-redraw path.
+        """
+        vs = self.view_state
+        if field == "t":
+            if self.t_label is not None:
+                self.t_label.setText(str(vs.t))
+            if self.t_slider is not None and self.t_slider.value() != vs.t:
+                self.t_slider.blockSignals(True)
+                self.t_slider.setValue(vs.t)
+                self.t_slider.blockSignals(False)
+        elif field == "z":
+            if self.z_label is not None:
+                self.z_label.setText(str(vs.z))
+            if self.z_slider is not None and self.z_slider.value() != vs.z:
+                self.z_slider.blockSignals(True)
+                self.z_slider.setValue(vs.z)
+                self.z_slider.blockSignals(False)
+        if not self._suspend_view_updates:
+            self.update_view()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -579,9 +630,14 @@ class ImageWindow(QMainWindow):
         new_shape = (self.T, self.Z, self.C, self.Y, self.X)
         new_is_rgb = self.meta.get("is_rgb", False)
 
-        # Clamp indices to valid bounds for the new data.
-        self.t_idx = min(max(0, self.t_idx), self.T - 1)
-        self.z_idx = min(max(0, self.z_idx), self.Z - 1)
+        # Clamp indices to valid bounds for the new data. Suspend
+        # subscription redraws: the renderer isn't rebuilt yet, and
+        # update_view() runs explicitly below.
+        self._suspend_view_updates = True
+        try:
+            self.view_state.clamp(self.T, self.Z)
+        finally:
+            self._suspend_view_updates = False
         self.c_idx = min(max(0, self.c_idx), self.C - 1)
 
         needs_rebuild = (old_shape != new_shape) or (old_is_rgb != new_is_rgb)
@@ -2792,9 +2848,14 @@ class ImageWindow(QMainWindow):
         self.meta = new_meta
         self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
 
-        # Reset indices
-        self.t_idx = 0
-        self.z_idx = 0
+        # Reset indices (suspended: renderer/controls rebuilt below,
+        # followed by an explicit update_view)
+        self._suspend_view_updates = True
+        try:
+            self.view_state.set_t(0)
+            self.view_state.set_z(0)
+        finally:
+            self._suspend_view_updates = False
         self.c_idx = 0
 
         # Remove old renderer layers
@@ -2836,6 +2897,15 @@ class ImageWindow(QMainWindow):
 
         # Rebuild controls
         self._setup_controls()
+
+        # Fresh controls start with projection unchecked and a full-range
+        # slider; sync ViewState so update_view agrees with the widgets.
+        self._suspend_view_updates = True
+        try:
+            self.view_state.set_z_projection(False)
+            self.view_state.set_z_range(0, self.Z - 1)
+        finally:
+            self._suspend_view_updates = False
 
     def set_tool(self, tool_name):
         """
@@ -3020,12 +3090,9 @@ class ImageWindow(QMainWindow):
         self.view_changed.emit(self)
 
     def on_time_change(self, val):
-        self.t_idx = val
-        if hasattr(self, "t_label") and self.t_label is not None:
-            self.t_label.setText(str(val))
+        self.view_state.set_t(val)  # label + redraw via subscription
         if self._is_playing():
             self._schedule_next_playback_step()
-        self.update_view()
 
     def on_play_toggled(self, checked):
         if checked:
@@ -3179,19 +3246,16 @@ class ImageWindow(QMainWindow):
     def toggle_z_projection(self, checked):
         self.z_slider.setVisible(not checked)
         self.z_range_slider_widget.setVisible(checked)
-        self.update_view()
+        self.view_state.set_z_projection(checked)  # redraw via subscription
 
     def on_z_proj_change(self, val):
         # update z-min/max labels
         self.z_range_slider_min_label.setText(str(val[0]))
         self.z_range_slider_max_label.setText(str(val[1]))
-        self.update_view()
+        self.view_state.set_z_range(val[0], val[1])  # redraw via subscription
 
     def on_z_change(self, val):
-        self.z_idx = val
-        if hasattr(self, "z_label") and self.z_label is not None:
-            self.z_label.setText(str(val))
-        self.update_view()
+        self.view_state.set_z(val)  # label + redraw via subscription
 
     def _subscribe_to_buffer(self, data):
         if self._buffer_unsubscribe is not None:
@@ -3237,12 +3301,12 @@ class ImageWindow(QMainWindow):
         )
 
     def update_view(self):
-        if hasattr(self, "chk_proj") and self.chk_proj is not None and self.chk_proj.isChecked():
-            mn, mx = self.z_range_slider.value()
-            z_slice = slice(mn, mx + 1)
-            self.renderer.update_slice(self.t_idx, z_slice)
+        vs = self.view_state
+        if vs.z_projection:
+            mn, mx = vs.z_range if vs.z_range is not None else (0, self.Z - 1)
+            self.renderer.update_slice(vs.t, slice(mn, mx + 1))
         else:
-            self.renderer.update_slice(self.t_idx, self.z_idx)
+            self.renderer.update_slice(vs.t, vs.z)
 
         # Update all mask layers for 3D data
         for entry in self._mask_layers.values():

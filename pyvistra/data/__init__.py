@@ -19,6 +19,7 @@ from .colors import (
 )
 from .channel_state import ChannelDisplayList, ChannelDisplayState
 from .protocols import ObservableBuffer, Readable5D, Writable5D
+from .view_state import ViewState
 
 __all__ = [
     "File5DProxy",
@@ -39,4 +40,5 @@ __all__ = [
     "ObservableBuffer",
     "Readable5D",
     "Writable5D",
+    "ViewState",
 ]
