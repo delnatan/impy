@@ -312,32 +312,34 @@ has just that `QMenu` as its associated widget, whose own descendant
 tree is empty while closed, so `WidgetWithChildrenShortcut` would never
 actually match real focus (the canvas, a slider, …) without this.
 
-**Menu unification.** `ImageWindow`'s File/Adjust/Image/View menus
-(save, deconvolution, PSF distillation, Z-projection, image math, FFT,
-transform, alignment, Channels & Contrast, …) are built from a single
-declarative `MENU_SPEC` (`ui/window.py`) via `build_menus(menubar,
-spec, target)` — a list of `(menu_title, [{"label", "method",
-"shortcut"?, "tooltip"?}, ...])`. `Workspace` mirrors the *same* spec
-onto its own persistent bar via `build_proxy_menus` (`ui/workspace.py`),
-dispatching each action to whichever tab is currently active instead of
-a fixed `self`. This is why there's exactly one visible menu bar
-regardless of how many tabs are open: `Workspace.add_window()` hides
-the docked window's own embedded menu bar and disarms just its
-`MENU_SPEC`-driven action shortcuts (stored on `window._menu_actions`,
-built by `_setup_menu`) to prevent double-dispatch on shared shortcuts
-like Ctrl+S; `float_window()` restores both. `_refresh_image_menus_enabled`
-disables **both** the top-level menu actions (grays out the menu bar
-entry) **and** every individual leaf action underneath (`build_proxy_menus`
-returns both lists) while the active tab isn't an `ImageWindow` — a leaf
-action's own `isEnabled()` is untouched by its parent menu being
-disabled, so leaving it enabled would keep its shortcut "live" for Qt's
-shortcut matching and collide with the same shortcut on whichever
-non-mirrored viewer (Ortho/Volume/ZMontage/Tiled) tab actually has
-focus, silently firing neither (Qt's ambiguous-shortcut resolution).
-**Adding a new File/Adjust/Image/View action means adding one entry to
-`MENU_SPEC`** — both the per-window bar and the workspace's mirrored
-bar pick it up automatically; do not hand-add a `QAction` in
-`_setup_menu` directly, that bypasses the mirror.
+**Menu unification.** Every viewer class the workspace hosts
+(`ImageWindow`, `OrthoViewer`, `VolumeViewer`, `ZMontageViewer`,
+`TiledViewer`) declares a class-level declarative `MENU_SPEC` — a list
+of `(menu_title, [{"label", "method", "shortcut"?, "tooltip"?}, ...])`
+(format documented at `ui/window.py`'s module-level `MENU_SPEC`, which
+`ImageWindow.MENU_SPEC` references). Each viewer's own embedded bar is
+built from its spec via `build_menus(menubar, spec, target)` in
+`_setup_menu`, storing the actions on `window._menu_actions`.
+`Workspace.add_window()` hides the docked viewer's embedded menu bar,
+disarms its `MENU_SPEC` shortcuts (restored by `float_window()`), and
+mirrors the spec (once per spec, lazily) onto the workspace's
+persistent bar via `build_proxy_menus`, dispatching each action to the
+active tab. `_refresh_mirrored_menus` (called on every tab
+activation/addition/removal) shows only the active tab's mirrored
+menus, so the one visible menu bar always matches the selected tab.
+Hiding embedded bars is load-bearing on macOS: every docked
+`QMainWindow`'s `QMenuBar` attaches to the same native top-of-screen
+bar as the workspace's own, and whichever registers last hijacks it
+permanently — tab switches never re-evaluate native menu bar ownership,
+which used to leave the native bar stuck on a stale viewer's menus.
+Two subtleties: leaf actions of inactive specs must be **disabled**,
+not just hidden with their parent menu — an enabled action's shortcut
+stays live for Qt's shortcut matching regardless of menu visibility,
+and several specs share shortcuts (Shift+C, A, C), which would make
+both ambiguous so neither fires. **Adding a menu action to any viewer
+means adding one entry to that class's `MENU_SPEC`** — the embedded bar
+and the workspace mirror both pick it up; do not hand-add a `QAction`
+in `_setup_menu`, that bypasses the mirror.
 
 ### Event System
 
@@ -463,4 +465,4 @@ Place in `apps/` — not in core. Apps can import from core freely; core must no
 
 ---
 
-*Last Updated: 2026-07-03 (Stage 7: ViewState, SliceLoader, GPU clim, channel docks, lazy inits, workspace shell)*
+*Last Updated: 2026-07-04 (per-viewer MENU_SPEC mirroring: workspace menu bar tracks the active tab)*

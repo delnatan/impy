@@ -1,7 +1,6 @@
 import numpy as np
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
-    QAction,
     QComboBox,
     QGridLayout,
     QHBoxLayout,
@@ -91,6 +90,22 @@ class OrthoViewer(QMainWindow):
     # move, time step, set_data, …). ChannelPanel & line-profile widgets
     # listen for this to refresh per-channel histograms / profiles.
     view_changed = Signal(object)
+
+    # Mirrored onto the Workspace's persistent menu bar while docked
+    # (see ui/workspace.py); format documented at window.MENU_SPEC.
+    MENU_SPEC = [
+        ("Adjust", [
+            {"label": "Channels && Contrast...", "shortcut": "Shift+C", "method": "show_channel_panel"},
+        ]),
+        ("View", [
+            {"label": "Toggle Crosshair", "shortcut": "H", "method": "toggle_crosshair"},
+            {"label": "Reset View", "shortcut": "A", "method": "reset_cameras"},
+            {"label": "Overlay Settings...", "method": "show_overlay_settings_dialog"},
+        ]),
+        ("Image", [
+            {"label": "Image Info", "method": "show_metadata_dialog"},
+        ]),
+    ]
 
     def __init__(self, data, meta=None, title="Ortho View", channel_colormaps=None):
         super().__init__()
@@ -382,36 +397,14 @@ class OrthoViewer(QMainWindow):
             self.controls_layout.addLayout(row)
 
     def _setup_menu(self):
-        menubar = self.menuBar()
+        # Deferred import: ui.window imports this module (through the
+        # lazy viewers package root), so a module-level import back
+        # into ui.window would cycle.
+        from ..ui.window import build_menus
 
-        # Adjust
-        adjust_menu = menubar.addMenu("Adjust")
-        channels_action = QAction("Channels && Contrast...", self)
-        channels_action.setShortcut("Shift+C")
-        channels_action.triggered.connect(self.show_channel_panel)
-        adjust_menu.addAction(channels_action)
-
-        # View
-        view_menu = menubar.addMenu("View")
-        crosshair_action = QAction("Toggle Crosshair", self)
-        crosshair_action.setShortcut("H")
-        crosshair_action.triggered.connect(self.toggle_crosshair)
-        view_menu.addAction(crosshair_action)
-
-        reset_view_action = QAction("Reset View", self)
-        reset_view_action.setShortcut("A")
-        reset_view_action.triggered.connect(self.reset_cameras)
-        view_menu.addAction(reset_view_action)
-
-        overlay_action = QAction("Overlay Settings...", self)
-        overlay_action.triggered.connect(self.show_overlay_settings_dialog)
-        view_menu.addAction(overlay_action)
-
-        # Image
-        image_menu = menubar.addMenu("Image")
-        info_action = QAction("Image Info", self)
-        info_action.triggered.connect(self.show_metadata_dialog)
-        image_menu.addAction(info_action)
+        self._menu_actions = build_menus(
+            self.menuBar(), self.MENU_SPEC, self
+        )
 
     def _setup_events(self):
         def make_click_handler(view_name):

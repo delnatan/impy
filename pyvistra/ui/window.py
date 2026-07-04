@@ -188,6 +188,11 @@ def build_menus(menubar, spec, target):
 class ImageWindow(QMainWindow):
     """Main image viewer window with ROI support."""
 
+    # Every viewer class the Workspace hosts declares a class-level
+    # MENU_SPEC; the workspace mirrors the active tab's spec onto its
+    # persistent menu bar (see ui/workspace.py).
+    MENU_SPEC = MENU_SPEC
+
     # Signals for decoupled communication
     window_activated = Signal(object)  # Emits self when window becomes active
     window_shown = Signal(object)  # Emits self when window is shown

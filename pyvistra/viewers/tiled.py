@@ -11,7 +11,6 @@ from pathlib import Path
 import numpy as np
 from qtpy.QtCore import QPoint, QRect, QSize, Qt
 from qtpy.QtWidgets import (
-    QAction,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -820,6 +819,19 @@ class TiledViewer(QMainWindow):
     # Maximum tiles per page options
     TILES_PER_PAGE_OPTIONS = [25, 50, 100]
 
+    # Mirrored onto the Workspace's persistent menu bar while docked
+    # (see ui/workspace.py); format documented at window.MENU_SPEC.
+    MENU_SPEC = [
+        ("Adjust", [
+            {"label": "Channels...", "shortcut": "Shift+H", "method": "show_channel_panel"},
+            None,
+            {"label": "Auto Contrast All", "shortcut": "C", "method": "_auto_contrast_all"},
+            {"label": "Reset All Views", "shortcut": "A", "method": "_reset_all_views"},
+            None,
+            {"label": "Reorder Axes...", "method": "show_axes_dialog"},
+        ]),
+    ]
+
     def __init__(self, image_paths, tiles_per_page=50, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -1079,33 +1091,13 @@ class TiledViewer(QMainWindow):
 
     def _setup_menu(self):
         """Setup menu bar."""
-        menubar = self.menuBar()
+        # Deferred import: ui.window imports the viewers package, so a
+        # module-level import back into ui.window would cycle.
+        from ..ui.window import build_menus
 
-        # Adjust menu
-        adjust_menu = menubar.addMenu("Adjust")
-
-        channels_action = QAction("Channels...", self)
-        channels_action.setShortcut("Shift+H")
-        channels_action.triggered.connect(self.show_channel_panel)
-        adjust_menu.addAction(channels_action)
-
-        adjust_menu.addSeparator()
-
-        auto_all_action = QAction("Auto Contrast All", self)
-        auto_all_action.setShortcut("C")
-        auto_all_action.triggered.connect(self._auto_contrast_all)
-        adjust_menu.addAction(auto_all_action)
-
-        reset_all_action = QAction("Reset All Views", self)
-        reset_all_action.setShortcut("A")
-        reset_all_action.triggered.connect(self._reset_all_views)
-        adjust_menu.addAction(reset_all_action)
-
-        adjust_menu.addSeparator()
-
-        axes_action = QAction("Reorder Axes...", self)
-        axes_action.triggered.connect(self.show_axes_dialog)
-        adjust_menu.addAction(axes_action)
+        self._menu_actions = build_menus(
+            self.menuBar(), self.MENU_SPEC, self
+        )
 
     def show_channel_panel(self):
         """Show the global channel control panel."""

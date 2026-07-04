@@ -15,19 +15,17 @@ Viewer lifecycle stays unchanged: closing a tab calls the viewer's
 ``close()`` (normal ``closeEvent`` → ``manager.unregister``), and a
 viewer closing itself removes its tab via ``window_unregistered``.
 
-``ImageWindow``'s own ``QMainWindow`` menu bar (File/Adjust/Image/View
-— deconvolution, PSF distillation, Z-projection, image math, FFT,
-transform, alignment, the Channels & Contrast dock, …) is hidden while
-docked in the workspace: the same actions are mirrored onto the
-workspace's own persistent menu bar via ``build_proxy_menus``,
-dispatching to whichever ``ImageWindow`` tab is currently active, so
-there is exactly one visible menu bar for however many ``ImageWindow``
-tabs are open. Floating an ``ImageWindow`` tab back out restores its
-own menu bar. Other viewer types (``OrthoViewer``, ``VolumeViewer``,
-``ZMontageViewer``, ``TiledViewer``) have their own, unmirrored menu
-structure and keep their embedded menu bar visible even while docked —
-their features (including each viewer's own Channels & Contrast) stay
-reachable there.
+Every viewer class declares a class-level ``MENU_SPEC`` (see
+``window.MENU_SPEC`` for the format). While a viewer is docked, its own
+``QMainWindow`` menu bar is hidden and its spec is mirrored onto the
+workspace's persistent menu bar via ``build_proxy_menus``, dispatching
+to whichever tab is currently active; only the active tab's menus are
+visible, so the menu bar always matches the selected tab. Floating a
+tab back out restores its embedded menu bar. Hiding the embedded bars
+is load-bearing on macOS: every docked ``QMainWindow``'s ``QMenuBar``
+attaches to the same native top-of-screen menu bar as the workspace's
+own, and whichever registers last hijacks it — tab switches never
+re-evaluate it, leaving the native bar stuck on a stale viewer's menus.
 """
 
 from qtpy.QtCore import Qt
@@ -50,16 +48,15 @@ def build_proxy_menus(menubar, spec, get_target):
     each action dispatches to ``getattr(get_target(), item["method"])``
     at trigger time rather than a fixed bound method.
 
-    Returns ``(top_level_actions, leaf_actions)``. Both must be
-    disabled together when ``get_target()`` has nothing sensible to
-    act on: disabling only the top-level menu action grays out the
-    menu bar entry, but a leaf action's own ``isEnabled()`` is
-    untouched by its parent menu, so an enabled leaf action with a
-    shortcut (e.g. Shift+C) stays "live" for Qt's shortcut matching
-    even while its menu is grayed out — colliding with the same
-    shortcut on whichever non-mirrored viewer (Ortho/ZMontage/…) tab
-    actually has focus and making *both* ambiguous, so *neither*
-    fires.
+    Returns ``(top_level_actions, leaf_actions)``. When ``get_target()``
+    has nothing sensible to act on, hiding the top-level menu actions
+    is not enough — a leaf action's own ``isEnabled()`` is untouched by
+    its parent menu, so an enabled leaf action with a shortcut (e.g.
+    Shift+C, which several viewer specs declare) stays "live" for Qt's
+    shortcut matching even while its menu is hidden — colliding with
+    the same shortcut mirrored for the viewer class that *is* active
+    and making *both* ambiguous, so *neither* fires. See
+    ``Workspace._refresh_mirrored_menus``.
     """
     top_level_actions = []
     leaf_actions = []
@@ -124,7 +121,7 @@ class _TabGroup(QTabWidget):
         self._workspace._active_tab_widget = widget
         if widget is not None:
             manager.set_active_window(widget)
-        self._workspace._refresh_image_menus_enabled()
+        self._workspace._refresh_mirrored_menus()
 
     def _tab_menu(self, pos):
         idx = self.tabBar().tabAt(pos)
@@ -159,6 +156,10 @@ class Workspace(QMainWindow):
         self._splitter.setChildrenCollapsible(False)
         self.setCentralWidget(self._splitter)
         self._active_tab_widget = None
+        # spec id -> (spec, top_level_actions, leaf_actions); filled
+        # lazily by _mirror_spec the first time a viewer class with
+        # that MENU_SPEC is docked.
+        self._mirrored = {}
         self._add_group()
 
         # A viewer that closes itself (or is closed via its tab) must
@@ -200,7 +201,7 @@ class Workspace(QMainWindow):
                 group.setParent(None)
                 group.deleteLater()
                 groups = self._groups()
-        self._refresh_image_menus_enabled()
+        self._refresh_mirrored_menus()
 
     # ------------------------------------------------------------------
     # Public API
@@ -226,17 +227,18 @@ class Workspace(QMainWindow):
         for action in window.findChildren(QAction):
             action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
             window.addAction(action)
-        # Only ImageWindow's menu is mirrored onto the workspace's
-        # persistent bar (see build_proxy_menus): hide its own embedded
-        # menu bar and disarm just its MENU_SPEC shortcuts, so e.g.
-        # Ctrl+S doesn't fire both the hidden embedded action and the
-        # proxy action. Other viewer types (Ortho/Volume/ZMontage/
-        # Tiled) have their own, unmirrored menu structure — keep their
-        # embedded menu bar visible, or their features (e.g. each
-        # viewer's own Channels & Contrast) become unreachable.
-        from .window import ImageWindow
-
-        if isinstance(window, ImageWindow):
+        # Every viewer class declares a MENU_SPEC, mirrored onto the
+        # workspace's persistent bar (see build_proxy_menus): hide the
+        # viewer's own embedded menu bar and disarm just its MENU_SPEC
+        # shortcuts, so e.g. Ctrl+S doesn't fire both the hidden
+        # embedded action and the proxy action. Hiding the embedded bar
+        # is not optional on macOS: it would attach to the same native
+        # top-of-screen menu bar as the workspace's own and hijack it
+        # permanently (tab switches never re-evaluate native menu bar
+        # ownership within one top-level window).
+        spec = getattr(type(window), "MENU_SPEC", None)
+        if spec is not None:
+            self._mirror_spec(spec)
             menu_actions = getattr(window, "_menu_actions", [])
             window._docked_menu_shortcuts = {
                 action: action.shortcut()
@@ -251,7 +253,7 @@ class Workspace(QMainWindow):
         group.setCurrentWidget(window)
         self._active_tab_widget = window
         manager.set_active_window(window)
-        self._refresh_image_menus_enabled()
+        self._refresh_mirrored_menus()
 
     def split_right(self, window):
         """Move *window*'s tab into a new tab group to the right."""
@@ -307,42 +309,49 @@ class Workspace(QMainWindow):
         labels_action.triggered.connect(self._show_label_manager)
         panels_menu.addAction(labels_action)
 
-        # Mirror ImageWindow's File/Adjust/Image/View menus (save,
-        # deconvolution, PSF distillation, Z-projection, image math,
-        # FFT, transform, alignment, the Channels & Contrast dock, …)
-        # onto this persistent bar, dispatching to whichever tab is
-        # currently active. Local import: window.py imports this
-        # module at its own top level (for present_window), so
-        # importing it back at workspace.py's *module* level would
-        # cycle — deferring to call time (well after both modules have
-        # finished loading) avoids that.
-        from .window import MENU_SPEC
+        # Viewer menus (window.MENU_SPEC & co.) are mirrored onto this
+        # persistent bar lazily by add_window → _mirror_spec, the first
+        # time a viewer class with that spec is docked.
 
-        self._image_top_level_actions, self._image_leaf_actions = (
-            build_proxy_menus(
-                self.menuBar(), MENU_SPEC, self._active_image_window
-            )
+    def _mirror_spec(self, spec):
+        """Mirror *spec* onto the workspace menu bar (once per spec),
+        dispatching each action to the active tab while that tab's
+        class declares this spec."""
+        if id(spec) in self._mirrored:
+            return
+
+        def _target():
+            widget = self._active_tab_widget
+            if getattr(type(widget), "MENU_SPEC", None) is spec:
+                return widget
+            return None
+
+        top_actions, leaf_actions = build_proxy_menus(
+            self.menuBar(), spec, _target
         )
-        self._refresh_image_menus_enabled()
+        self._mirrored[id(spec)] = (spec, top_actions, leaf_actions)
+        self._refresh_mirrored_menus()
 
-    def _active_image_window(self):
-        from .window import ImageWindow
-
-        widget = self._active_tab_widget
-        return widget if isinstance(widget, ImageWindow) else None
-
-    def _refresh_image_menus_enabled(self):
-        enabled = self._active_image_window() is not None
-        for action in getattr(self, "_image_top_level_actions", []):
-            action.setEnabled(enabled)
-        for action in getattr(self, "_image_leaf_actions", []):
-            # Leaf actions must be disabled too, not just their parent
-            # menu — an enabled leaf action's shortcut is still "live"
-            # for Qt's global shortcut matching regardless of whether
-            # its menu can currently be opened, and would otherwise
-            # collide with the same shortcut on a non-mirrored viewer
-            # (Ortho/ZMontage/…) tab that actually has focus.
-            action.setEnabled(enabled)
+    def _refresh_mirrored_menus(self):
+        """Show only the active tab's mirrored menus on the workspace
+        bar (called on every tab activation/addition/removal)."""
+        active_spec = getattr(
+            type(self._active_tab_widget), "MENU_SPEC", None
+        )
+        for spec, top_actions, leaf_actions in self._mirrored.values():
+            match = spec is active_spec
+            for action in top_actions:
+                action.setVisible(match)
+            for action in leaf_actions:
+                # Leaf actions must be disabled too, not just hidden
+                # with their parent menu — an enabled leaf action's
+                # shortcut is still "live" for Qt's global shortcut
+                # matching regardless of whether its menu is visible,
+                # and would otherwise collide with the same shortcut
+                # (e.g. Shift+C) mirrored for the viewer class whose
+                # tab actually is active, making both ambiguous so
+                # neither fires.
+                action.setEnabled(match)
 
     def _show_layer_manager(self):
         from .layer_manager import show_layer_manager

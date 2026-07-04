@@ -13,7 +13,6 @@ import math
 import numpy as np
 from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
-    QAction,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -39,6 +38,22 @@ class ZMontageViewer(QMainWindow):
     # Emitted when the displayed timepoint changes, so ChannelPanel can
     # refresh its histograms (mirrors OrthoViewer/ImageWindow).
     view_changed = Signal(object)
+
+    # Mirrored onto the Workspace's persistent menu bar while docked
+    # (see ui/workspace.py); format documented at window.MENU_SPEC.
+    MENU_SPEC = [
+        ("Adjust", [
+            {"label": "Channels && Contrast...", "shortcut": "Shift+C", "method": "show_channel_panel"},
+            {"label": "Auto Contrast", "shortcut": "C", "method": "_auto_contrast"},
+        ]),
+        ("View", [
+            {"label": "Reset View", "shortcut": "A", "method": "_reset_view"},
+            {"label": "Montage Settings...", "method": "show_montage_settings"},
+        ]),
+        ("Image", [
+            {"label": "Image Info", "shortcut": "Shift+I", "method": "show_metadata_dialog"},
+        ]),
+    ]
 
     DEFAULT_CONFIG = {
         "show_labels": True,
@@ -209,37 +224,13 @@ class ZMontageViewer(QMainWindow):
         return label
 
     def _setup_menu(self):
-        menubar = self.menuBar()
+        # Deferred import: ui.window imports the viewers package, so a
+        # module-level import back into ui.window would cycle.
+        from ..ui.window import build_menus
 
-        adjust_menu = menubar.addMenu("Adjust")
-
-        channels_action = QAction("Channels && Contrast...", self)
-        channels_action.setShortcut("Shift+C")
-        channels_action.triggered.connect(self.show_channel_panel)
-        adjust_menu.addAction(channels_action)
-
-        auto_action = QAction("Auto Contrast", self)
-        auto_action.setShortcut("C")
-        auto_action.triggered.connect(self._auto_contrast)
-        adjust_menu.addAction(auto_action)
-
-        view_menu = menubar.addMenu("View")
-
-        reset_action = QAction("Reset View", self)
-        reset_action.setShortcut("A")
-        reset_action.triggered.connect(self._reset_view)
-        view_menu.addAction(reset_action)
-
-        settings_action = QAction("Montage Settings...", self)
-        settings_action.triggered.connect(self.show_montage_settings)
-        view_menu.addAction(settings_action)
-
-        image_menu = menubar.addMenu("Image")
-
-        info_action = QAction("Image Info", self)
-        info_action.setShortcut("Shift+I")
-        info_action.triggered.connect(self.show_metadata_dialog)
-        image_menu.addAction(info_action)
+        self._menu_actions = build_menus(
+            self.menuBar(), self.MENU_SPEC, self
+        )
 
     # -- Controls --
 
