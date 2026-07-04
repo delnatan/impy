@@ -119,6 +119,26 @@ class DeconvolutionDialog(QDialog):
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._refresh_running_status)
 
+        # Live refresh: the dialog is a non-modal Tool window meant to be
+        # kept open while the user draws an ROI or opens/loads a PSF
+        # window, so both combos must update without requiring a
+        # close/reopen cycle. Debounced (150ms, like ChannelPanel's
+        # histogram refresh) since shape drags fire many events/sec.
+        self._shape_layer_unsubs: dict = {}
+        self._shape_refresh_timer = QTimer(self)
+        self._shape_refresh_timer.setSingleShot(True)
+        self._shape_refresh_timer.setInterval(150)
+        self._shape_refresh_timer.timeout.connect(self._refresh_shape_combo)
+        self.viewer.layer_added.connect(self._schedule_shape_refresh)
+        self.viewer.layer_removed.connect(self._schedule_shape_refresh)
+
+        self._psf_refresh_timer = QTimer(self)
+        self._psf_refresh_timer.setSingleShot(True)
+        self._psf_refresh_timer.setInterval(150)
+        self._psf_refresh_timer.timeout.connect(self._refresh_psf_combo)
+        manager.window_registered.connect(self._schedule_psf_refresh)
+        manager.window_unregistered.connect(self._schedule_psf_refresh)
+
         main = QVBoxLayout(self)
         main.setContentsMargins(10, 10, 10, 8)
         main.setSpacing(6)
@@ -1027,7 +1047,34 @@ class DeconvolutionDialog(QDialog):
             )
             self.scale_label.setStyleSheet("color: #F44; font-size: 10px;")
 
+    def _schedule_shape_refresh(self, *_args) -> None:
+        self._shape_refresh_timer.start()
+
+    def _schedule_psf_refresh(self, *_args) -> None:
+        self._psf_refresh_timer.start()
+
+    def _sync_shape_subscriptions(self) -> None:
+        """Keep exactly one data-subscription per live shape layer.
+
+        Shapes drawn into an *existing* layer don't emit ``layer_added``
+        -- only ``ShapeData.subscribe`` sees those -- so this re-syncs on
+        every combo refresh (including the ones triggered by
+        ``layer_added``/``layer_removed`` themselves), ensuring a
+        freshly-added layer gets its own subscription before shapes are
+        drawn into it.
+        """
+        current = {l.name: l for l in self.viewer.layers.by_type("shapes")}
+        for name in list(self._shape_layer_unsubs):
+            if name not in current:
+                self._shape_layer_unsubs.pop(name)()
+        for name, layer in current.items():
+            if name not in self._shape_layer_unsubs:
+                self._shape_layer_unsubs[name] = layer.data.subscribe(
+                    self._schedule_shape_refresh
+                )
+
     def _refresh_shape_combo(self):
+        self._sync_shape_subscriptions()
         self.shape_combo.blockSignals(True)
         self.shape_combo.clear()
         self._rect_shapes = []
