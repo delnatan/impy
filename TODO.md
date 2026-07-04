@@ -108,6 +108,15 @@ as gel lanes (`mark_as_lane()`) instead of introducing a new data model.
       `add_shape_layer` / `add_point_layer` / `add_track_layer` /
       `add_label_layer`. Only unify if implementations are near-identical;
       keep typed methods if visuals/panel wiring diverge per type.
+- [ ] **Finish the LayerList migration**: `window.py` still keeps 81
+      references to the legacy `_mask_layers` / `_track_layers` /
+      `_point_layers` dicts, mirrored into `self.layers` (LayerList).
+      `Layer` already carries `visible` + `style`, so this is pure
+      deduplication — but the references run through the uncovered
+      mouse-interaction paths (brush/contour painting, point drag,
+      track ops). Do it in a dedicated session with manual verification
+      of those flows; all *external* consumers already read
+      `window.layers`.
 
 ---
 
@@ -145,6 +154,36 @@ Both reuse existing conventions only — `numpy.fft`, no matplotlib,
 existing window-picker and I/O-routing patterns.
 
 ---
+
+## Stage 7 — Performance & workspace overhaul ✅ (2026-07-03)
+
+Landed in one pass, in priority order from the graphify audit:
+
+1. **GPU-side clim** — `texture_format="auto"` on `CompositeImageVisual`
+   images + `Volume` visuals; clim/gamma are now shader uniforms
+   (float32 scrub 6.7→2.1 ms/frame/channel; deleted the
+   `MultiViewChannelProxy.set_clim` re-push workaround). Signed-int
+   planes cast to float32 (`_GL_TEXTURE_DTYPES`).
+2. **Histogram debounce** — `ChannelPanel` refreshes 150 ms after the
+   last `view_changed`; zero work while hidden (stale-flag + showEvent).
+3. **`ViewState`** (`data/view_state.py`) — observable t/z/projection
+   nav state; sliders write, one subscription redraws; `t_idx`/`z_idx`
+   are compatibility properties.
+4. **`SliceLoader`** (`data/slice_loader.py`) — latest-wins worker-thread
+   slice reads for lazy sources, byte-budget LRU + t±1/z±1 prefetch,
+   `_slice_ready` queued-signal delivery. Z-projection also moved
+   off-thread. Numpy sources stay synchronous.
+5. **Channel docks** — `show_channel_dock()`; ChannelPanel &
+   TiledChannelPanel are QWidgets docked in every QMainWindow viewer.
+6. **Lazy package inits** — PEP 562 in root/ui/viewers/readers inits;
+   `import pyvistra` ≈ 2 ms, zero import cycles (verified by standalone-
+   importing every previously cyclic module).
+7. **Workspace shell** (`ui/workspace.py`) — `imshow()` opens tabs in a
+   single Workspace window (splitter of tab groups; split-right / float
+   / close via tab context menu; `floating=True` opt-out). All viewer
+   creation routes through `present_window()`. Embedded windows get
+   `WidgetWithChildrenShortcut` scoping. LayerList migration split out
+   (see 4e) — the legacy layer dicts remain for now.
 
 ## Notes / conventions
 

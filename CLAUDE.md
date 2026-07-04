@@ -30,6 +30,14 @@ Keep data structures separate from algorithms. A class should either hold data O
 - PNG/JPEG loading uses Pillow (`PIL`), not `matplotlib.image`
 - Plotting widgets (line_profile, histogram) use pure Qt painting — follow this pattern
 
+### Lazy package inits (no import cycles)
+`pyvistra/__init__.py`, `ui/__init__.py`, `viewers/__init__.py`, and
+`readers/__init__.py` use PEP 562 `__getattr__` re-exports. `import
+pyvistra` is ~2 ms and pulls in no Qt/vispy/h5py until first use, and
+submodules can never cycle through a package root. When adding a public
+name, add it to the module's `_LAZY_IMPORTS` dict — do not add an eager
+`from .x import y` at package level.
+
 ## Package Layout
 
 ```
@@ -202,6 +210,30 @@ cmap.register('MyLUT', [(0,0,0,1), (0.5,0,1,1), (1,1,1,1)])
 cmap.register('MyArray', my_256x4_lut_array)
 ```
 
+### ViewState — Observable Navigation State
+
+Each `ImageWindow` owns a `ViewState` (`data/view_state.py`): `t`, `z`,
+`z_projection`, `z_range`, mutated via `set_*` and observed via
+`subscribe(callback(field))` — same pattern as `ChannelDisplayList`.
+Sliders/playback/scripting all write into it; the window's single
+subscription syncs labels/sliders and calls `update_view()`. Setters
+no-op on unchanged values, so every writer gets exactly one redraw.
+`window.t_idx` / `window.z_idx` are properties delegating to it.
+Bulk mutations (`set_data`, `reorder_axes`) wrap writes in
+`_suspend_view_updates` and call `update_view()` explicitly once.
+
+### SliceLoader — Async Slice Reads
+
+`data/slice_loader.py` moves per-slice disk reads and Z-max projections
+off the GUI thread for lazy sources (`File5DProxy`, `Zarr5DProxy`,
+`ImageBuffer`). Latest-wins queue + byte-budgeted LRU + (t±1, z±1)
+prefetch. Delivery callback fires on the worker thread; `ImageWindow`
+marshals via the queued `_slice_ready` signal (same contract as
+`ImageBuffer.subscribe`). Plain numpy sources keep the synchronous path
+(`window._slice_loader is None`). Renderers accept preloaded planes via
+`CompositeImageVisual.set_slice(plane)`; `update_slice(t, z)` remains
+the synchronous slice-and-show path.
+
 ### Per-Channel Display State
 
 Every multi-channel renderer (`CompositeImageVisual`, `VolumeRendererProxy`, `TiledVisualProxy`, `MultiViewChannelProxy` via its primary view) owns a `ChannelDisplayList` at `renderer.display` (defined in `data/channel_state.py`). Each entry is a `ChannelDisplayState` dataclass with `clim`, `gamma`, `colormap_name`, `visible` — plus a derived `display_color()` that consults the colormap registry.
@@ -225,6 +257,14 @@ The panel:
 
 There is no separate "ContrastDialog" — it was folded in. The panel is the single entry point for all visual adjustments and is wired to the "Channels && Contrast..." menu action (Shift+C) on every viewer.
 
+`ChannelPanel` is a plain `QWidget` shown as a **dock** (right area) via
+`show_channel_dock(window)` in every `QMainWindow` viewer — closing the
+dock hides it; the menu action re-shows the same instance. Histogram
+refresh is debounced (150 ms) and skipped entirely while the dock is
+hidden. Rule of thumb: persistent live-updating *panels* become docks;
+one-shot *parameter forms* (transform, FFT, deconvolution setup, …) stay
+dialogs.
+
 The shared `ChannelRow` widget is the unit of UI per channel and is reused by `TiledChannelPanel` for the tiled viewer's global controls.
 
 ### Layer System
@@ -244,6 +284,20 @@ Data models (in `data/`):
 - **SparseLabels** — pixel masks
 
 Each `ImageWindow` owns a `LayerList` at `self.layers`. Methods like `add_shape_layer()`, `add_point_layer()`, etc. register in both the legacy dicts and the new LayerList during the migration period.
+
+### Workspace Shell (single-window UI)
+
+`ui/workspace.py` hosts every viewer as a tab in one `Workspace`
+QMainWindow (a `QSplitter` of tab groups). **All viewer presentation
+goes through `present_window(viewer, floating=False)`** — never call
+`viewer.show()` directly for a new viewer. `imshow()` adds a tab
+(creating the workspace on first use) and still returns the
+`ImageWindow`; `imshow(..., floating=True)` opts out. Tab context menu:
+Split Right (side-by-side compare), Float Window, Close. Closing a tab
+runs the viewer's normal `closeEvent`; `manager` stays the registry and
+active-window tracker. Embedded windows get their QAction shortcuts
+scoped to `WidgetWithChildrenShortcut` so Ctrl+S & co. dispatch by
+focus, not ambiguously.
 
 ### Event System
 
@@ -369,4 +423,4 @@ Place in `apps/` — not in core. Apps can import from core freely; core must no
 
 ---
 
-*Last Updated: 2026-07-02 (PSF distillation dialog + PSF picker convention)*
+*Last Updated: 2026-07-03 (Stage 7: ViewState, SliceLoader, GPU clim, channel docks, lazy inits, workspace shell)*
