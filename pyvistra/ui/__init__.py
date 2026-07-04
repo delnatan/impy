@@ -15,6 +15,9 @@ _LAZY_IMPORTS = {
     "LayerManager": (".layer_manager", "LayerManager"),
     "get_layer_manager": (".layer_manager", "get_layer_manager"),
     "show_layer_manager": (".layer_manager", "show_layer_manager"),
+    "Workspace": (".workspace", "Workspace"),
+    "get_workspace": (".workspace", "get_workspace"),
+    "present_window": (".workspace", "present_window"),
 }
 
 __all__ = sorted(_LAZY_IMPORTS)

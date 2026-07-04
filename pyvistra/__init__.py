@@ -32,6 +32,9 @@ _LAZY_IMPORTS = {
     "Toolbar": (".ui.toolbar", "Toolbar"),
     "imshow": (".ui.window", "imshow"),
     "run_app": (".ui.window", "run_app"),
+    "Workspace": (".ui.workspace", "Workspace"),
+    "get_workspace": (".ui.workspace", "get_workspace"),
+    "present_window": (".ui.workspace", "present_window"),
     # widgets
     "ImageOutputSelector": (".widgets", "ImageOutputSelector"),
     "PSFComputeDialog": (".widgets", "PSFComputeDialog"),

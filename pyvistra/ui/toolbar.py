@@ -359,7 +359,9 @@ class Toolbar(QMainWindow):
             from ..viewers import TiledViewer
 
             viewer = TiledViewer(image_files)
-            viewer.show()
+            from .workspace import present_window
+
+            present_window(viewer)
             self.open_windows.append(viewer)
         elif len(image_files) == 1:
             # Single file -> regular ImageWindow
@@ -408,10 +410,11 @@ class Toolbar(QMainWindow):
 
     def spawn_viewer(self, filepath):
         from .window import ImageWindow
+        from .workspace import present_window
 
         try:
             viewer = ImageWindow(filepath)
-            viewer.show()
+            present_window(viewer)
             self.open_windows.append(viewer)
         except Exception as e:
             print(f"Error opening {filepath}: {e}")

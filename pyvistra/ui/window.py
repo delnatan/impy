@@ -65,6 +65,7 @@ from ..data.shapes import (
 )
 from ..layers.base import Layer, LayerList
 from .manager import manager
+from .workspace import present_window
 from ..visuals.overlays import ScaleTimestampOverlay
 from ..viewers import OrthoViewer
 from ..data.points import PointTable
@@ -2706,7 +2707,7 @@ class ImageWindow(QMainWindow):
             title=f"Ortho View - {self.windowTitle()}",
             channel_colormaps=colormaps,
         )
-        self.ortho_viewer.show()
+        present_window(self.ortho_viewer)
 
     def show_volume_view(self):
         """Open 3D volume rendering view."""
@@ -2730,7 +2731,7 @@ class ImageWindow(QMainWindow):
             time=self.t_idx if hasattr(self, "t_idx") else 0,
             channel_colormaps=colormaps,
         )
-        self.volume_viewer.show()
+        present_window(self.volume_viewer)
 
     def show_zmontage_view(self):
         """Open the Z-montage view (every Z-slice tiled into a grid)."""
@@ -2753,7 +2754,7 @@ class ImageWindow(QMainWindow):
             channel_colormaps=colormaps,
             t_idx=self.t_idx if hasattr(self, "t_idx") else 0,
         )
-        self.zmontage_viewer.show()
+        present_window(self.zmontage_viewer)
 
     def update_cursor(self):
         tool = manager.active_tool
@@ -4104,6 +4105,7 @@ def imshow(
     title=None,
     scale=None,
     colormap=None,
+    floating=False,
 ):
     """
     Convenience function to show an image.
@@ -4118,6 +4120,8 @@ def imshow(
         scale (tuple): Pixel spacing as (z, y, x) in physical units (e.g. microns).
                        Used for proper aspect ratio in OrthoViewer and VolumeViewer.
                        Overrides scale from metadata if both are provided.
+        floating (bool): Show as an independent top-level window instead
+                         of a workspace tab.
         colormap (str or dict): Colormap name or dict mapping channel indices to names.
                                 Available colormaps: "viridis", "plasma", "magma", "inferno",
                                 "cividis", "hot", "cool", "coolwarm", "turbo", "gray",
@@ -4207,9 +4211,7 @@ def imshow(
                 viewer.renderer.set_colormap(c, cmap_name)
         viewer.canvas.update()
 
-    viewer.show()
-
-    return viewer
+    return present_window(viewer, floating=floating)
 
 
 def run_app():

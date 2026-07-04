@@ -799,9 +799,9 @@ class TileWidget(QFrame):
         """Open this image in a full ImageWindow."""
         if self.file_path:
             from ..ui import ImageWindow
+            from ..ui.workspace import present_window
 
-            viewer = ImageWindow(self.file_path)
-            viewer.show()
+            present_window(ImageWindow(self.file_path))
 
     def _show_metadata(self):
         """Show metadata dialog."""
@@ -1507,6 +1507,6 @@ def open_tiled_viewer(image_paths, tiles_per_page=50):
     app.setStyleSheet(DARK_THEME)
 
     viewer = TiledViewer(image_paths, tiles_per_page=tiles_per_page)
-    viewer.show()
+    from ..ui.workspace import present_window
 
-    return viewer
+    return present_window(viewer)

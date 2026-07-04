@@ -225,11 +225,12 @@ class ImageOutputSelector(QWidget):
 
     def _send_to_new_window(self, data, metadata):
         from pyvistra.ui import ImageWindow
+        from pyvistra.ui.workspace import present_window
 
         title = self._title_edit.text() or self._default_title
         metadata["filename"] = title
         viewer = ImageWindow(data, title=title, meta=metadata)
-        viewer.show()
+        present_window(viewer)
         self.output_sent.emit(viewer)
         self.refresh_windows()  # Update dropdown with new window
         return viewer
