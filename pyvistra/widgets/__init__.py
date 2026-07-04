@@ -43,6 +43,10 @@ from .image_math_dialog import ImageMathDialog
 from .fft_dialog import FFTDialog
 from .deconvolution_dialog import DeconvolutionDialog
 from .deconvolution_worker import NLCGDeconvolutionWorker
+from .richardson_lucy_dialog import RichardsonLucyDialog
+from .richardson_lucy_worker import RLDeconvolutionWorker
+from .memsolve_dialog import MemsolveDeconvolutionDialog
+from .memsolve_worker import MemsolveDeconvolutionWorker
 from .psf_distillation_dialog import PSFDistillationDialog
 from .psf_distillation_worker import PSFDistillationWorker
 from .processing_helper import BufferProcessingRunner
@@ -79,6 +83,10 @@ __all__ = [
     "FFTDialog",
     "DeconvolutionDialog",
     "NLCGDeconvolutionWorker",
+    "RichardsonLucyDialog",
+    "RLDeconvolutionWorker",
+    "MemsolveDeconvolutionDialog",
+    "MemsolveDeconvolutionWorker",
     "PSFDistillationDialog",
     "PSFDistillationWorker",
     "OverlaySettingsDialog",

@@ -145,7 +145,11 @@ MENU_SPEC = [
         {"label": "Z Projection...", "method": "show_z_projection_dialog"},
         {"label": "Image Math...", "method": "show_image_math_dialog"},
         {"label": "FFT...", "method": "show_fft_dialog"},
-        {"label": "Deconvolution...", "method": "show_deconvolution_dialog"},
+        {"label": "Deconvolution", "submenu": [
+            {"label": "NLCG (default)...", "method": "show_deconvolution_dialog"},
+            {"label": "Richardson-Lucy...", "method": "show_rl_deconvolution_dialog"},
+            {"label": "MaxEnt (memsolve)...", "method": "show_memsolve_deconvolution_dialog"},
+        ]},
         {"label": "PSF Distillation (NLCG)...", "method": "show_psf_distillation_dialog"},
         None,
         {"label": "Reorder Axes...", "method": "show_axes_dialog"},
@@ -156,10 +160,34 @@ MENU_SPEC = [
 ]
 
 
+def _build_menu_items(menu, items, target, actions):
+    """Populate *menu* from *items*, recursing into nested ``"submenu"``
+    entries. Appends every dispatchable leaf action to *actions*."""
+    for item in items:
+        if item is None:
+            menu.addSeparator()
+            continue
+        if "submenu" in item:
+            submenu = menu.addMenu(item["label"])
+            _build_menu_items(submenu, item["submenu"], target, actions)
+            continue
+        action = QAction(item["label"], target)
+        if "shortcut" in item:
+            action.setShortcut(item["shortcut"])
+        if "tooltip" in item:
+            action.setToolTip(item["tooltip"])
+        action.triggered.connect(getattr(target, item["method"]))
+        menu.addAction(action)
+        actions.append(action)
+
+
 def build_menus(menubar, spec, target):
     """Populate *menubar* from *spec*, connecting each action to
     ``getattr(target, item["method"])``. Returns the flat list of leaf
-    (non-separator) QActions created, in spec order.
+    (non-separator) QActions created, in spec order. Items may nest a
+    ``"submenu"`` list instead of a ``"method"`` to group related actions
+    (e.g. the "Deconvolution" submenu) -- their leaves are folded into
+    the same flat list.
 
     Used for ImageWindow's own embedded menu bar (``target=self``,
     bound once at construction). The Workspace shell's persistent
@@ -170,18 +198,7 @@ def build_menus(menubar, spec, target):
     actions = []
     for menu_title, items in spec:
         menu = menubar.addMenu(menu_title)
-        for item in items:
-            if item is None:
-                menu.addSeparator()
-                continue
-            action = QAction(item["label"], target)
-            if "shortcut" in item:
-                action.setShortcut(item["shortcut"])
-            if "tooltip" in item:
-                action.setToolTip(item["tooltip"])
-            action.triggered.connect(getattr(target, item["method"]))
-            menu.addAction(action)
-            actions.append(action)
+        _build_menu_items(menu, items, target, actions)
     return actions
 
 
@@ -348,6 +365,8 @@ class ImageWindow(QMainWindow):
         self._image_math_dialog = None
         self._fft_dialog = None
         self._deconvolution_dialog = None
+        self._rl_deconvolution_dialog = None
+        self._memsolve_deconvolution_dialog = None
         self._psf_distillation_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
@@ -2785,6 +2804,20 @@ class ImageWindow(QMainWindow):
             self._deconvolution_dialog = DeconvolutionDialog(self, parent=self)
         self._deconvolution_dialog.show()
         self._deconvolution_dialog.raise_()
+
+    def show_rl_deconvolution_dialog(self):
+        from pyvistra.widgets.richardson_lucy_dialog import RichardsonLucyDialog
+        if self._rl_deconvolution_dialog is None:
+            self._rl_deconvolution_dialog = RichardsonLucyDialog(self, parent=self)
+        self._rl_deconvolution_dialog.show()
+        self._rl_deconvolution_dialog.raise_()
+
+    def show_memsolve_deconvolution_dialog(self):
+        from pyvistra.widgets.memsolve_dialog import MemsolveDeconvolutionDialog
+        if self._memsolve_deconvolution_dialog is None:
+            self._memsolve_deconvolution_dialog = MemsolveDeconvolutionDialog(self, parent=self)
+        self._memsolve_deconvolution_dialog.show()
+        self._memsolve_deconvolution_dialog.raise_()
 
     def show_psf_distillation_dialog(self):
         from pyvistra.widgets.psf_distillation_dialog import PSFDistillationDialog

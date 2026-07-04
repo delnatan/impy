@@ -1,12 +1,12 @@
-"""Background worker for NLCG deconvolution.
+"""Background worker for Richardson-Lucy deconvolution.
 
-A thin Qt shim around deconlib's NLCG engine
-(`deconlib.deconvolution.nlcg_with_operator` / `nlcg_solver` /
-`process_tiles`). The dialog hands it a fully-prepared
-:class:`~.decon_nlcg.PreparedInputs` plus the dialog state and an optional
-regularizer; the worker runs the solve in a QThread and emits
-progress / status / finished / error signals, writing live previews into
-the destination `ImageBuffer` as it goes.
+A thin Qt shim around deconlib's RL engine
+(`deconlib.deconvolution.richardson_lucy_with_operator` /
+`richardson_lucy_solver` / `process_tiles`). Structurally mirrors
+`NLCGDeconvolutionWorker` (`deconvolution_worker.py`) -- same
+prepared-inputs contract, same live-preview-via-buffer callback pattern --
+minus the regularizer (RL has none in deconlib) and NLCG-specific solver
+knobs.
 """
 
 from __future__ import annotations
@@ -15,19 +15,19 @@ import numpy as np
 from qtpy.QtCore import QObject, Signal
 
 from .decon_common import (
-    mean_poisson_i_divergence as _mean_poisson_i_divergence,
-    raise_if_nonfinite as _raise_if_nonfinite,
-    write_to_buffer as _write_to_buffer,
+    mean_poisson_i_divergence,
+    raise_if_nonfinite,
+    write_to_buffer,
 )
-from .decon_nlcg import NLCGDialogState, PreparedInputs, log
+from .decon_rl import PreparedInputs, RLDialogState, log
 
 
-class NLCGDeconvolutionWorker(QObject):
-    """Run NLCG (single-volume or tiled) off the GUI thread."""
+class RLDeconvolutionWorker(QObject):
+    """Run Richardson-Lucy (single-volume or tiled) off the GUI thread."""
 
     progress = Signal(int, int)
     status = Signal(str)
-    finished = Signal(object)        # NLCGResult (single-volume) or None (tiled)
+    finished = Signal(object)        # RLResult (single-volume) or None (tiled)
     cancelled = Signal()
     error = Signal(str)
 
@@ -35,15 +35,13 @@ class NLCGDeconvolutionWorker(QObject):
         self,
         *,
         prepared: PreparedInputs,
-        state: NLCGDialogState,
-        regularizer,
+        state: RLDialogState,
         buffer,                      # ImageBuffer for live preview / final write
         output_channel: int = 0,
     ):
         super().__init__()
         self._p = prepared
         self._state = state
-        self._regularizer = regularizer
         self._buffer = buffer
         self._output_channel = max(0, int(output_channel))
         self._cancel = False
@@ -58,7 +56,7 @@ class NLCGDeconvolutionWorker(QObject):
             else:
                 self._run_single()
         except Exception as exc:
-            log.exception("NLCG worker failed")
+            log.exception("Richardson-Lucy worker failed")
             self.error.emit(f"{type(exc).__name__}: {exc}")
             return
         if self._cancel:
@@ -68,63 +66,47 @@ class NLCGDeconvolutionWorker(QObject):
     # Single-volume path
 
     def _run_single(self) -> None:
-        import mlx.core as mx
-        from deconlib.deconvolution import make_forward_model, nlcg_with_operator
+        from deconlib.deconvolution import make_forward_model, richardson_lucy_with_operator
 
         p, s = self._p, self._state
         log.info(
-            "NLCG single-volume run: y=%s psf=%s zoom=%s num_iter=%d "
-            "background=%g regularizer=%s(weight=%g)",
+            "RL single-volume run: y=%s psf=%s zoom=%s num_iter=%d background=%g",
             p.y.shape, p.psf.shape, p.zoom, s.num_iter, s.background,
-            s.regularizer_kind, s.reg_weight,
         )
         self.status.emit("Building forward model…")
         model = make_forward_model(p.psf, p.y.shape, p.zoom)
 
-        data_mean = float(np.mean(p.y))
-        init_value = data_mean / float(np.prod(p.zoom))
-        init = mx.full(model.padded_shape, init_value, dtype=mx.float32)
-
-        def callback(k: int, f) -> bool:
+        def callback(k: int, x) -> bool:
             if k % max(1, s.eval_interval) == 0:
-                restored = np.asarray(f, dtype=np.float32)
-                _raise_if_nonfinite(restored, "NLCG estimate")
+                restored = np.asarray(x, dtype=np.float32)
+                raise_if_nonfinite(restored, "RL estimate")
                 if s.crop_to_visible:
                     restored = restored[model.valid_slices]
-                _write_to_buffer(
+                write_to_buffer(
                     self._buffer, restored, channel=self._output_channel,
                     log_stats=False,
                 )
                 self.progress.emit(k + 1, s.num_iter)
                 if s.verbose:
-                    pred = np.asarray(model.op.forward(f), dtype=np.float32) + s.background
-                    loss = _mean_poisson_i_divergence(p.y, pred)
+                    pred = np.asarray(model.op.forward(x), dtype=np.float32) + s.background
+                    loss = mean_poisson_i_divergence(p.y, pred)
                     self.status.emit(
-                        f"NLCG: iter {k + 1}/{s.num_iter}  mean I-div={loss:.4g}"
+                        f"RL: iter {k + 1}/{s.num_iter}  mean I-div={loss:.4g}"
                     )
                 else:
-                    self.status.emit(f"NLCG: iter {k + 1}/{s.num_iter}")
+                    self.status.emit(f"RL: iter {k + 1}/{s.num_iter}")
             return bool(self._cancel)
 
-        self.status.emit("Running NLCG…")
+        self.status.emit("Running Richardson-Lucy…")
         self.progress.emit(0, s.num_iter)
-        restart_interval = s.restart_interval if s.restart_interval > 0 else None
 
-        result = nlcg_with_operator(
+        result = richardson_lucy_with_operator(
             observed=p.y,
             blur_op=model.op,
             num_iter=s.num_iter,
             background=s.background,
-            regularizer=self._regularizer,
-            reg_weight=s.reg_weight,
-            init=init,
             callback=callback,
             eval_interval=s.eval_interval,
-            slack=s.slack,
-            tol=s.tol,
-            min_iter=s.min_iter,
-            restart_interval=restart_interval,
-            newton_iters=s.newton_iters,
             verbose=s.verbose,
         )
 
@@ -132,15 +114,15 @@ class NLCGDeconvolutionWorker(QObject):
             return
 
         restored = np.asarray(result.restored, dtype=np.float32)
-        _raise_if_nonfinite(restored, "NLCG result")
+        raise_if_nonfinite(restored, "RL result")
         if s.crop_to_visible:
             restored = restored[model.valid_slices]
-        _write_to_buffer(self._buffer, restored, channel=self._output_channel)
+        write_to_buffer(self._buffer, restored, channel=self._output_channel)
         self.progress.emit(result.iterations, s.num_iter)
         self.status.emit(f"Done after {result.iterations} iterations")
         log.info(
-            "NLCG done: iterations=%d converged=%s final_loss=%s restored=%s",
-            result.iterations, result.converged,
+            "RL done: iterations=%d final_loss=%s restored=%s",
+            result.iterations,
             f"{result.loss_history[-1]:.6g}" if result.loss_history else "n/a",
             tuple(restored.shape),
         )
@@ -150,7 +132,7 @@ class NLCGDeconvolutionWorker(QObject):
     # Tiled path
 
     def _run_tiled(self) -> None:
-        from deconlib.deconvolution import nlcg_solver, plan_tiles, process_tiles
+        from deconlib.deconvolution import plan_tiles, process_tiles, richardson_lucy_solver
 
         p, s = self._p, self._state
         guard = s.guard_px if s.guard_px > 0 else None
@@ -162,28 +144,17 @@ class NLCGDeconvolutionWorker(QObject):
         )
         n_tiles = len(plan.tiles)
         log.info(
-            "NLCG tiled run: y=%s psf=%s zoom=%s tiles=%d tile_shape=%s "
+            "RL tiled run: y=%s psf=%s zoom=%s tiles=%d tile_shape=%s "
             "guard=%s num_iter=%d",
             p.y.shape, p.psf.shape, p.zoom, n_tiles, plan.tile_shape,
             guard, s.num_iter,
         )
 
-        data_mean = float(np.mean(p.y))
-        init_value = data_mean / float(np.prod(p.zoom))
-        restart_interval = s.restart_interval if s.restart_interval > 0 else None
-
-        solve = nlcg_solver(
+        solve = richardson_lucy_solver(
             num_iter=s.num_iter,
             background=s.background,
-            regularizer=self._regularizer,
-            reg_weight=s.reg_weight,
-            init_value=init_value,
+            init_value=float(np.mean(p.y)) / float(np.prod(p.zoom)),
             eval_interval=s.eval_interval,
-            slack=s.slack,
-            tol=s.tol,
-            min_iter=s.min_iter,
-            restart_interval=restart_interval,
-            newton_iters=s.newton_iters,
             verbose=s.verbose,
         )
 
@@ -192,16 +163,16 @@ class NLCGDeconvolutionWorker(QObject):
         def on_tile_done(spec, output_so_far) -> bool:
             done["n"] += 1
             restored = np.asarray(output_so_far, dtype=np.float32)
-            _raise_if_nonfinite(restored, "NLCG tile result")
-            _write_to_buffer(
+            raise_if_nonfinite(restored, "RL tile result")
+            write_to_buffer(
                 self._buffer, restored, channel=self._output_channel,
                 log_stats=False,
             )
             self.progress.emit(done["n"], n_tiles)
-            self.status.emit(f"NLCG: tile {done['n']}/{n_tiles}")
+            self.status.emit(f"RL: tile {done['n']}/{n_tiles}")
             return bool(self._cancel)
 
-        self.status.emit(f"Running tiled NLCG ({n_tiles} tiles)…")
+        self.status.emit(f"Running tiled Richardson-Lucy ({n_tiles} tiles)…")
         self.progress.emit(0, n_tiles)
 
         output = process_tiles(
@@ -215,11 +186,9 @@ class NLCGDeconvolutionWorker(QObject):
         if self._cancel:
             return
 
-        _raise_if_nonfinite(output, "NLCG tiled result")
-        _write_to_buffer(self._buffer, output, channel=self._output_channel)
+        raise_if_nonfinite(output, "RL tiled result")
+        write_to_buffer(self._buffer, output, channel=self._output_channel)
         self.progress.emit(n_tiles, n_tiles)
         self.status.emit(f"Done — {n_tiles} tiles")
-        log.info("NLCG tiled done: output=%s", tuple(output.shape))
+        log.info("RL tiled done: output=%s", tuple(output.shape))
         self.finished.emit(None)
-
-

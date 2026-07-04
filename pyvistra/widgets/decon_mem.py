@@ -1,0 +1,194 @@
+"""Dialog-state -> memsolve MaxEnt (MEM) inputs.
+
+`MemsolveDialogState` is the flat dataclass the MEM dialog reads its
+widgets into. `build_mem_problem` mirrors
+`deconlib/scripts/memsolve_gaussian_icf.py`: a `GaussianICF` hidden->visible
+operator, the same padded/visible forward model deconlib's other engines
+use (`deconlib.deconvolution.make_forward_model`), and a flat MaxEnt prior.
+
+Shape math is generic across every deconvolution engine and lives in
+`decon_common` -- reused here for the dialog's recipe-preview labels
+(the actual run instead asks `deconlib.deconvolution.make_forward_model`
+for its `padded_shape`/`visible_shape`/`valid_slices`, so the two never
+drift apart).
+
+Unlike `richardson_lucy_with_operator`/NLCG, there is no separate additive
+detector-background parameter here: memsolve's `LinearInverseProblem`
+only accepts a plain linear `R`/`Rt` pair (wrapping `R` as
+``lambda f: R(f) + background`` would make it affine, breaking
+`mem.validate_problem`'s adjoint self-check), and a constant background
+is naturally absorbed into the MaxEnt prior instead -- exactly what
+`memsolve_gaussian_icf.py` does (no background handling at all, since its
+flat prior already represents the baseline flux level). The shared
+Detector/data group's Background field (from `SourcePSFPanelMixin`) is
+disabled in the MEM dialog for this reason.
+
+The prior (MaxEnt default model `m`) is `RCt(y)` -- the adjoint operator
+applied to the observation -- rather than a flat value. `mem`'s hidden-space
+MAP also initializes the starting iterate `h0` from the prior
+(`_entropy_default`), so this simultaneously gives MaxEnt a non-flat default
+model and a data-informed starting point, matching
+`memsolve_gaussian_icf.py`. `RCt` is built from non-negative operators
+(crop/downsample/convolve adjoints, Gaussian-blur ICF) applied to a
+non-negative observation, so it stays positive everywhere without needing
+the flat-prior padding floor the old constant-value prior required.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Tuple
+
+import numpy as np
+
+from .decon_common import (  # noqa: F401 (re-exported for `dmem.*` call sites)
+    _prepare_observation,
+    _prepare_psf_kernel,
+    compact_psf_shape_for_data,
+    estimate_tile_plan,
+    log,
+    output_5d_shape,
+    output_shape,
+    padded_shape,
+    per_axis_zoom,
+    valid_slices,
+    visible_shape,
+)
+
+
+@dataclass(frozen=True)
+class MemsolveDialogState:
+    # Forward model — independent lateral (XY) / axial (Z) zoom factors.
+    zoom_xy: float = 1.0
+    zoom_z: float = 1.0
+
+    # Gaussian ICF (isotropic sigma, physical units matching voxel spacing).
+    icf_gamma_um: float = 0.085
+
+    # MaxEnt MAP solver knobs (see mem.maxent.MaxEntConfig).
+    max_iter: int = 50
+    tol_omega: float = 0.05
+    aim: float = 1.0
+    rate: float = 0.2
+    omega_mode: str = "classic"             # "classic" | "auto"
+    cg_epsilon: float = 1e-2
+    cg_max_steps: int = 50
+    n_probe_g: int = 1
+    seed: int = 0
+    verbose: bool = False                   # MaxEntConfig.print_outer
+
+    # Output region.
+    crop_to_visible: bool = True
+
+    # memsolve's LinearInverseProblem doesn't compose with
+    # deconlib.deconvolution.process_tiles's per-tile solver contract, so
+    # tiling isn't offered in the UI. Fixed so this state still satisfies
+    # decon_common's generic `output_shape`/`output_5d_shape` helpers.
+    tiled: bool = False
+
+
+@dataclass(frozen=True)
+class MemProblemInputs:
+    """Numeric payload `MemsolveDeconvolutionWorker` hands to `mem`."""
+
+    y: np.ndarray                           # cropped observation
+    prior: np.ndarray                       # flat MaxEnt prior, padded_shape
+    R: object                               # visible -> data
+    Rt: object
+    C: object                               # hidden -> visible (GaussianICF)
+    Ct: object
+    RC: object                              # combined hidden -> data
+    RCt: object
+    zoom: Tuple[float, ...]
+    voxel_spacing: Tuple[float, ...]
+    padded_shape: Tuple[int, ...]
+    visible_shape: Tuple[int, ...]
+    valid_slices: Tuple[slice, ...]
+
+
+def build_mem_problem(
+    *,
+    state: MemsolveDialogState,
+    y_obs: np.ndarray,
+    psf_array: np.ndarray,
+    psf_pixel_size_um: Tuple[float, ...],
+) -> MemProblemInputs:
+    """Build the operator chain + prior `MemsolveDeconvolutionWorker` needs.
+
+    Mirrors `memsolve_gaussian_icf.py`'s forward model exactly: padded
+    visible -> convolve -> downsample -> crop -> data, plus a Gaussian ICF
+    hidden -> visible operator.
+    """
+    from deconlib.deconvolution import GaussianICF, as_numpy_op, make_forward_model
+
+    ndim = y_obs.ndim
+    if psf_array.ndim != ndim:
+        raise ValueError(
+            f"PSF ndim {psf_array.ndim} does not match observation ndim {ndim}"
+        )
+
+    zoom = per_axis_zoom(state, ndim)
+    psf = _prepare_psf_kernel(psf_array)
+    y = _prepare_observation(y_obs)
+    voxel_spacing = tuple(float(s) for s in psf_pixel_size_um)
+
+    model = make_forward_model(psf, y.shape, zoom)
+    R, Rt = as_numpy_op(model.op)
+
+    icf = GaussianICF(
+        shape=model.padded_shape,
+        sigmas=(float(state.icf_gamma_um),) * ndim,
+        spacings=voxel_spacing,
+        normalize=True,
+    )
+    C, Ct = as_numpy_op(icf)  # C == Ct (self-adjoint)
+
+    def RC(h):
+        return R(C(h))
+
+    def RCt(u):
+        return Ct(Rt(u))
+
+    prior = np.asarray(RCt(y), dtype=np.float32)
+
+    log.info(
+        "build_mem_problem: y=%s psf=%s zoom=%s icf_gamma=%g voxel_spacing=%s "
+        "padded_shape=%s prior=RCt(y) min/max=%.6g/%.6g",
+        tuple(y.shape), tuple(psf.shape), zoom, state.icf_gamma_um,
+        voxel_spacing, model.padded_shape, float(prior.min()), float(prior.max()),
+    )
+
+    return MemProblemInputs(
+        y=y,
+        prior=prior,
+        R=R,
+        Rt=Rt,
+        C=C,
+        Ct=Ct,
+        RC=RC,
+        RCt=RCt,
+        zoom=zoom,
+        voxel_spacing=voxel_spacing,
+        padded_shape=model.padded_shape,
+        visible_shape=model.visible_shape,
+        valid_slices=model.valid_slices,
+    )
+
+
+def problem_output_5d_shape(
+    problem_inputs: MemProblemInputs,
+    *,
+    crop_to_visible: bool,
+    n_channels: int = 1,
+) -> Tuple[int, int, int, int, int]:
+    """(T, Z, C, Y, X) output shape for an already-built `MemProblemInputs`.
+
+    Uses the real `visible_shape`/`padded_shape` the worker's forward model
+    produced, rather than recomputing from `decon_common`'s dependency-free
+    shape math, so the output buffer can never disagree with the actual run.
+    """
+    spatial = problem_inputs.visible_shape if crop_to_visible else problem_inputs.padded_shape
+    C = max(1, int(n_channels))
+    if len(spatial) == 2:
+        return (1, 1, C, spatial[0], spatial[1])
+    return (1, spatial[0], C, spatial[1], spatial[2])

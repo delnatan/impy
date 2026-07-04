@@ -43,10 +43,40 @@ from .manager import manager
 _workspace = None
 
 
+def _build_proxy_menu_items(menu, items, get_target, leaf_actions):
+    """Populate *menu* from *items*, recursing into nested ``"submenu"``
+    entries. Appends every dispatchable leaf action to *leaf_actions*."""
+    for item in items:
+        if item is None:
+            menu.addSeparator()
+            continue
+        if "submenu" in item:
+            submenu = menu.addMenu(item["label"])
+            _build_proxy_menu_items(submenu, item["submenu"], get_target, leaf_actions)
+            continue
+        action = QAction(item["label"], menu)
+        if "shortcut" in item:
+            action.setShortcut(item["shortcut"])
+        if "tooltip" in item:
+            action.setToolTip(item["tooltip"])
+        method_name = item["method"]
+
+        def _dispatch(checked=False, method_name=method_name):
+            target = get_target()
+            if target is not None:
+                getattr(target, method_name)()
+
+        action.triggered.connect(_dispatch)
+        menu.addAction(action)
+        leaf_actions.append(action)
+
+
 def build_proxy_menus(menubar, spec, get_target):
     """Populate *menubar* from *spec* (see ``window.MENU_SPEC``), where
     each action dispatches to ``getattr(get_target(), item["method"])``
-    at trigger time rather than a fixed bound method.
+    at trigger time rather than a fixed bound method. Items may nest a
+    ``"submenu"`` list instead of a ``"method"`` (e.g. the "Deconvolution"
+    submenu) -- their leaves are folded into the same flat ``leaf_actions``.
 
     Returns ``(top_level_actions, leaf_actions)``. When ``get_target()``
     has nothing sensible to act on, hiding the top-level menu actions
@@ -63,25 +93,7 @@ def build_proxy_menus(menubar, spec, get_target):
     for menu_title, items in spec:
         menu = menubar.addMenu(menu_title)
         top_level_actions.append(menu.menuAction())
-        for item in items:
-            if item is None:
-                menu.addSeparator()
-                continue
-            action = QAction(item["label"], menubar)
-            if "shortcut" in item:
-                action.setShortcut(item["shortcut"])
-            if "tooltip" in item:
-                action.setToolTip(item["tooltip"])
-            method_name = item["method"]
-
-            def _dispatch(checked=False, method_name=method_name):
-                target = get_target()
-                if target is not None:
-                    getattr(target, method_name)()
-
-            action.triggered.connect(_dispatch)
-            menu.addAction(action)
-            leaf_actions.append(action)
+        _build_proxy_menu_items(menu, items, get_target, leaf_actions)
     return top_level_actions, leaf_actions
 
 
