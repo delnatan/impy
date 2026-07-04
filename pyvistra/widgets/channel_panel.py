@@ -15,7 +15,7 @@ pair. The single-channel "big histogram" view is intentionally
 omitted; the per-row compact histogram covers the common case.
 """
 
-from qtpy.QtCore import Qt, Signal
+from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -278,7 +278,14 @@ class ChannelPanel(QDialog):
                 self._on_display_changed
             )
 
-        # Refresh histograms when the displayed slice changes.
+        # Refresh histograms when the displayed slice changes. Debounced:
+        # scrubbing the T/Z sliders fires view_changed per tick, and an
+        # np.histogram per channel per tick makes scrubbing stutter.
+        self._hist_timer = QTimer(self)
+        self._hist_timer.setSingleShot(True)
+        self._hist_timer.setInterval(150)
+        self._hist_timer.timeout.connect(self._refresh_histograms)
+        self._hist_stale = False
         if hasattr(self.viewer, "view_changed"):
             self.viewer.view_changed.connect(self._on_view_changed)
 
@@ -364,8 +371,17 @@ class ChannelPanel(QDialog):
             )
 
     def _on_view_changed(self, _viewer):
-        """Refresh per-channel histograms after a slice/time change."""
-        self._refresh_histograms()
+        """Schedule a histogram refresh after a slice/time change."""
+        if not self.isVisible():
+            self._hist_stale = True
+            return
+        self._hist_timer.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._hist_stale:
+            self._hist_stale = False
+            self._refresh_histograms()
 
     # ------------------------------------------------------------------
     # Contrast actions
@@ -422,6 +438,7 @@ class ChannelPanel(QDialog):
             row.set_gamma(self.viewer.renderer.get_gamma(c))
 
     def _refresh_histograms(self):
+        self._hist_timer.stop()
         cache = self.viewer.renderer.current_slice_cache
         if cache is None:
             return
