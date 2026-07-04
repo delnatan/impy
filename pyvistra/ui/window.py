@@ -68,6 +68,7 @@ from .manager import manager
 from ..visuals.overlays import ScaleTimestampOverlay
 from ..viewers import OrthoViewer
 from ..data.points import PointTable
+from ..data.slice_loader import SliceLoader
 from ..data.view_state import ViewState
 from ..visuals.points import DEFAULT_STYLE as POINT_DEFAULT_STYLE, PointLayerVisual
 from ..visuals.shapes import ShapeLayerVisual
@@ -124,6 +125,9 @@ class ImageWindow(QMainWindow):
     # Internal — marshals ImageBuffer change notifications from any worker
     # thread onto the GUI thread (Qt.QueuedConnection in __init__).
     _buffer_dirty = Signal(object)
+    # Internal — marshals SliceLoader deliveries (key, plane) from the
+    # loader thread onto the GUI thread (Qt.QueuedConnection in __init__).
+    _slice_ready = Signal(object, object)
 
     def __init__(self, data_or_path, title="Image", meta=None):
         super().__init__()
@@ -329,6 +333,13 @@ class ImageWindow(QMainWindow):
         )
         self._subscribe_to_buffer(self.img_data)
 
+        # Async slice loading for lazy (file/zarr-backed) sources: reads
+        # happen on a worker thread, delivered here via queued signal.
+        # In-memory sources keep the synchronous path (loader is None).
+        self._slice_loader = None
+        self._slice_ready.connect(self._on_slice_ready, Qt.QueuedConnection)
+        self._replace_slice_loader(self.img_data)
+
         # 13. Events
         self.canvas.events.mouse_move.connect(self.on_mouse_move)
         self.canvas.events.mouse_press.connect(self.on_mouse_press)
@@ -439,6 +450,11 @@ class ImageWindow(QMainWindow):
         if self._buffer_unsubscribe is not None:
             self._buffer_unsubscribe()
             self._buffer_unsubscribe = None
+
+        # Stop the slice-loader thread before releasing the data source.
+        if self._slice_loader is not None:
+            self._slice_loader.close()
+            self._slice_loader = None
 
         # Cleanup data buffers/proxies (ImageBuffer, Imaris5DProxy)
         if hasattr(self.img_data, "release"):
@@ -625,6 +641,7 @@ class ImageWindow(QMainWindow):
             self.meta = metadata
             self.pixel_space = self.meta.get("space", "real")
         self._subscribe_to_buffer(new_data)
+        self._replace_slice_loader(new_data)
 
         self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
         new_shape = (self.T, self.Z, self.C, self.Y, self.X)
@@ -2846,6 +2863,7 @@ class ImageWindow(QMainWindow):
         # Update data and dimensions
         self.img_data = new_data
         self.meta = new_meta
+        self._replace_slice_loader(new_data)
         self.T, self.Z, self.C, self.Y, self.X = self.img_data.shape
 
         # Reset indices (suspended: renderer/controls rebuilt below,
@@ -3257,6 +3275,41 @@ class ImageWindow(QMainWindow):
     def on_z_change(self, val):
         self.view_state.set_z(val)  # label + redraw via subscription
 
+    def _replace_slice_loader(self, source):
+        """(Re)create the async slice loader for *source*.
+
+        In-memory sources (plain arrays) slice in microseconds; going
+        through the worker thread would only add a frame of latency, so
+        they keep the synchronous update_view path (loader stays None).
+        """
+        if self._slice_loader is not None:
+            self._slice_loader.close()
+            self._slice_loader = None
+        if not isinstance(source, (np.ndarray, Numpy5DProxy)):
+            self._slice_loader = SliceLoader(source, self._emit_slice_ready)
+
+    def _emit_slice_ready(self, key, plane):
+        # Runs on the loader thread. The window may be mid-teardown
+        # (WA_DeleteOnClose); emitting on a dead QObject raises.
+        try:
+            self._slice_ready.emit(key, plane)
+        except RuntimeError:
+            pass
+
+    def _current_slice_key(self):
+        vs = self.view_state
+        if vs.z_projection:
+            mn, mx = vs.z_range if vs.z_range is not None else (0, self.Z - 1)
+            return SliceLoader.key_for(vs.t, slice(mn, mx + 1))
+        return SliceLoader.key_for(vs.t, vs.z)
+
+    def _on_slice_ready(self, key, plane):
+        if key != self._current_slice_key():
+            return  # stale: view moved on while this frame loaded
+        self.renderer.set_slice(plane)
+        self.canvas.update()
+        self.view_changed.emit(self)
+
     def _subscribe_to_buffer(self, data):
         if self._buffer_unsubscribe is not None:
             self._buffer_unsubscribe()
@@ -3267,6 +3320,9 @@ class ImageWindow(QMainWindow):
             )
 
     def _on_buffer_dirty(self, key):
+        if self._slice_loader is not None:
+            # Buffer contents changed under the cache.
+            self._slice_loader.invalidate()
         if self._key_touches_current_slice(key):
             self.update_view()
         else:
@@ -3304,9 +3360,19 @@ class ImageWindow(QMainWindow):
         vs = self.view_state
         if vs.z_projection:
             mn, mx = vs.z_range if vs.z_range is not None else (0, self.Z - 1)
-            self.renderer.update_slice(vs.t, slice(mn, mx + 1))
+            z_key = slice(mn, mx + 1)
         else:
-            self.renderer.update_slice(vs.t, vs.z)
+            z_key = vs.z
+
+        if self._slice_loader is None:
+            # In-memory source: slice synchronously.
+            self.renderer.update_slice(vs.t, z_key)
+        else:
+            plane = self._slice_loader.request(vs.t, z_key)
+            if plane is not None:
+                self.renderer.set_slice(plane)
+            # else: keep showing the current frame; _on_slice_ready
+            # displays the new one as soon as the worker has it.
 
         # Update all mask layers for 3D data
         for entry in self._mask_layers.values():

@@ -19,6 +19,7 @@ from .colors import (
 )
 from .channel_state import ChannelDisplayList, ChannelDisplayState
 from .protocols import ObservableBuffer, Readable5D, Writable5D
+from .slice_loader import SliceLoader
 from .view_state import ViewState
 
 __all__ = [
@@ -40,5 +41,6 @@ __all__ = [
     "ObservableBuffer",
     "Readable5D",
     "Writable5D",
+    "SliceLoader",
     "ViewState",
 ]
