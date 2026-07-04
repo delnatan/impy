@@ -473,13 +473,9 @@ class VolumeViewer(QMainWindow):
 
     def show_channel_panel(self):
         """Show the Channels panel."""
-        from ..widgets import ChannelPanel
+        from ..widgets import show_channel_dock
 
-        if self.channel_panel is None:
-            self.channel_panel = ChannelPanel(self, parent=self)
-        self.channel_panel.show()
-        self.channel_panel.raise_()
-        self.channel_panel.refresh_ui()
+        show_channel_dock(self)
 
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts."""

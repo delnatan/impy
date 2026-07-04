@@ -26,7 +26,11 @@ from vispy import scene
 
 from ..contrast import compute_percentile_clim
 from ..visuals.image import CompositeImageVisual, MultiViewChannelProxy
-from ..widgets import ChannelPanel, MetadataDialog, ZMontageSettingsDialog
+from ..widgets import (
+    MetadataDialog,
+    ZMontageSettingsDialog,
+    show_channel_dock,
+)
 
 
 class ZMontageViewer(QMainWindow):
@@ -298,10 +302,7 @@ class ZMontageViewer(QMainWindow):
             self._reset_view()
 
     def show_channel_panel(self):
-        if self.channel_panel is None:
-            self.channel_panel = ChannelPanel(self, parent=self)
-        self.channel_panel.show()
-        self.channel_panel.raise_()
+        show_channel_dock(self)
 
     def show_metadata_dialog(self):
         dlg = MetadataDialog(self.meta, parent=self)

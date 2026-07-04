@@ -18,7 +18,7 @@ omitted; the per-row compact histogram covers the common case.
 from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
-    QDialog,
+    QDockWidget,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
@@ -207,14 +207,18 @@ class ChannelRow(QWidget):
         self.gamma_spin.blockSignals(False)
 
 
-class ChannelPanel(QDialog):
-    """Floating panel with per-channel controls + global contrast actions."""
+class ChannelPanel(QWidget):
+    """Per-channel controls + global contrast actions.
+
+    Plain widget: viewers embed it in a ``QDockWidget`` via
+    :func:`show_channel_dock`. Callers that want it floating set window
+    flags themselves (see the tiled viewer's per-tile panel).
+    """
 
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
         self.setWindowTitle("Channels")
-        self.setWindowFlags(Qt.Tool)
         self.resize(520, min(220 + viewer.C * 60, 540))
 
         # Auto-contrast tighten/loosen state.
@@ -460,3 +464,32 @@ class ChannelPanel(QDialog):
             except (TypeError, RuntimeError):
                 pass
         super().closeEvent(event)
+
+
+def show_channel_dock(
+    window, panel_factory=None, title="Channels & Contrast"
+):
+    """Show (creating on first use) a channel panel docked in *window*.
+
+    *window* must be a ``QMainWindow``. The panel is stored at
+    ``window.channel_panel`` and its dock at ``window._channel_dock``, so
+    existing ``window.channel_panel.refresh_ui()`` call sites keep
+    working. The dock is closable, movable, and floatable — closing hides
+    it; the same menu action re-shows it.
+
+    *panel_factory* builds the panel widget (default:
+    ``ChannelPanel(window)``).
+    """
+    if getattr(window, "channel_panel", None) is None:
+        panel = (
+            panel_factory(window) if panel_factory else ChannelPanel(window)
+        )
+        dock = QDockWidget(title, window)
+        dock.setObjectName("channel_dock")
+        dock.setWidget(panel)
+        window.addDockWidget(Qt.RightDockWidgetArea, dock)
+        window.channel_panel = panel
+        window._channel_dock = dock
+    window._channel_dock.show()
+    window._channel_dock.raise_()
+    window.channel_panel.refresh_ui()

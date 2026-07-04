@@ -15,7 +15,6 @@ from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -44,7 +43,7 @@ from ..visuals.image import (
     CompositeImageVisual,
     get_colormap,
 )
-from ..widgets import ChannelPanel, ChannelRow
+from ..widgets import ChannelPanel, ChannelRow, show_channel_dock
 from ..widgets.axes_dialog import AxesDialog
 
 
@@ -194,9 +193,9 @@ class TiledVisualProxy:
                 )
 
 
-class TiledChannelPanel(QDialog):
+class TiledChannelPanel(QWidget):
     """
-    Floating dialog for global channel control in TiledViewer.
+    Global channel control panel for TiledViewer (shown as a dock).
 
     Controls colormap, gamma, contrast, and visibility across all tiles
     via the viewer's :class:`TiledVisualProxy`. Uses the shared
@@ -212,7 +211,6 @@ class TiledChannelPanel(QDialog):
         self.proxy = viewer.visual_proxy
 
         self.setWindowTitle("Channels (All Tiles)")
-        self.setWindowFlags(Qt.Tool)
         self.resize(520, min(180 + viewer.max_C * 55, 460))
 
         layout = QVBoxLayout(self)
@@ -791,7 +789,11 @@ class TileWidget(QFrame):
 
         wrapper = TileWrapper(self)
         panel = ChannelPanel(wrapper, parent=self)
-        panel.exec_()
+        # Floating per-tile panel (ChannelPanel is a plain widget now).
+        panel.setWindowFlags(Qt.Tool)
+        panel.show()
+        panel.raise_()
+        self._channel_panel = panel  # keep alive; Qt.Tool has no exec loop
 
     def _open_in_viewer(self):
         """Open this image in a full ImageWindow."""
@@ -1107,11 +1109,11 @@ class TiledViewer(QMainWindow):
 
     def show_channel_panel(self):
         """Show the global channel control panel."""
-        if self.channel_panel is None:
-            self.channel_panel = TiledChannelPanel(self, parent=self)
-        self.channel_panel.show()
-        self.channel_panel.raise_()
-        self.channel_panel.refresh_ui()
+        show_channel_dock(
+            self,
+            panel_factory=TiledChannelPanel,
+            title="Channels (All Tiles)",
+        )
 
     def show_axes_dialog(self):
         """Show dialog to reorder axes for ambiguous TIFF dimensions."""

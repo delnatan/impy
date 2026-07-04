@@ -17,9 +17,9 @@ from vispy.visuals.transforms import STTransform
 from ..visuals.overlays import ScaleTimestampOverlay
 from ..visuals.image import CompositeImageVisual, MultiViewChannelProxy
 from ..widgets import (
-    ChannelPanel,
     MetadataDialog,
     OverlaySettingsDialog,
+    show_channel_dock,
 )
 
 
@@ -795,11 +795,7 @@ class OrthoViewer(QMainWindow):
         self.canvas_zx.update()
 
     def show_channel_panel(self):
-        if not hasattr(self, "channel_panel") or self.channel_panel is None:
-            self.channel_panel = ChannelPanel(self, parent=self)
-        self.channel_panel.show()
-        self.channel_panel.raise_()
-        self.channel_panel.refresh_ui()
+        show_channel_dock(self)
 
     @property
     def renderer(self):

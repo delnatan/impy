@@ -83,7 +83,7 @@ from ..visuals.image import CompositeImageVisual
 from ..widgets import (
     AlignmentDialog,
     AxesDialog,
-    ChannelPanel,
+    show_channel_dock,
     FFTDialog,
     ImageMathDialog,
     MetadataDialog,
@@ -2763,11 +2763,7 @@ class ImageWindow(QMainWindow):
             self.view.camera.interactive = False
 
     def show_channel_panel(self):
-        if self.channel_panel is None:
-            self.channel_panel = ChannelPanel(self, parent=self)
-        self.channel_panel.show()
-        self.channel_panel.raise_()
-        self.channel_panel.refresh_ui()
+        show_channel_dock(self)
 
     def show_transform_dialog(self):
         if self.transform_dialog is None:
