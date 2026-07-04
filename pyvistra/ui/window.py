@@ -99,6 +99,92 @@ except Exception:
     app.use_app("pyqt5")
 
 
+# Declarative menu structure for ImageWindow's File/Adjust/Image/View
+# menus: (menu_title, [item, ...]) where each item is either None (a
+# separator) or a dict with "label", "method" (name looked up on the
+# target at trigger time), and optional "shortcut"/"tooltip". Single
+# source of truth for both ImageWindow's own embedded menu bar
+# (build_menus(..., target=self)) and the Workspace shell's persistent
+# mirrored bar (build_menus(..., target=get_active_window) — see
+# ui/workspace.py), so the two never drift apart.
+MENU_SPEC = [
+    ("File", [
+        {"label": "Save as TIFF...", "shortcut": "Ctrl+S", "method": "save_as_tiff"},
+        {"label": "Save as Imaris...", "shortcut": "Ctrl+Shift+S", "method": "save_as_imaris"},
+        {
+            "label": "Save As...",
+            "shortcut": "Ctrl+Alt+S",
+            "method": "save_as_any",
+            "tooltip": "Save to any registered format (.tif, .ims, .psf.h5, .pupil.h5, ...)",
+        },
+        {
+            "label": "Save Channel...",
+            "method": "_save_channel_dialog",
+            "tooltip": (
+                "Extract one channel (and an optional T/Z subrange) and route "
+                "it to a new window, an existing window, or a file."
+            ),
+        },
+        None,
+        {"label": "Save Snapshot...", "method": "_save_snapshot_dialog"},
+        {"label": "Export Frames...", "method": "_export_frames_dialog"},
+    ]),
+    ("Adjust", [
+        {"label": "Channels && Contrast...", "shortcut": "Shift+C", "method": "show_channel_panel"},
+        None,
+        {"label": "Line Profile...", "shortcut": "Shift+K", "method": "show_line_profile"},
+    ]),
+    ("Image", [
+        {"label": "Image Info", "shortcut": "Shift+I", "method": "show_metadata_dialog"},
+        {"label": "Ortho View", "method": "show_ortho_view"},
+        {"label": "3D Volume View", "method": "show_volume_view"},
+        {"label": "Z-Montage View...", "method": "show_zmontage_view"},
+        None,
+        {"label": "Transform...", "shortcut": "Shift+T", "method": "show_transform_dialog"},
+        {"label": "Align Images...", "method": "show_alignment_dialog"},
+        {"label": "Z Projection...", "method": "show_z_projection_dialog"},
+        {"label": "Image Math...", "method": "show_image_math_dialog"},
+        {"label": "FFT...", "method": "show_fft_dialog"},
+        {"label": "Deconvolution...", "method": "show_deconvolution_dialog"},
+        {"label": "PSF Distillation (NLCG)...", "method": "show_psf_distillation_dialog"},
+        None,
+        {"label": "Reorder Axes...", "method": "show_axes_dialog"},
+    ]),
+    ("View", [
+        {"label": "Overlay Settings...", "method": "show_overlay_settings_dialog"},
+    ]),
+]
+
+
+def build_menus(menubar, spec, target):
+    """Populate *menubar* from *spec*, connecting each action to
+    ``getattr(target, item["method"])``. Returns the flat list of leaf
+    (non-separator) QActions created, in spec order.
+
+    Used for ImageWindow's own embedded menu bar (``target=self``,
+    bound once at construction). The Workspace shell's persistent
+    mirrored bar uses ``build_proxy_menus`` in ``ui/workspace.py``
+    instead, which retargets dynamically rather than binding to a
+    single fixed object.
+    """
+    actions = []
+    for menu_title, items in spec:
+        menu = menubar.addMenu(menu_title)
+        for item in items:
+            if item is None:
+                menu.addSeparator()
+                continue
+            action = QAction(item["label"], target)
+            if "shortcut" in item:
+                action.setShortcut(item["shortcut"])
+            if "tooltip" in item:
+                action.setToolTip(item["tooltip"])
+            action.triggered.connect(getattr(target, item["method"]))
+            menu.addAction(action)
+            actions.append(action)
+    return actions
+
+
 class ImageWindow(QMainWindow):
     """Main image viewer window with ROI support."""
 
@@ -705,120 +791,11 @@ class ImageWindow(QMainWindow):
             self.canvas.update()
 
     def _setup_menu(self):
-        menubar = self.menuBar()
-
-        # File Menu
-        file_menu = menubar.addMenu("File")
-        save_tiff_action = QAction("Save as TIFF...", self)
-        save_tiff_action.setShortcut("Ctrl+S")
-        save_tiff_action.triggered.connect(self.save_as_tiff)
-        file_menu.addAction(save_tiff_action)
-
-        save_ims_action = QAction("Save as Imaris...", self)
-        save_ims_action.setShortcut("Ctrl+Shift+S")
-        save_ims_action.triggered.connect(self.save_as_imaris)
-        file_menu.addAction(save_ims_action)
-
-        save_as_action = QAction("Save As...", self)
-        save_as_action.setShortcut("Ctrl+Alt+S")
-        save_as_action.setToolTip(
-            "Save to any registered format (.tif, .ims, .psf.h5, .pupil.h5, ...)"
-        )
-        save_as_action.triggered.connect(self.save_as_any)
-        file_menu.addAction(save_as_action)
-
-        save_channel_action = QAction("Save Channel...", self)
-        save_channel_action.setToolTip(
-            "Extract one channel (and an optional T/Z subrange) and route it "
-            "to a new window, an existing window, or a file."
-        )
-        save_channel_action.triggered.connect(self._save_channel_dialog)
-        file_menu.addAction(save_channel_action)
-
-        file_menu.addSeparator()
-
-        snapshot_action = QAction("Save Snapshot...", self)
-        snapshot_action.triggered.connect(self._save_snapshot_dialog)
-        file_menu.addAction(snapshot_action)
-
-        export_frames_action = QAction("Export Frames...", self)
-        export_frames_action.triggered.connect(self._export_frames_dialog)
-        file_menu.addAction(export_frames_action)
-
-        # Adjust Menu
-        adjust_menu = menubar.addMenu("Adjust")
-        channels_action = QAction("Channels && Contrast...", self)
-        channels_action.setShortcut("Shift+C")
-        channels_action.triggered.connect(self.show_channel_panel)
-        adjust_menu.addAction(channels_action)
-
-        adjust_menu.addSeparator()
-
-        line_profile_action = QAction("Line Profile...", self)
-        line_profile_action.setShortcut("Shift+K")
-        line_profile_action.triggered.connect(self.show_line_profile)
-        adjust_menu.addAction(line_profile_action)
-
-        # Image Menu
-        image_menu = menubar.addMenu("Image")
-        info_action = QAction("Image Info", self)
-        info_action.setShortcut("Shift+I")
-        info_action.triggered.connect(self.show_metadata_dialog)
-        image_menu.addAction(info_action)
-
-        ortho_action = QAction("Ortho View", self)
-        ortho_action.triggered.connect(self.show_ortho_view)
-        image_menu.addAction(ortho_action)
-
-        volume_action = QAction("3D Volume View", self)
-        volume_action.triggered.connect(self.show_volume_view)
-        image_menu.addAction(volume_action)
-
-        zmontage_action = QAction("Z-Montage View...", self)
-        zmontage_action.triggered.connect(self.show_zmontage_view)
-        image_menu.addAction(zmontage_action)
-
-        image_menu.addSeparator()
-
-        transform_action = QAction("Transform...", self)
-        transform_action.setShortcut("Shift+T")
-        transform_action.triggered.connect(self.show_transform_dialog)
-        image_menu.addAction(transform_action)
-
-        align_action = QAction("Align Images...", self)
-        align_action.triggered.connect(self.show_alignment_dialog)
-        image_menu.addAction(align_action)
-
-        zproj_action = QAction("Z Projection...", self)
-        zproj_action.triggered.connect(self.show_z_projection_dialog)
-        image_menu.addAction(zproj_action)
-
-        image_math_action = QAction("Image Math...", self)
-        image_math_action.triggered.connect(self.show_image_math_dialog)
-        image_menu.addAction(image_math_action)
-
-        fft_action = QAction("FFT...", self)
-        fft_action.triggered.connect(self.show_fft_dialog)
-        image_menu.addAction(fft_action)
-
-        decon_action = QAction("Deconvolution...", self)
-        decon_action.triggered.connect(self.show_deconvolution_dialog)
-        image_menu.addAction(decon_action)
-
-        psf_distill_action = QAction("PSF Distillation (NLCG)...", self)
-        psf_distill_action.triggered.connect(self.show_psf_distillation_dialog)
-        image_menu.addAction(psf_distill_action)
-
-        image_menu.addSeparator()
-
-        axes_action = QAction("Reorder Axes...", self)
-        axes_action.triggered.connect(self.show_axes_dialog)
-        image_menu.addAction(axes_action)
-
-        view_menu = menubar.addMenu("View")
-        overlay_action = QAction("Overlay Settings...", self)
-        overlay_action.triggered.connect(self.show_overlay_settings_dialog)
-        view_menu.addAction(overlay_action)
+        # Kept so the workspace shell can disarm these specific
+        # shortcuts while this window's menu bar is hidden (docked) —
+        # see workspace.add_window / float_window — without touching
+        # unrelated shortcuts (tool keys, playback, etc).
+        self._menu_actions = build_menus(self.menuBar(), MENU_SPEC, self)
 
     def _default_save_path(self, ext):
         """Build a default save path for Save As."""

@@ -297,7 +297,38 @@ Split Right (side-by-side compare), Float Window, Close. Closing a tab
 runs the viewer's normal `closeEvent`; `manager` stays the registry and
 active-window tracker. Embedded windows get their QAction shortcuts
 scoped to `WidgetWithChildrenShortcut` so Ctrl+S & co. dispatch by
-focus, not ambiguously.
+focus, not ambiguously — and are also registered on the window itself
+via `window.addAction(action)`: an action added only via `menu.addAction()`
+has just that `QMenu` as its associated widget, whose own descendant
+tree is empty while closed, so `WidgetWithChildrenShortcut` would never
+actually match real focus (the canvas, a slider, …) without this.
+
+**Menu unification.** `ImageWindow`'s File/Adjust/Image/View menus
+(save, deconvolution, PSF distillation, Z-projection, image math, FFT,
+transform, alignment, Channels & Contrast, …) are built from a single
+declarative `MENU_SPEC` (`ui/window.py`) via `build_menus(menubar,
+spec, target)` — a list of `(menu_title, [{"label", "method",
+"shortcut"?, "tooltip"?}, ...])`. `Workspace` mirrors the *same* spec
+onto its own persistent bar via `build_proxy_menus` (`ui/workspace.py`),
+dispatching each action to whichever tab is currently active instead of
+a fixed `self`. This is why there's exactly one visible menu bar
+regardless of how many tabs are open: `Workspace.add_window()` hides
+the docked window's own embedded menu bar and disarms just its
+`MENU_SPEC`-driven action shortcuts (stored on `window._menu_actions`,
+built by `_setup_menu`) to prevent double-dispatch on shared shortcuts
+like Ctrl+S; `float_window()` restores both. `_refresh_image_menus_enabled`
+disables **both** the top-level menu actions (grays out the menu bar
+entry) **and** every individual leaf action underneath (`build_proxy_menus`
+returns both lists) while the active tab isn't an `ImageWindow` — a leaf
+action's own `isEnabled()` is untouched by its parent menu being
+disabled, so leaving it enabled would keep its shortcut "live" for Qt's
+shortcut matching and collide with the same shortcut on whichever
+non-mirrored viewer (Ortho/Volume/ZMontage/Tiled) tab actually has
+focus, silently firing neither (Qt's ambiguous-shortcut resolution).
+**Adding a new File/Adjust/Image/View action means adding one entry to
+`MENU_SPEC`** — both the per-window bar and the workspace's mirrored
+bar pick it up automatically; do not hand-add a `QAction` in
+`_setup_menu` directly, that bypasses the mirror.
 
 ### Event System
 
