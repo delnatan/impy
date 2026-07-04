@@ -16,6 +16,7 @@ omitted; the per-row compact histogram covers the common case.
 """
 
 from qtpy.QtCore import Qt, QTimer, Signal
+from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QCheckBox,
     QDockWidget,
@@ -366,9 +367,8 @@ class ChannelPanel(QWidget):
             row.set_gamma(self.viewer.renderer.get_gamma(channel_idx))
         elif field == "colormap_name":
             row._update_color_swatch(self._swatch_color(channel_idx))
-            row.histogram.set_data(
-                row.histogram.data, self._swatch_color(channel_idx)
-            ) if getattr(row.histogram, "data", None) is not None else None
+            row.histogram.color = QColor(self._swatch_color(channel_idx))
+            row.histogram.update()
         elif field == "visible":
             row.set_visible_state(
                 self.viewer.renderer.get_channel_visible(channel_idx)

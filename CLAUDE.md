@@ -267,6 +267,15 @@ dialogs.
 
 The shared `ChannelRow` widget is the unit of UI per channel and is reused by `TiledChannelPanel` for the tiled viewer's global controls.
 
+`CompactHistogramWidget` (`widgets/histogram.py`) sets a minimum width
+(110px), not just height: as the `stretch=1` item in `ChannelRow`'s
+`QHBoxLayout`, nothing else stops the layout from shrinking it to
+nothing once the row narrows enough for the fixed-width siblings
+(checkbox, swatch button, spinboxes) to dominate. This was invisible
+while `ChannelPanel` was a floating `QDialog` with a generous default
+width; docked into a `QMainWindow`'s side area, Qt's default dock width
+is much narrower and the histogram collapses without this floor.
+
 ### Layer System
 
 The layer system (`layers/`) provides a unified way to manage all annotation types:

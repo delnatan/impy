@@ -435,6 +435,15 @@ class CompactHistogramWidget(BaseHistogramWidget):
         super().__init__(parent)
         self.setMinimumHeight(40)
         self.setMaximumHeight(50)
+        # No minimum width otherwise: as a stretch=1 item in ChannelRow's
+        # QHBoxLayout, it has nothing stopping the layout from shrinking
+        # it to zero once the row narrows enough to be dominated by its
+        # fixed-width siblings (checkbox, swatch, spinboxes, ...). This
+        # was invisible while ChannelPanel was a floating QDialog with a
+        # generous default width; docked into a QMainWindow's side area,
+        # Qt's default dock width is much narrower and the histogram
+        # collapses to nothing without this floor.
+        self.setMinimumWidth(110)
 
     def paintEvent(self, event):
         painter = QPainter(self)
