@@ -57,6 +57,7 @@ class MemsolveDeconvolutionWorker(QObject):
         state: MemsolveDialogState,
         buffer,                      # ImageBuffer for live preview / final write
         output_channel: int = 0,
+        output_frame: int = 0,
         problem_inputs: MemProblemInputs | None = None,   # single-volume runs
         prepared: PreparedInputs | None = None,            # tiled runs
     ):
@@ -66,6 +67,7 @@ class MemsolveDeconvolutionWorker(QObject):
         self._state = state
         self._buffer = buffer
         self._output_channel = max(0, int(output_channel))
+        self._output_frame = max(0, int(output_frame))
         self._cancel = False
 
     def cancel(self) -> None:
@@ -94,7 +96,8 @@ class MemsolveDeconvolutionWorker(QObject):
         if s.crop_to_visible:
             preview = preview[pi.valid_slices]
         write_to_buffer(
-            self._buffer, preview, channel=self._output_channel, log_stats=False,
+            self._buffer, preview, channel=self._output_channel,
+            t=self._output_frame, log_stats=False,
         )
 
     def _run_single(self) -> None:
@@ -197,7 +200,10 @@ class MemsolveDeconvolutionWorker(QObject):
         raise_if_nonfinite(f_map, "MEM result")
         if s.crop_to_visible:
             f_map = f_map[pi.valid_slices]
-        write_to_buffer(self._buffer, f_map, channel=self._output_channel)
+        write_to_buffer(
+            self._buffer, f_map, channel=self._output_channel,
+            t=self._output_frame,
+        )
 
         # result.iterations reflects the caller-supplied trace (empty here,
         # since we don't accumulate one), not the outer-iteration count --
@@ -330,7 +336,8 @@ class MemsolveDeconvolutionWorker(QObject):
             output[write] = core
 
             write_to_buffer(
-                self._buffer, output, channel=self._output_channel, log_stats=False,
+                self._buffer, output, channel=self._output_channel,
+                t=self._output_frame, log_stats=False,
             )
             self.progress.emit(i + 1, n_tiles)
             self.status.emit(
@@ -342,7 +349,10 @@ class MemsolveDeconvolutionWorker(QObject):
             return
 
         raise_if_nonfinite(output, "MEM tiled result")
-        write_to_buffer(self._buffer, output, channel=self._output_channel)
+        write_to_buffer(
+            self._buffer, output, channel=self._output_channel,
+            t=self._output_frame,
+        )
         self.status.emit(f"Done — {n_tiles} tiles")
         log.info("MEM tiled done: tiles=%d output=%s", n_tiles, tuple(output.shape))
         self.finished.emit(None)

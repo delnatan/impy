@@ -225,6 +225,7 @@ def problem_output_5d_shape(
     *,
     crop_to_visible: bool,
     n_channels: int = 1,
+    n_frames: int = 1,
 ) -> Tuple[int, int, int, int, int]:
     """(T, Z, C, Y, X) output shape for an already-built `MemProblemInputs`.
 
@@ -234,6 +235,7 @@ def problem_output_5d_shape(
     """
     spatial = problem_inputs.visible_shape if crop_to_visible else problem_inputs.padded_shape
     C = max(1, int(n_channels))
+    T = max(1, int(n_frames))
     if len(spatial) == 2:
-        return (1, 1, C, spatial[0], spatial[1])
-    return (1, spatial[0], C, spatial[1], spatial[2])
+        return (T, 1, C, spatial[0], spatial[1])
+    return (T, spatial[0], C, spatial[1], spatial[2])

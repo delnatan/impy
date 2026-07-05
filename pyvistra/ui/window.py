@@ -3441,6 +3441,7 @@ class ImageWindow(QMainWindow):
             visual = entry.get("visual")
             if visual is not None:
                 visual.set_time_z(self.t_idx, self.z_idx)
+        self._refresh_shape_layers()
         self._sync_focused_point_visibility()
 
         if self.overlay is not None:

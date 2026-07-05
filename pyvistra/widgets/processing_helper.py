@@ -45,9 +45,10 @@ class BufferProcessingRunner:
         self.output_type = None
         self.thread = None
         self.worker = None
+        self._batch = None
 
     def is_running(self):
-        return self.thread is not None
+        return self.thread is not None or self._batch is not None
 
     def prepare_output(
         self,
@@ -157,3 +158,133 @@ class BufferProcessingRunner:
         self.output_type = None
         self.worker = None
         self.thread = None
+        self._batch = None
+
+    # ---------------------------------------------------------------- #
+    # Sequential multi-frame batches (e.g. a T range)
+
+    def run_frames(
+        self,
+        *,
+        frame_ts,
+        output_shape,
+        output_dtype,
+        output_meta,
+        prepare_for_t,
+        make_worker,
+        on_progress,
+        on_status,
+        on_all_finished,
+        on_cancelled,
+        on_error,
+        reuse_existing_buffer: bool = False,
+    ):
+        """Run one worker per entry in `frame_ts`, writing every result into
+        a single output buffer sized for the whole batch.
+
+        `prepare_for_t(t)` returns per-frame data for `make_worker`, or
+        `None` after reporting its own error (same contract as a dialog's
+        `_prepare()`). `make_worker(frame_data, output_frame_idx)` builds
+        the engine-specific worker for that frame (constructed with
+        `output_frame=output_frame_idx` so it writes into the right slot).
+
+        `on_progress`/`on_cancelled`/`on_error` are the same per-worker
+        callbacks `start_worker` takes. `on_status` is wrapped with a
+        "Frame i/N: " prefix automatically when there's more than one
+        frame. `on_all_finished` (no args) fires once, after the *last*
+        frame's worker finishes -- source/output refcounts are held for
+        the whole batch and released only then (or on cancel/error), not
+        per frame.
+        """
+        self.prepare_output(
+            output_shape=output_shape,
+            output_dtype=output_dtype,
+            output_meta=output_meta,
+            reuse_existing_buffer=reuse_existing_buffer,
+        )
+        self._batch = {
+            "frame_ts": list(frame_ts),
+            "idx": 0,
+            "prepare_for_t": prepare_for_t,
+            "make_worker": make_worker,
+            "on_progress": on_progress,
+            "on_status": on_status,
+            "on_all_finished": on_all_finished,
+            "on_cancelled": on_cancelled,
+            "on_error": on_error,
+            "cancel_requested": False,
+            "errored": False,
+            "error_message": "",
+        }
+        self._run_next_frame()
+
+    def _run_next_frame(self):
+        b = self._batch
+        t = b["frame_ts"][b["idx"]]
+        frame_data = b["prepare_for_t"](t)
+        if frame_data is None:
+            b["errored"] = True
+            b["error_message"] = "Frame preparation failed."
+            b["on_error"](b["error_message"])
+            self.cleanup()
+            return
+
+        n = len(b["frame_ts"])
+        worker = b["make_worker"](frame_data, b["idx"])
+        self.worker = worker
+        self.thread = QThread()
+        self.worker.moveToThread(self.thread)
+
+        self.thread.started.connect(self.worker.run)
+        self.worker.progress.connect(b["on_progress"])
+        if b["on_status"] is not None:
+            idx = b["idx"]
+            if n > 1:
+                self.worker.status.connect(
+                    lambda msg, i=idx: b["on_status"](f"Frame {i + 1}/{n}: {msg}")
+                )
+            else:
+                self.worker.status.connect(b["on_status"])
+        self.worker.finished.connect(self._on_frame_finished)
+        self.worker.cancelled.connect(self._on_frame_cancelled)
+        self.worker.error.connect(self._on_frame_error)
+
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.cancelled.connect(self.thread.quit)
+        self.worker.error.connect(self.thread.quit)
+        self.thread.finished.connect(self._on_frame_thread_finished)
+
+        self.thread.start()
+
+    def _on_frame_finished(self, result=None):
+        self._batch["idx"] += 1
+
+    def _on_frame_cancelled(self):
+        self._batch["cancel_requested"] = True
+
+    def _on_frame_error(self, message):
+        self._batch["errored"] = True
+        self._batch["error_message"] = message
+
+    def _on_frame_thread_finished(self):
+        b = self._batch
+        if self.worker is not None:
+            self.worker.deleteLater()
+        if self.thread is not None:
+            self.thread.deleteLater()
+        self.worker = None
+        self.thread = None
+
+        if b["errored"]:
+            b["on_error"](b["error_message"])
+            self.cleanup()
+            return
+        if b["cancel_requested"]:
+            b["on_cancelled"]()
+            self.cleanup()
+            return
+        if b["idx"] >= len(b["frame_ts"]):
+            b["on_all_finished"]()
+            self.cleanup()
+            return
+        self._run_next_frame()

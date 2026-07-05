@@ -406,8 +406,8 @@ class RichardsonLucyDialog(SourcePSFPanelMixin, QDialog):
             min_z_slices=self.min_z_slices_spin.value(),
         )
 
-    def _prepare(self) -> Optional[object]:
-        cropped = self._crop_observation_and_psf()
+    def _prepare(self, t: Optional[int] = None) -> Optional[object]:
+        cropped = self._crop_observation_and_psf(t)
         if cropped is None:
             return None
 
@@ -431,20 +431,24 @@ class RichardsonLucyDialog(SourcePSFPanelMixin, QDialog):
     def _start(self):
         if self._runner.is_running():
             return
-        result = self._prepare()
-        if result is None:
+        frame_ts = list(self._frame_range())
+        first = self._prepare(frame_ts[0])
+        if first is None:
             return
-        prepared, state, t, c = result
+        prepared, state, t, c = first
 
         stack_channels = self.stack_channels_check.isChecked()
         output_channels = self.viewer.C if stack_channels else 1
         output_channel = c if stack_channels else 0
         output_shape = drl.output_5d_shape(
-            state, prepared.y.shape, prepared.psf.shape, n_channels=output_channels
+            state, prepared.y.shape, prepared.psf.shape,
+            n_channels=output_channels, n_frames=len(frame_ts),
         )
         drl.log.info(
-            "output buffer shape=%s channel=%d (tiled=%s crop_to_visible=%s)",
+            "output buffer shape=%s channel=%d (tiled=%s crop_to_visible=%s "
+            "frames=%s)",
             output_shape, output_channel, state.tiled, state.crop_to_visible,
+            frame_ts,
         )
 
         vs = prepared.voxel_spacing
@@ -473,42 +477,50 @@ class RichardsonLucyDialog(SourcePSFPanelMixin, QDialog):
             "is_rgb": False,
             "channels": channels,
             "source_channel": c,
-            "source_frame": t,
+            "source_frame": frame_ts[0] if len(frame_ts) == 1 else list(frame_ts),
             "algorithm": "richardson_lucy",
         }
 
-        source, buffer = self._runner.prepare_output(
-            output_shape=output_shape,
-            output_dtype=np.dtype(np.float32),
-            output_meta=output_meta,
-            reuse_existing_buffer=stack_channels,
-        )
+        def prepare_for_t(frame_t):
+            result = self._prepare(frame_t)
+            if result is None:
+                return None
+            frame_prepared, frame_state, _t, _c = result
+            return frame_prepared, frame_state
+
+        def make_worker(frame_data, output_frame):
+            frame_prepared, frame_state = frame_data
+            return RLDeconvolutionWorker(
+                prepared=frame_prepared,
+                state=frame_state,
+                buffer=self._runner.output_buffer,
+                output_channel=output_channel,
+                output_frame=output_frame,
+            )
 
         if state.tiled:
             self.progress_bar.setRange(0, 0)
         else:
             self.progress_bar.setRange(0, max(1, state.num_iter))
 
-        worker = RLDeconvolutionWorker(
-            prepared=prepared,
-            state=state,
-            buffer=buffer,
-            output_channel=output_channel,
-        )
-
-        worker.status.connect(self._on_status)
         self.progress_bar.setValue(0)
         self._begin_run_status(self._describe_run(state))
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
-        self._runner.start_worker(
-            worker=worker,
+        self._runner.run_frames(
+            frame_ts=frame_ts,
+            output_shape=output_shape,
+            output_dtype=np.dtype(np.float32),
+            output_meta=output_meta,
+            reuse_existing_buffer=stack_channels,
+            prepare_for_t=prepare_for_t,
+            make_worker=make_worker,
             on_progress=self._on_progress,
-            on_finished=self._on_finished,
+            on_status=self._on_status,
+            on_all_finished=self._on_finished,
             on_cancelled=self._on_cancelled,
             on_error=self._on_error,
-            on_thread_finished=self._cleanup_thread,
         )
 
     def _cancel(self):
@@ -553,9 +565,6 @@ class RichardsonLucyDialog(SourcePSFPanelMixin, QDialog):
         self._set_status(f"Error: {message}", error=True)
         self.start_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
-
-    def _cleanup_thread(self):
-        self._runner.cleanup()
 
     def _set_status(self, msg: str, *, ok=False, warn=False, error=False):
         self.status_label.setPlainText(msg)

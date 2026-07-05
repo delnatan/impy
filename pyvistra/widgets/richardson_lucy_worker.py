@@ -38,12 +38,14 @@ class RLDeconvolutionWorker(QObject):
         state: RLDialogState,
         buffer,                      # ImageBuffer for live preview / final write
         output_channel: int = 0,
+        output_frame: int = 0,
     ):
         super().__init__()
         self._p = prepared
         self._state = state
         self._buffer = buffer
         self._output_channel = max(0, int(output_channel))
+        self._output_frame = max(0, int(output_frame))
         self._cancel = False
 
     def cancel(self) -> None:
@@ -84,7 +86,7 @@ class RLDeconvolutionWorker(QObject):
                     restored = restored[model.valid_slices]
                 write_to_buffer(
                     self._buffer, restored, channel=self._output_channel,
-                    log_stats=False,
+                    t=self._output_frame, log_stats=False,
                 )
                 self.progress.emit(k + 1, s.num_iter)
                 if s.verbose:
@@ -117,7 +119,10 @@ class RLDeconvolutionWorker(QObject):
         raise_if_nonfinite(restored, "RL result")
         if s.crop_to_visible:
             restored = restored[model.valid_slices]
-        write_to_buffer(self._buffer, restored, channel=self._output_channel)
+        write_to_buffer(
+            self._buffer, restored, channel=self._output_channel,
+            t=self._output_frame,
+        )
         self.progress.emit(result.iterations, s.num_iter)
         self.status.emit(f"Done after {result.iterations} iterations")
         log.info(
@@ -166,7 +171,7 @@ class RLDeconvolutionWorker(QObject):
             raise_if_nonfinite(restored, "RL tile result")
             write_to_buffer(
                 self._buffer, restored, channel=self._output_channel,
-                log_stats=False,
+                t=self._output_frame, log_stats=False,
             )
             self.progress.emit(done["n"], n_tiles)
             self.status.emit(f"RL: tile {done['n']}/{n_tiles}")
@@ -187,7 +192,10 @@ class RLDeconvolutionWorker(QObject):
             return
 
         raise_if_nonfinite(output, "RL tiled result")
-        write_to_buffer(self._buffer, output, channel=self._output_channel)
+        write_to_buffer(
+            self._buffer, output, channel=self._output_channel,
+            t=self._output_frame,
+        )
         self.progress.emit(n_tiles, n_tiles)
         self.status.emit(f"Done — {n_tiles} tiles")
         log.info("RL tiled done: output=%s", tuple(output.shape))

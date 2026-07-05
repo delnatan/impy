@@ -116,13 +116,15 @@ def output_5d_shape(
     data_shape: Tuple[int, ...],
     psf_shape: Tuple[int, ...],
     n_channels: int = 1,
+    n_frames: int = 1,
 ) -> Tuple[int, int, int, int, int]:
     """Return the (T, Z, C, Y, X) shape of the deconvolved output."""
     out = output_shape(state, data_shape, psf_shape)
     C = max(1, int(n_channels))
+    T = max(1, int(n_frames))
     if len(data_shape) == 2:
-        return (1, 1, C, out[0], out[1])
-    return (1, out[0], C, out[1], out[2])
+        return (T, 1, C, out[0], out[1])
+    return (T, out[0], C, out[1], out[2])
 
 
 def estimate_tile_plan(
@@ -297,12 +299,17 @@ def raise_if_nonfinite(arr: np.ndarray, label: str) -> None:
 
 
 def write_to_buffer(
-    buffer, arr: np.ndarray, *, channel: int = 0, log_stats: bool = True
+    buffer, arr: np.ndarray, *, channel: int = 0, t: int = 0, log_stats: bool = True
 ) -> None:
     channel = max(0, int(channel))
+    t = max(0, int(t))
     if channel >= buffer.shape[2]:
         raise ValueError(
             f"output channel {channel} is outside buffer channel count {buffer.shape[2]}"
+        )
+    if t >= buffer.shape[0]:
+        raise ValueError(
+            f"output frame {t} is outside buffer frame count {buffer.shape[0]}"
         )
 
     nan_count = int(np.isnan(arr).sum())
@@ -325,12 +332,12 @@ def write_to_buffer(
         if arr.shape != target:
             log.error("buffer/result shape mismatch: result=%s buffer=%s",
                       arr.shape, buffer.shape)
-        buffer[0, 0, channel, :, :] = arr
+        buffer[t, 0, channel, :, :] = arr
     elif arr.ndim == 3:
         target = (buffer.shape[1], buffer.shape[3], buffer.shape[4])
         if arr.shape != target:
             log.error("buffer/result shape mismatch: result=%s buffer=%s",
                       arr.shape, buffer.shape)
-        buffer[0, :, channel, :, :] = arr
+        buffer[t, :, channel, :, :] = arr
     else:
         raise ValueError(f"unexpected result ndim {arr.ndim}")

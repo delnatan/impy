@@ -537,8 +537,8 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             min_z_slices=self.min_z_slices_spin.value(),
         )
 
-    def _prepare(self) -> Optional[object]:
-        cropped = self._crop_observation_and_psf()
+    def _prepare(self, t: Optional[int] = None) -> Optional[object]:
+        cropped = self._crop_observation_and_psf(t)
         if cropped is None:
             return None
 
@@ -574,25 +574,30 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
     def _start(self):
         if self._runner.is_running():
             return
-        result = self._prepare()
-        if result is None:
+        frame_ts = list(self._frame_range())
+        first = self._prepare(frame_ts[0])
+        if first is None:
             return
-        inputs, state, t, c = result
+        inputs, state, t, c = first
 
         stack_channels = self.stack_channels_check.isChecked()
         output_channels = self.viewer.C if stack_channels else 1
         output_channel = c if stack_channels else 0
         if state.tiled:
             output_shape = dmem.output_5d_shape(
-                state, inputs.y.shape, inputs.psf.shape, n_channels=output_channels,
+                state, inputs.y.shape, inputs.psf.shape,
+                n_channels=output_channels, n_frames=len(frame_ts),
             )
         else:
             output_shape = dmem.problem_output_5d_shape(
-                inputs, crop_to_visible=state.crop_to_visible, n_channels=output_channels,
+                inputs, crop_to_visible=state.crop_to_visible,
+                n_channels=output_channels, n_frames=len(frame_ts),
             )
         dmem.log.info(
-            "output buffer shape=%s channel=%d (tiled=%s crop_to_visible=%s)",
+            "output buffer shape=%s channel=%d (tiled=%s crop_to_visible=%s "
+            "frames=%s)",
             output_shape, output_channel, state.tiled, state.crop_to_visible,
+            frame_ts,
         )
 
         vs = inputs.voxel_spacing
@@ -621,16 +626,27 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             "is_rgb": False,
             "channels": channels,
             "source_channel": c,
-            "source_frame": t,
+            "source_frame": frame_ts[0] if len(frame_ts) == 1 else list(frame_ts),
             "algorithm": "memsolve_maxent",
         }
 
-        source, buffer = self._runner.prepare_output(
-            output_shape=output_shape,
-            output_dtype=np.dtype(np.float32),
-            output_meta=output_meta,
-            reuse_existing_buffer=stack_channels,
-        )
+        def prepare_for_t(frame_t):
+            result = self._prepare(frame_t)
+            if result is None:
+                return None
+            frame_inputs, frame_state, _t, _c = result
+            return frame_inputs, frame_state
+
+        def make_worker(frame_data, output_frame):
+            frame_inputs, frame_state = frame_data
+            return MemsolveDeconvolutionWorker(
+                problem_inputs=None if frame_state.tiled else frame_inputs,
+                prepared=frame_inputs if frame_state.tiled else None,
+                state=frame_state,
+                buffer=self._runner.output_buffer,
+                output_channel=output_channel,
+                output_frame=output_frame,
+            )
 
         if state.tiled:
             self.progress_bar.setRange(0, 0)
@@ -638,26 +654,23 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             self.progress_bar.setRange(0, state.max_iter)
         self.progress_bar.setValue(0)
 
-        worker = MemsolveDeconvolutionWorker(
-            problem_inputs=None if state.tiled else inputs,
-            prepared=inputs if state.tiled else None,
-            state=state,
-            buffer=buffer,
-            output_channel=output_channel,
-        )
-
-        worker.status.connect(self._on_status)
         self._begin_run_status(self._describe_run(state))
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
-        self._runner.start_worker(
-            worker=worker,
+        self._runner.run_frames(
+            frame_ts=frame_ts,
+            output_shape=output_shape,
+            output_dtype=np.dtype(np.float32),
+            output_meta=output_meta,
+            reuse_existing_buffer=stack_channels,
+            prepare_for_t=prepare_for_t,
+            make_worker=make_worker,
             on_progress=self._on_progress,
-            on_finished=self._on_finished,
+            on_status=self._on_status,
+            on_all_finished=self._on_finished,
             on_cancelled=self._on_cancelled,
             on_error=self._on_error,
-            on_thread_finished=self._cleanup_thread,
         )
 
     def _cancel(self):
@@ -705,9 +718,6 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         self._set_status(f"Error: {message}", error=True)
         self.start_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
-
-    def _cleanup_thread(self):
-        self._runner.cleanup()
 
     def _set_status(self, msg: str, *, ok=False, warn=False, error=False):
         self.status_label.setPlainText(msg)

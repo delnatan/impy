@@ -39,6 +39,7 @@ class NLCGDeconvolutionWorker(QObject):
         regularizer,
         buffer,                      # ImageBuffer for live preview / final write
         output_channel: int = 0,
+        output_frame: int = 0,
     ):
         super().__init__()
         self._p = prepared
@@ -46,6 +47,7 @@ class NLCGDeconvolutionWorker(QObject):
         self._regularizer = regularizer
         self._buffer = buffer
         self._output_channel = max(0, int(output_channel))
+        self._output_frame = max(0, int(output_frame))
         self._cancel = False
 
     def cancel(self) -> None:
@@ -93,7 +95,7 @@ class NLCGDeconvolutionWorker(QObject):
                     restored = restored[model.valid_slices]
                 _write_to_buffer(
                     self._buffer, restored, channel=self._output_channel,
-                    log_stats=False,
+                    t=self._output_frame, log_stats=False,
                 )
                 self.progress.emit(k + 1, s.num_iter)
                 if s.verbose:
@@ -135,7 +137,10 @@ class NLCGDeconvolutionWorker(QObject):
         _raise_if_nonfinite(restored, "NLCG result")
         if s.crop_to_visible:
             restored = restored[model.valid_slices]
-        _write_to_buffer(self._buffer, restored, channel=self._output_channel)
+        _write_to_buffer(
+            self._buffer, restored, channel=self._output_channel,
+            t=self._output_frame,
+        )
         self.progress.emit(result.iterations, s.num_iter)
         self.status.emit(f"Done after {result.iterations} iterations")
         log.info(
@@ -195,7 +200,7 @@ class NLCGDeconvolutionWorker(QObject):
             _raise_if_nonfinite(restored, "NLCG tile result")
             _write_to_buffer(
                 self._buffer, restored, channel=self._output_channel,
-                log_stats=False,
+                t=self._output_frame, log_stats=False,
             )
             self.progress.emit(done["n"], n_tiles)
             self.status.emit(f"NLCG: tile {done['n']}/{n_tiles}")
@@ -216,7 +221,10 @@ class NLCGDeconvolutionWorker(QObject):
             return
 
         _raise_if_nonfinite(output, "NLCG tiled result")
-        _write_to_buffer(self._buffer, output, channel=self._output_channel)
+        _write_to_buffer(
+            self._buffer, output, channel=self._output_channel,
+            t=self._output_frame,
+        )
         self.progress.emit(n_tiles, n_tiles)
         self.status.emit(f"Done — {n_tiles} tiles")
         log.info("NLCG tiled done: output=%s", tuple(output.shape))

@@ -293,6 +293,18 @@ class PSFDistillationDialog(QDialog):
         z_layout.addWidget(self.all_z_radio)
         z_layout.addWidget(self.around_z_radio)
         z_layout.addWidget(self.z_half_spin)
+        z_layout.addWidget(QLabel("center:"))
+        self.z_center_spin = QSpinBox()
+        self.z_center_spin.setRange(0, 0)
+        self.z_center_spin.setFixedWidth(48)
+        self.z_center_spin.setEnabled(False)
+        self.z_center_spin.setToolTip(
+            "Z-plane the crop window is centered on. Independent of any "
+            "shape's own t/z anchor -- defaults to the viewer's current Z "
+            "when a shape is selected, but is always explicit and editable "
+            "here."
+        )
+        z_layout.addWidget(self.z_center_spin)
         z_layout.addStretch()
         z_row.setVisible(False)
         self._z_row_widget = z_row
@@ -302,6 +314,7 @@ class PSFDistillationDialog(QDialog):
         self._z_group.addButton(self.all_z_radio)
         self._z_group.addButton(self.around_z_radio)
         self.around_z_radio.toggled.connect(self.z_half_spin.setEnabled)
+        self.around_z_radio.toggled.connect(self.z_center_spin.setEnabled)
         self.around_z_radio.toggled.connect(
             lambda *_: self._refresh_workflow_summary()
         )
@@ -309,6 +322,9 @@ class PSFDistillationDialog(QDialog):
             lambda *_: self._refresh_workflow_summary()
         )
         self.z_half_spin.valueChanged.connect(
+            lambda *_: self._refresh_workflow_summary()
+        )
+        self.z_center_spin.valueChanged.connect(
             lambda *_: self._refresh_workflow_summary()
         )
 
@@ -748,7 +764,8 @@ class PSFDistillationDialog(QDialog):
             n_x = x1 - x0
             if Z > 1 and self.around_z_radio.isChecked():
                 half = self.z_half_spin.value()
-                n_z = min(Z, rec.z + half + 1) - max(0, rec.z - half)
+                z_center = self.z_center_spin.value()
+                n_z = min(Z, z_center + half + 1) - max(0, z_center - half)
             else:
                 n_z = Z
         if n_z <= 1:
@@ -1008,6 +1025,10 @@ class PSFDistillationDialog(QDialog):
         )
         self._z_row_widget.setVisible(Z > 1)
         self.frame_spin.setValue(rec.t)
+        self.z_center_spin.setRange(0, max(0, Z - 1))
+        self.z_center_spin.setValue(
+            min(max(0, getattr(self.viewer, "z_idx", 0)), max(0, Z - 1))
+        )
         self._refresh_workflow_summary()
 
     # ------------------------------------------------------------------ #
@@ -1069,7 +1090,8 @@ class PSFDistillationDialog(QDialog):
             x_slice = slice(xl, xr)
             if Z > 1 and self.around_z_radio.isChecked():
                 half = self.z_half_spin.value()
-                z_slice = slice(max(0, rec.z - half), min(Z, rec.z + half + 1))
+                z_center = self.z_center_spin.value()
+                z_slice = slice(max(0, z_center - half), min(Z, z_center + half + 1))
             else:
                 z_slice = slice(0, Z)
 

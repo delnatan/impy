@@ -41,7 +41,7 @@ from qtpy.QtWidgets import (
 )
 
 from pyvistra.ui.manager import manager
-from pyvistra.data.shapes import RECTANGLE, rectangle_bounds
+from pyvistra.data.shapes import ALL_FRAMES, RECTANGLE, rectangle_bounds
 
 from .decon_common import compact_psf_shape_for_data
 
@@ -117,15 +117,25 @@ class SourcePSFPanelMixin:
             lambda _v: self._on_source_psf_changed()
         )
         ch_t_layout.addWidget(self.channel_spin)
-        ch_t_layout.addWidget(QLabel("Frame T:"))
-        self.frame_spin = QSpinBox()
-        self.frame_spin.setRange(0, max(0, T - 1))
-        self.frame_spin.setValue(getattr(self.viewer, "t_idx", 0))
-        self.frame_spin.setFixedWidth(52)
-        self.frame_spin.valueChanged.connect(
-            lambda _v: self._on_source_psf_changed()
+        ch_t_layout.addWidget(QLabel("Frames T:"))
+        t_default = min(max(0, getattr(self.viewer, "t_idx", 0)), max(0, T - 1))
+        self.t_start_spin = QSpinBox()
+        self.t_start_spin.setRange(0, max(0, T - 1))
+        self.t_start_spin.setValue(t_default)
+        self.t_start_spin.setFixedWidth(52)
+        self.t_end_spin = QSpinBox()
+        self.t_end_spin.setRange(0, max(0, T - 1))
+        self.t_end_spin.setValue(t_default)
+        self.t_end_spin.setFixedWidth(52)
+        self.t_end_spin.setToolTip(
+            "Deconvolution runs once per frame in [start, end], sequentially, "
+            "writing each result into its own frame of the output."
         )
-        ch_t_layout.addWidget(self.frame_spin)
+        self.t_start_spin.valueChanged.connect(self._on_t_start_changed)
+        self.t_end_spin.valueChanged.connect(self._on_t_end_changed)
+        ch_t_layout.addWidget(self.t_start_spin)
+        ch_t_layout.addWidget(QLabel("to"))
+        ch_t_layout.addWidget(self.t_end_spin)
         ch_t_layout.addSpacing(10)
         ch_t_layout.addWidget(QLabel("Background:"))
         self.background_spin = QDoubleSpinBox()
@@ -200,6 +210,18 @@ class SourcePSFPanelMixin:
         z_layout.addWidget(self.all_z_radio)
         z_layout.addWidget(self.around_z_radio)
         z_layout.addWidget(self.z_half_spin)
+        z_layout.addWidget(QLabel("center:"))
+        self.z_center_spin = QSpinBox()
+        self.z_center_spin.setRange(0, 0)
+        self.z_center_spin.setFixedWidth(48)
+        self.z_center_spin.setEnabled(False)
+        self.z_center_spin.setToolTip(
+            "Z-plane the crop window is centered on. Independent of any "
+            "shape's own t/z anchor -- defaults to the viewer's current Z "
+            "when a shape is selected, but is always explicit and editable "
+            "here."
+        )
+        z_layout.addWidget(self.z_center_spin)
         z_layout.addStretch()
         z_row.setVisible(False)
         self._z_row_widget = z_row
@@ -209,6 +231,7 @@ class SourcePSFPanelMixin:
         self._z_group.addButton(self.all_z_radio)
         self._z_group.addButton(self.around_z_radio)
         self.around_z_radio.toggled.connect(self.z_half_spin.setEnabled)
+        self.around_z_radio.toggled.connect(self.z_center_spin.setEnabled)
         self.around_z_radio.toggled.connect(
             lambda *_: self._on_source_psf_changed()
         )
@@ -216,6 +239,9 @@ class SourcePSFPanelMixin:
             lambda *_: self._on_source_psf_changed()
         )
         self.z_half_spin.valueChanged.connect(
+            lambda *_: self._on_source_psf_changed()
+        )
+        self.z_center_spin.valueChanged.connect(
             lambda *_: self._on_source_psf_changed()
         )
 
@@ -351,12 +377,26 @@ class SourcePSFPanelMixin:
             n_x = x1 - x0
             if Z > 1 and self.around_z_radio.isChecked():
                 half = self.z_half_spin.value()
-                n_z = min(Z, rec.z + half + 1) - max(0, rec.z - half)
+                z_center = self.z_center_spin.value()
+                n_z = min(Z, z_center + half + 1) - max(0, z_center - half)
             else:
                 n_z = Z
         if n_z <= 1:
             return (n_y, n_x)
         return (n_z, n_y, n_x)
+
+    def _on_t_start_changed(self, value: int) -> None:
+        if value > self.t_end_spin.value():
+            self.t_end_spin.setValue(value)
+        self._on_source_psf_changed()
+
+    def _on_t_end_changed(self, value: int) -> None:
+        if value < self.t_start_spin.value():
+            self.t_start_spin.setValue(value)
+        self._on_source_psf_changed()
+
+    def _frame_range(self) -> range:
+        return range(self.t_start_spin.value(), self.t_end_spin.value() + 1)
 
     def _current_psf_kernel_shape(self) -> Optional[tuple]:
         win = self.psf_combo.currentData()
@@ -617,21 +657,32 @@ class SourcePSFPanelMixin:
             f"y [{yt}:{yb}]  x [{xl}:{xr}]  →  {yb-yt} × {xr-xl} px"
         )
         self._z_row_widget.setVisible(Z > 1)
-        self.frame_spin.setValue(rec.t)
+        t_sync = (
+            rec.t if rec.t != ALL_FRAMES
+            else min(max(0, getattr(self.viewer, "t_idx", 0)), max(0, _T - 1))
+        )
+        self.t_start_spin.setValue(t_sync)
+        self.t_end_spin.setValue(t_sync)
+        self.z_center_spin.setRange(0, max(0, Z - 1))
+        self.z_center_spin.setValue(
+            min(max(0, getattr(self.viewer, "z_idx", 0)), max(0, Z - 1))
+        )
         self._on_source_psf_changed()
 
     # ------------------------------------------------------------------ #
     # Observation / PSF cropping (shared `_prepare()` step)
 
-    def _crop_observation_and_psf(self) -> Optional[CroppedSource]:
+    def _crop_observation_and_psf(self, t: Optional[int] = None) -> Optional[CroppedSource]:
         """Read region + PSF widgets and return cropped numeric inputs.
 
-        Returns ``None`` on a user error, after calling
-        ``self._set_status(...)`` to explain it.
+        `t` selects the frame to crop; defaults to `t_start_spin` (the
+        first/only frame) when omitted. Returns ``None`` on a user error,
+        after calling ``self._set_status(...)`` to explain it.
         """
         _T, Z, _C, Y, X = self.viewer.img_data.shape
         c = self.channel_spin.value()
-        t = self.frame_spin.value()
+        if t is None:
+            t = self.t_start_spin.value()
 
         if self.full_radio.isChecked():
             z_slice = slice(0, Z)
@@ -653,7 +704,8 @@ class SourcePSFPanelMixin:
             x_slice = slice(xl, xr)
             if Z > 1 and self.around_z_radio.isChecked():
                 half = self.z_half_spin.value()
-                z_slice = slice(max(0, rec.z - half), min(Z, rec.z + half + 1))
+                z_center = self.z_center_spin.value()
+                z_slice = slice(max(0, z_center - half), min(Z, z_center + half + 1))
             else:
                 z_slice = slice(0, Z)
 
