@@ -19,13 +19,20 @@ Every viewer class declares a class-level ``MENU_SPEC`` (see
 ``window.MENU_SPEC`` for the format). While a viewer is docked, its own
 ``QMainWindow`` menu bar is hidden and its spec is mirrored onto the
 workspace's persistent menu bar via ``build_proxy_menus``, dispatching
-to whichever tab is currently active; only the active tab's menus are
-visible, so the menu bar always matches the selected tab. Floating a
-tab back out restores its embedded menu bar. Hiding the embedded bars
-is load-bearing on macOS: every docked ``QMainWindow``'s ``QMenuBar``
-attaches to the same native top-of-screen menu bar as the workspace's
-own, and whichever registers last hijacks it — tab switches never
-re-evaluate it, leaving the native bar stuck on a stale viewer's menus.
+to whichever tab is currently active; only the active tab's top-level
+menus are actually attached to the menu bar (``_refresh_mirrored_menus``
+adds/removes them, it does not just call ``setVisible``), so the menu
+bar always matches the selected tab. Floating a tab back out restores
+its embedded menu bar. Hiding the embedded bars is load-bearing on
+macOS: every docked ``QMainWindow``'s ``QMenuBar`` attaches to the same
+native top-of-screen menu bar as the workspace's own, and whichever
+registers last hijacks it — tab switches never re-evaluate it, leaving
+the native bar stuck on a stale viewer's menus. Structurally
+add/removing the mirrored top-level actions (rather than toggling
+their visibility) matters for the same reason: on macOS, ``setVisible``
+on an action already rendered into the native menu bar does not
+reliably re-sync the underlying NSMenu, so a "hidden" menu can keep
+showing — and stay clickable — after the active tab changes.
 """
 
 from qtpy.QtCore import Qt
@@ -311,6 +318,16 @@ class Workspace(QMainWindow):
     # ------------------------------------------------------------------
 
     def _setup_menu(self):
+        # macOS's native top-of-screen menu bar syncs when the *key
+        # window* changes, not reliably when one window's own menu bar
+        # mutates its action list while staying focused -- which is
+        # exactly what tab switching does here (see
+        # _refresh_mirrored_menus). Rendering the bar as a normal
+        # in-window widget instead of the native one sidesteps that
+        # sync bug entirely: an inactive tab's menus reliably disappear
+        # and the active tab's reliably appear, because it's just a
+        # QMenuBar repainting like any other widget.
+        self.menuBar().setNativeMenuBar(False)
         panels_menu = self.menuBar().addMenu("Panels")
 
         layers_action = QAction("Layers", self)
@@ -346,14 +363,29 @@ class Workspace(QMainWindow):
 
     def _refresh_mirrored_menus(self):
         """Show only the active tab's mirrored menus on the workspace
-        bar (called on every tab activation/addition/removal)."""
+        bar (called on every tab activation/addition/removal).
+
+        Top-level menus are structurally added to/removed from the
+        menu bar (not just hidden via ``setVisible``) — on macOS,
+        toggling an already-native-rendered ``QMenuBar`` action's
+        visibility does not reliably re-sync the underlying NSMenu, so
+        a hidden menu can keep showing (and stay clickable) after the
+        active tab changes. Adding/removing the action forces Qt to
+        rebuild the native menu bar, which does sync correctly.
+        """
+        menubar = self.menuBar()
+        bar_actions = menubar.actions()
         active_spec = getattr(
             type(self._active_tab_widget), "MENU_SPEC", None
         )
         for spec, top_actions, leaf_actions in self._mirrored.values():
             match = spec is active_spec
             for action in top_actions:
-                action.setVisible(match)
+                in_bar = action in bar_actions
+                if match and not in_bar:
+                    menubar.addAction(action)
+                elif not match and in_bar:
+                    menubar.removeAction(action)
             for action in leaf_actions:
                 # Leaf actions must be disabled too, not just hidden
                 # with their parent menu — an enabled leaf action's
