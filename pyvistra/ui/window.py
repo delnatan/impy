@@ -448,6 +448,10 @@ class ImageWindow(QMainWindow):
         # happen on a worker thread, delivered here via queued signal.
         # In-memory sources keep the synchronous path (loader is None).
         self._slice_loader = None
+        # Set by _request_auto_contrast when the first slice for a lazy
+        # source hasn't arrived yet; _on_slice_ready fires the deferred
+        # auto-contrast once it does (see _request_auto_contrast).
+        self._pending_auto_contrast = False
         self._slice_ready.connect(self._on_slice_ready, Qt.QueuedConnection)
         self._replace_slice_loader(self.img_data)
 
@@ -485,7 +489,7 @@ class ImageWindow(QMainWindow):
 
         # Initial Draw + one-shot auto-contrast so default clim matches data.
         self.update_view()
-        self.renderer.auto_contrast()
+        self._request_auto_contrast()
         self.canvas.update()
 
     # ------------------------------------------------------------------
@@ -811,7 +815,7 @@ class ImageWindow(QMainWindow):
 
         self.update_view()
         if needs_rebuild:
-            self.renderer.auto_contrast()
+            self._request_auto_contrast()
             self.canvas.update()
 
     def _setup_menu(self):
@@ -2905,7 +2909,7 @@ class ImageWindow(QMainWindow):
 
         # Update view
         self.update_view()
-        self.renderer.auto_contrast()
+        self._request_auto_contrast()
         self.canvas.update()
 
     def _rebuild_controls(self):
@@ -3319,8 +3323,30 @@ class ImageWindow(QMainWindow):
         if key != self._current_slice_key():
             return  # stale: view moved on while this frame loaded
         self.renderer.set_slice(plane)
+        if self._pending_auto_contrast:
+            self._pending_auto_contrast = False
+            self.renderer.auto_contrast()
         self.canvas.update()
         self.view_changed.emit(self)
+
+    def _request_auto_contrast(self):
+        """One-shot auto-contrast, deferred until a slice is actually cached.
+
+        For in-memory sources ``update_view()`` slices synchronously, so
+        the cache is already populated and this fires immediately. For
+        lazy (file/zarr-backed) sources the first ``update_view()`` call
+        is a cache miss — the async loader hasn't delivered a plane yet
+        — so calling ``renderer.auto_contrast()`` right away would
+        silently no-op on an empty cache and leave the full-dtype
+        default clim (e.g. 0-65535 for uint16), which reads as solid
+        black for any image without a huge dynamic range. Defer to
+        ``_on_slice_ready`` instead, which applies it once the first
+        real plane arrives.
+        """
+        if self.renderer.current_slice_cache is not None:
+            self.renderer.auto_contrast()
+        else:
+            self._pending_auto_contrast = True
 
     def _subscribe_to_buffer(self, data):
         if self._buffer_unsubscribe is not None:

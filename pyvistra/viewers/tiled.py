@@ -178,18 +178,21 @@ class TiledVisualProxy:
         return None
 
     def apply_settings_to_tile(self, tile):
-        """Apply current global settings to a newly loaded tile."""
+        """Apply current global settings to a newly loaded tile.
+
+        Only colormap/gamma/visibility are synced globally — contrast
+        stays per-tile (see class docstring), so clim is left untouched
+        here (auto-contrasted on load in ``TileWidget.load``).
+        """
         if tile.renderer is None:
             return
         for c in range(len(tile.renderer.layers)):
-            if c in self._channel_colormaps:
-                tile.renderer.set_colormap(c, self._channel_colormaps[c])
-            if c in self._channel_gammas:
-                tile.renderer.set_gamma(c, self._channel_gammas[c])
-            if c in self._channel_visibility:
-                tile.renderer.set_channel_visible(
-                    c, self._channel_visibility[c]
-                )
+            if c >= len(self.display):
+                continue
+            state = self.display[c]
+            tile.renderer.set_colormap(c, state.colormap_name)
+            tile.renderer.set_gamma(c, state.gamma)
+            tile.renderer.set_channel_visible(c, state.visible)
 
 
 class TiledChannelPanel(QWidget):
@@ -582,6 +585,7 @@ class TileWidget(QFrame):
             z_mid = self.data.shape[1] // 2
             self._current_z = z_mid
             self.renderer.update_slice(0, z_mid)
+            self.renderer.auto_contrast()
             self._fit_view()
             self._update_info()
 
