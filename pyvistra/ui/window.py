@@ -71,6 +71,7 @@ from ..viewers import OrthoViewer
 from ..data.points import PointTable
 from ..data.slice_loader import SliceLoader
 from ..data.view_state import ViewState
+from ..data.channel_state import ChannelDisplayList
 from ..visuals.points import DEFAULT_STYLE as POINT_DEFAULT_STYLE, PointLayerVisual
 from ..visuals.shapes import ShapeLayerVisual
 from ..rois import (
@@ -321,7 +322,10 @@ class ImageWindow(QMainWindow):
         # 5. Visuals
         is_rgb = self.meta.get("is_rgb", False)
         self.renderer = CompositeImageVisual(
-            self.view, self.img_data, is_rgb=is_rgb
+            self.view,
+            self.img_data,
+            is_rgb=is_rgb,
+            channels_meta=self.meta.get("channels"),
         )
         self.renderer.reset_camera(self.img_data.shape)
 
@@ -335,7 +339,9 @@ class ImageWindow(QMainWindow):
         # Navigation state (t, z, projection). Sliders write into it;
         # its subscription drives label sync + update_view, so any writer
         # (slider, playback, scripting) triggers exactly one redraw.
-        self.view_state = ViewState()
+        # Default z to the middle slice for 3D stacks -- opening on z=0
+        # is rarely the useful view for volumetric data.
+        self.view_state = ViewState(z=self.Z // 2)
         self._suspend_view_updates = False
         self.c_idx = 0  # Active channel index for Single mode
 
@@ -779,7 +785,10 @@ class ImageWindow(QMainWindow):
                 layer.parent = None
 
             self.renderer = CompositeImageVisual(
-                self.view, self.img_data, is_rgb=new_is_rgb
+                self.view,
+                self.img_data,
+                is_rgb=new_is_rgb,
+                channels_meta=self.meta.get("channels"),
             )
             self.renderer.reset_camera(self.img_data.shape)
             self._rebuild_controls()
@@ -2696,10 +2705,12 @@ class ImageWindow(QMainWindow):
         dlg.exec_()
 
     def show_ortho_view(self):
-        # Copy colormap settings from current renderer
-        colormaps = {}
-        for c in range(self.renderer.num_channels):
-            colormaps[c] = self.renderer.get_colormap_name(c)
+        # Copy full per-channel display state (clim/gamma/colormap/visible)
+        # from the current renderer so the derived view matches what's on
+        # screen instead of resetting to auto/default contrast.
+        channel_display = ChannelDisplayList.from_states(
+            self.renderer.display[c] for c in range(self.renderer.num_channels)
+        )
 
         # Acquire reference if proxy supports ref counting (for shared file handles)
         data = self.img_data
@@ -2710,7 +2721,9 @@ class ImageWindow(QMainWindow):
             data,
             self.meta,
             title=f"Ortho View - {self.windowTitle()}",
-            channel_colormaps=colormaps,
+            channel_display=channel_display,
+            t_idx=self.t_idx,
+            z_idx=self.z_idx,
         )
         present_window(self.ortho_viewer)
 
@@ -2718,10 +2731,10 @@ class ImageWindow(QMainWindow):
         """Open 3D volume rendering view."""
         from ..viewers import VolumeViewer
 
-        # Copy colormap settings from current renderer
-        colormaps = {}
-        for c in range(self.renderer.num_channels):
-            colormaps[c] = self.renderer.get_colormap_name(c)
+        # Copy full per-channel display state from the current renderer.
+        channel_display = ChannelDisplayList.from_states(
+            self.renderer.display[c] for c in range(self.renderer.num_channels)
+        )
 
         # Acquire reference if proxy supports ref counting (for shared HDF5 files)
         data = self.img_data
@@ -2734,7 +2747,7 @@ class ImageWindow(QMainWindow):
             title=f"3D Volume - {self.windowTitle()}",
             channel=self.c_idx if hasattr(self, "c_idx") else 0,
             time=self.t_idx if hasattr(self, "t_idx") else 0,
-            channel_colormaps=colormaps,
+            channel_display=channel_display,
         )
         present_window(self.volume_viewer)
 
@@ -2742,10 +2755,10 @@ class ImageWindow(QMainWindow):
         """Open the Z-montage view (every Z-slice tiled into a grid)."""
         from ..viewers import ZMontageViewer
 
-        # Copy colormap settings from current renderer
-        colormaps = {}
-        for c in range(self.renderer.num_channels):
-            colormaps[c] = self.renderer.get_colormap_name(c)
+        # Copy full per-channel display state from the current renderer.
+        channel_display = ChannelDisplayList.from_states(
+            self.renderer.display[c] for c in range(self.renderer.num_channels)
+        )
 
         # Acquire reference if proxy supports ref counting (for shared file handles)
         data = self.img_data
@@ -2756,7 +2769,7 @@ class ImageWindow(QMainWindow):
             data,
             self.meta,
             title=f"Z-Montage - {self.windowTitle()}",
-            channel_colormaps=colormaps,
+            channel_display=channel_display,
             t_idx=self.t_idx if hasattr(self, "t_idx") else 0,
         )
         present_window(self.zmontage_viewer)
@@ -2887,7 +2900,7 @@ class ImageWindow(QMainWindow):
         self._suspend_view_updates = True
         try:
             self.view_state.set_t(0)
-            self.view_state.set_z(0)
+            self.view_state.set_z(self.Z // 2)
         finally:
             self._suspend_view_updates = False
         self.c_idx = 0
@@ -2899,7 +2912,10 @@ class ImageWindow(QMainWindow):
         # Create new renderer with updated data
         is_rgb = self.meta.get("is_rgb", False)
         self.renderer = CompositeImageVisual(
-            self.view, self.img_data, is_rgb=is_rgb
+            self.view,
+            self.img_data,
+            is_rgb=is_rgb,
+            channels_meta=self.meta.get("channels"),
         )
         self.renderer.reset_camera(self.img_data.shape)
         self._sync_overlay_spacing()
@@ -3068,11 +3084,12 @@ class ImageWindow(QMainWindow):
             # Standard Slider
             self.z_slider = QSlider(Qt.Horizontal)
             self.z_slider.setRange(0, self.Z - 1)
+            self.z_slider.setValue(self.z_idx)
             self.z_slider.setFocusPolicy(Qt.NoFocus)
             self.z_slider.valueChanged.connect(self.on_z_change)
             row.addWidget(self.z_slider)
 
-            self.z_label = QLabel("0")
+            self.z_label = QLabel(str(self.z_idx))
             self.z_label.setFixedWidth(30)  # Fixed width to prevent jumping
             self.z_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             row.addWidget(self.z_label)

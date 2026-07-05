@@ -15,8 +15,9 @@ pair. The single-channel "big histogram" view is intentionally
 omitted; the per-row compact histogram covers the common case.
 """
 
-from qtpy.QtCore import Qt, QTimer, Signal
-from qtpy.QtGui import QColor
+import numpy as np
+from qtpy.QtCore import QSize, Qt, QTimer, Signal
+from qtpy.QtGui import QColor, QIcon, QImage, QPixmap
 from qtpy.QtWidgets import (
     QCheckBox,
     QDockWidget,
@@ -24,6 +25,7 @@ from qtpy.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -38,6 +40,30 @@ from .histogram import (
     get_safe_contrast_bounds,
 )
 
+_MENU_ICON_SIZE = QSize(64, 16)
+_SWATCH_ICON_SIZE = QSize(18, 18)
+# QMenu has no setIconSize(); icon size for its items is a QSS property.
+_MENU_ICON_QSS = (
+    f"QMenu::item {{ icon-size: {_MENU_ICON_SIZE.width()}px "
+    f"{_MENU_ICON_SIZE.height()}px; }}"
+)
+
+
+def _colormap_icon(cmap_name, size=_MENU_ICON_SIZE, samples=32):
+    """Render *cmap_name*'s gradient as a small QIcon for menus/swatches."""
+    cmap, _ = _colormaps.get(cmap_name)
+    # Some vispy colormaps (e.g. "hot") only broadcast correctly against a
+    # column vector, not a flat 1D array -- (N, 1) works for every kind.
+    colors = cmap.map(np.linspace(0.0, 1.0, samples).reshape(-1, 1))
+    strip = QImage(samples, 1, QImage.Format_RGB32)
+    for i, (r, g, b, _a) in enumerate(colors):
+        r, g, b = (float(v) for v in np.clip((r, g, b), 0.0, 1.0))
+        strip.setPixel(i, 0, QColor.fromRgbF(r, g, b).rgb())
+    pixmap = QPixmap.fromImage(strip).scaled(
+        size.width(), size.height(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+    )
+    return QIcon(pixmap)
+
 
 class ChannelRow(QWidget):
     """One row per channel: visibility, colormap swatch, min/max + histogram, gamma."""
@@ -48,11 +74,17 @@ class ChannelRow(QWidget):
     gammaChanged = Signal(int, float)  # channel_idx, gamma
 
     def __init__(
-        self, channel_idx, channel_name, color, data_dtype=None, parent=None
+        self,
+        channel_idx,
+        channel_name,
+        colormap_name,
+        data_dtype=None,
+        parent=None,
     ):
         super().__init__(parent)
         self.channel_idx = channel_idx
         self.data_dtype = data_dtype
+        self.current_colormap = colormap_name
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -65,10 +97,16 @@ class ChannelRow(QWidget):
         layout.addWidget(self.chk_visible)
 
         self.color_btn = QPushButton()
-        self.color_btn.setFixedSize(20, 20)
+        self.color_btn.setFixedSize(24, 20)
+        self.color_btn.setIconSize(_SWATCH_ICON_SIZE)
         self.color_btn.setCursor(Qt.PointingHandCursor)
         self.color_btn.setToolTip("Change colormap")
-        self._update_color_swatch(color)
+        self.color_btn.setStyleSheet(
+            "QPushButton { border: 1px solid #555; border-radius: 3px; "
+            "background: #1f2937; }"
+            "QPushButton:hover { border-color: #9ca3af; }"
+        )
+        self._update_color_swatch(colormap_name)
         self.color_btn.clicked.connect(self._show_colormap_menu)
         layout.addWidget(self.color_btn)
 
@@ -116,12 +154,8 @@ class ChannelRow(QWidget):
         self.gamma_spin.valueChanged.connect(self._on_gamma_changed)
         layout.addWidget(self.gamma_spin)
 
-        self.current_colormap = "White"
-
-    def _update_color_swatch(self, color):
-        self.color_btn.setStyleSheet(
-            f"background-color: {color}; border: 1px solid #555; border-radius: 3px;"
-        )
+    def _update_color_swatch(self, cmap_name):
+        self.color_btn.setIcon(_colormap_icon(cmap_name, size=_SWATCH_ICON_SIZE))
 
     def _on_visibility_changed(self, checked):
         self.visibilityChanged.emit(self.channel_idx, checked)
@@ -155,25 +189,31 @@ class ChannelRow(QWidget):
         self.gammaChanged.emit(self.channel_idx, value)
 
     def _show_colormap_menu(self):
-        from qtpy.QtWidgets import QMenu
-
         menu = QMenu(self)
-        for cmap_name in _colormaps.names():
-            action = menu.addAction(cmap_name)
-            action.triggered.connect(
-                lambda checked, name=cmap_name: self._on_colormap_selected(name)
-            )
+        menu.setStyleSheet(_MENU_ICON_QSS)
+        for category, cmap_names in _colormaps.categories():
+            if not cmap_names:
+                continue
+            submenu = menu.addMenu(category)
+            submenu.setStyleSheet(_MENU_ICON_QSS)
+            for cmap_name in cmap_names:
+                action = submenu.addAction(_colormap_icon(cmap_name), cmap_name)
+                action.setCheckable(True)
+                action.setChecked(cmap_name == self.current_colormap)
+                action.triggered.connect(
+                    lambda checked, name=cmap_name: self._on_colormap_selected(name)
+                )
         menu.exec_(
             self.color_btn.mapToGlobal(self.color_btn.rect().bottomLeft())
         )
 
     def _on_colormap_selected(self, cmap_name):
         self.current_colormap = cmap_name
+        self._update_color_swatch(cmap_name)
         self.colormapChanged.emit(self.channel_idx, cmap_name)
 
     def set_data(self, data_slice, color):
-        """Update histogram data and swatch color."""
-        self._update_color_swatch(color)
+        """Update histogram data."""
         self.histogram.set_data(data_slice, color)
 
         data_min = self.histogram.data_min
@@ -310,10 +350,10 @@ class ChannelPanel(QWidget):
             else:
                 ch_name = f"Ch {c + 1}"
 
-            color = self._swatch_color(c)
+            cmap_name = self.viewer.renderer.get_colormap_name(c)
             img_data = getattr(self.viewer, "img_data", None)
             row = ChannelRow(
-                c, ch_name, color, data_dtype=getattr(img_data, "dtype", None)
+                c, ch_name, cmap_name, data_dtype=getattr(img_data, "dtype", None)
             )
             row.visibilityChanged.connect(self._on_visibility_changed)
             row.climChanged.connect(self._on_clim_changed)
@@ -366,7 +406,9 @@ class ChannelPanel(QWidget):
         elif field == "gamma":
             row.set_gamma(self.viewer.renderer.get_gamma(channel_idx))
         elif field == "colormap_name":
-            row._update_color_swatch(self._swatch_color(channel_idx))
+            cmap_name = self.viewer.renderer.get_colormap_name(channel_idx)
+            row.current_colormap = cmap_name
+            row._update_color_swatch(cmap_name)
             row.histogram.color = QColor(self._swatch_color(channel_idx))
             row.histogram.update()
         elif field == "visible":
@@ -440,6 +482,9 @@ class ChannelPanel(QWidget):
             row.set_clim(vmin, vmax)
             row.set_visible_state(self.viewer.renderer.get_channel_visible(c))
             row.set_gamma(self.viewer.renderer.get_gamma(c))
+            cmap_name = self.viewer.renderer.get_colormap_name(c)
+            row.current_colormap = cmap_name
+            row._update_color_swatch(cmap_name)
 
     def _refresh_histograms(self):
         self._hist_timer.stop()

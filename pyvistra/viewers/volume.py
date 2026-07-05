@@ -46,15 +46,23 @@ class VolumeRendererProxy:
         # Cache for current slice (for histogram in ChannelPanel)
         self.current_slice_cache = None
 
-    def _setup_volumes(self, data, view, scale):
+    def _setup_volumes(self, data, view, scale, channels_meta=None):
         """Create Volume visuals for each channel."""
         T, Z, C, Y, X = data.shape
         sz, sy, sx = scale
+        channels_meta = channels_meta or []
 
         self.display = ChannelDisplayList(C)
 
         for c in range(C):
-            cmap_name = default_channel_colormap(c, C)
+            emission_wavelength = (
+                channels_meta[c].get("emission_wavelength")
+                if c < len(channels_meta)
+                else None
+            )
+            cmap_name = default_channel_colormap(
+                c, C, emission_wavelength=emission_wavelength
+            )
             self.display.set_colormap_name(c, cmap_name)
             cmap, _ = get_colormap(cmap_name)
 
@@ -259,7 +267,7 @@ class VolumeViewer(QMainWindow):
         title="3D Volume",
         channel=0,
         time=0,
-        channel_colormaps=None,
+        channel_display=None,
     ):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -268,7 +276,9 @@ class VolumeViewer(QMainWindow):
 
         self.data = data  # (T, Z, C, Y, X)
         self.meta = meta or {}
-        self._channel_colormaps = channel_colormaps
+        # Per-channel display state (clim/gamma/colormap/visible) copied
+        # from the parent window, applied once volumes exist.
+        self._channel_display = channel_display
         self.T, self.Z, self.C, self.Y, self.X = self.data.shape
 
         # Current state
@@ -303,10 +313,16 @@ class VolumeViewer(QMainWindow):
 
         # Create renderer proxy (manages Volume visuals)
         self.renderer = VolumeRendererProxy(self)
-        self.renderer._setup_volumes(self.data, self.view, self.scale)
-        if self._channel_colormaps:
-            for channel_idx, cmap_name in self._channel_colormaps.items():
-                self.renderer.set_colormap(channel_idx, cmap_name)
+        self.renderer._setup_volumes(
+            self.data, self.view, self.scale, channels_meta=self.meta.get("channels")
+        )
+        if self._channel_display is not None:
+            for c in range(min(len(self._channel_display), self.C)):
+                state = self._channel_display[c]
+                self.renderer.set_clim(c, *state.clim)
+                self.renderer.set_gamma(c, state.gamma)
+                self.renderer.set_colormap(c, state.colormap_name)
+                self.renderer.set_channel_visible(c, state.visible)
 
         # Controls
         self.controls_widget = QWidget()

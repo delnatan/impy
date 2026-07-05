@@ -59,7 +59,8 @@ def test_compact_psf_shape_is_not_roi_or_object_canvas():
         (1.0, 1.2, 1.2),
     )
 
-    assert shape == (17, 53, 49)
+    # Z matches the (zoomed) data depth exactly; lateral is a flat default.
+    assert shape == (56, 128, 128)
     assert shape != (56, 211, 199)
     assert shape != (112, 518, 506)
 

@@ -45,12 +45,22 @@ def default_clim_for_dtype(dtype):
     return (0.0, 255.0)
 
 
-def default_channel_colormap(channel_idx, n_channels, is_rgb=False):
-    """Pick a default colormap name for *channel_idx*."""
+def default_channel_colormap(
+    channel_idx, n_channels, is_rgb=False, emission_wavelength=None
+):
+    """Pick a default colormap name for *channel_idx*.
+
+    If *emission_wavelength* (nm) is available, it takes priority over the
+    fixed-palette cycle — e.g. a 525nm channel defaults to Green instead of
+    whatever the cycle position happens to land on.
+    """
     if n_channels == 1:
         return "White"
     if is_rgb and channel_idx < 3:
         return RGB_COLORMAPS[channel_idx]
+    wl_colormap = _colormaps.colormap_for_wavelength(emission_wavelength)
+    if wl_colormap is not None:
+        return wl_colormap
     return DEFAULT_CHANNEL_COLORMAPS[
         channel_idx % len(DEFAULT_CHANNEL_COLORMAPS)
     ]
@@ -68,7 +78,9 @@ class CompositeImageVisual:
     subscribing itself.
     """
 
-    def __init__(self, view, image_data, scale=(1.0, 1.0), is_rgb=False):
+    def __init__(
+        self, view, image_data, scale=(1.0, 1.0), is_rgb=False, channels_meta=None
+    ):
         self.data = image_data
         self.view = view
         self.scale = scale  # (sy, sx)
@@ -88,12 +100,23 @@ class CompositeImageVisual:
 
         # Per-channel display state (clim/gamma/colormap/visible).
         default_clim = default_clim_for_dtype(self.data.dtype)
+        channels_meta = channels_meta or []
         self.display = ChannelDisplayList(self.num_channels)
         for c in range(self.num_channels):
             self.display.set_clim(c, *default_clim)
+            emission_wavelength = (
+                channels_meta[c].get("emission_wavelength")
+                if c < len(channels_meta)
+                else None
+            )
             self.display.set_colormap_name(
                 c,
-                default_channel_colormap(c, self.num_channels, self.is_rgb),
+                default_channel_colormap(
+                    c,
+                    self.num_channels,
+                    self.is_rgb,
+                    emission_wavelength=emission_wavelength,
+                ),
             )
 
         self._setup_layers()

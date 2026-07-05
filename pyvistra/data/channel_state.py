@@ -59,6 +59,19 @@ class ChannelDisplayList:
         ]
         self._listeners = []
 
+    @classmethod
+    def from_states(cls, states):
+        """Build a new list by copying an iterable of
+        :class:`ChannelDisplayState` (e.g. another window's ``display``).
+
+        Used to hand off contrast/gamma/colormap/visibility settings to a
+        derived viewer (ortho/volume/z-montage) at construction time.
+        """
+        obj = cls.__new__(cls)
+        obj._states = [replace(s) for s in states]
+        obj._listeners = []
+        return obj
+
     def __len__(self):
         return len(self._states)
 

@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
@@ -157,41 +157,41 @@ def estimate_tile_plan(
 
 
 # --------------------------------------------------------------------------- #
-# PSF preset helper (unchanged behavior from the old decon_recipe module)
+# PSF preset helper
+
+# Fixed lateral (Y, X) PSF support default, in pixels. PSF tails grow more
+# prominent at high defocus, and a flat default covers the typical range of
+# pixel sizes without needing to scale with the selected detector region.
+_LATERAL_PSF_DEFAULT_PX = 128
+
 
 def compact_psf_shape_for_data(
     data_shape: Tuple[int, ...],
     factor: Tuple[float, ...],
-    *,
-    min_shape: Optional[Tuple[int, ...]] = None,
-    max_shape: Optional[Tuple[int, ...]] = None,
 ) -> Tuple[int, ...]:
-    """Return a compact odd PSF support shape at fine-grid sampling.
+    """Return a default PSF support shape at fine-grid sampling.
 
-    The PSF support is not the detector field and not the object domain. This
-    helper chooses a conservative compact default, bounded by the selected
-    data region so bead distillation can still use the same preset.
+    The PSF support is not the detector field and not the object domain --
+    this only picks a sane default (editable afterward in the Compute PSF
+    dialog). Axis treatment is not uniform:
+
+    * Axial (Z, present only for a 3D `data_shape`, at index 0) matches the
+      (zoomed) data's actual depth exactly. A PSF axially narrower than the
+      reconstructed volume clips its own tails, producing blocky,
+      discontinuous artifacts along Z.
+    * Lateral (Y, X) uses the fixed `_LATERAL_PSF_DEFAULT_PX` default
+      regardless of the data/ROI size or zoom.
     """
     if len(data_shape) != len(factor):
         raise ValueError("data_shape and factor must have the same ndim")
-    default_min = (17,) * len(data_shape)
-    default_max = (65,) * len(data_shape)
-    min_shape = default_min if min_shape is None else tuple(min_shape)
-    max_shape = default_max if max_shape is None else tuple(max_shape)
-    if len(min_shape) != len(data_shape) or len(max_shape) != len(data_shape):
-        raise ValueError("min_shape/max_shape must match data_shape ndim")
 
+    is_3d = len(data_shape) == 3
     out = []
-    for d, f, n_min, n_max in zip(data_shape, factor, min_shape, max_shape):
-        # Roughly one quarter of the detector span on the fine grid, clipped to
-        # a compact default support and made odd so there is a clear centre.
-        target = int(round(float(d) * max(float(f), 1.0) / 4.0))
-        n = max(int(n_min), min(int(n_max), target))
-        n = min(n, int(round(float(d) * max(float(f), 1.0))))
-        n = max(1, n)
-        if n > 1 and n % 2 == 0:
-            n -= 1
-        out.append(n)
+    for i, (d, f) in enumerate(zip(data_shape, factor)):
+        if is_3d and i == 0:
+            out.append(max(1, int(round(float(d) * max(float(f), 1.0)))))
+        else:
+            out.append(_LATERAL_PSF_DEFAULT_PX)
     return tuple(out)
 
 

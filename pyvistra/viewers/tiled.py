@@ -269,8 +269,8 @@ class TiledChannelPanel(QWidget):
     def _setup_channel_rows(self):
         for c in range(self.viewer.max_C):
             ch_name = f"Ch {c + 1}"
-            color = self._swatch_color(c)
-            row = ChannelRow(c, ch_name, color)
+            cmap_name = self.proxy.get_colormap_name(c)
+            row = ChannelRow(c, ch_name, cmap_name)
             row.visibilityChanged.connect(self._on_visibility_changed)
             row.colormapChanged.connect(self._on_colormap_changed)
             row.gammaChanged.connect(self._on_gamma_changed)
@@ -315,7 +315,7 @@ class TiledChannelPanel(QWidget):
         elif field == "gamma":
             row.set_gamma(state.gamma)
         elif field == "colormap_name":
-            row._update_color_swatch(self._swatch_color(channel_idx))
+            row._update_color_swatch(self.proxy.get_colormap_name(channel_idx))
         elif field == "visible":
             row.set_visible_state(state.visible)
 
@@ -334,13 +334,14 @@ class TiledChannelPanel(QWidget):
         for c, row in enumerate(self.channel_rows):
             agg_data = self.proxy.get_aggregate_data(c)
             color = self._swatch_color(c)
+            cmap_name = self.proxy.get_colormap_name(c)
+            row.current_colormap = cmap_name
+            row._update_color_swatch(cmap_name)
 
             if agg_data is not None and agg_data.size > 0:
                 row.set_data(agg_data, color)
                 mn, mx = compute_percentile_clim(agg_data, 0.5, 99.5)
                 row.set_clim(mn, mx)
-            else:
-                row._update_color_swatch(color)
 
             row.set_visible_state(self.proxy.get_channel_visible(c))
             row.set_gamma(self.proxy.get_gamma(c))
@@ -579,7 +580,9 @@ class TileWidget(QFrame):
             self.data, self.meta = load_image(path, dims=dims)
 
             # Create renderer
-            self.renderer = CompositeImageVisual(self.view, self.data)
+            self.renderer = CompositeImageVisual(
+                self.view, self.data, channels_meta=self.meta.get("channels")
+            )
 
             # Display first frame/slice (middle Z)
             z_mid = self.data.shape[1] // 2

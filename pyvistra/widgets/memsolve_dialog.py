@@ -3,15 +3,17 @@
 Two-tab layout, mirroring the NLCG dialog (`deconvolution_dialog.py`):
     * Source, PSF && Model — ROI / frame / channel / PSF window picker,
       forward-model zoom (shared `SourcePSFPanelMixin`).
-    * Solver — Gaussian ICF gamma, MaxEnt MAP solver knobs, output region.
-      No tiling section: memsolve's `LinearInverseProblem` doesn't compose
-      with `deconlib.deconvolution.process_tiles`'s per-tile solver
-      contract, matching `memsolve_gaussian_icf.py` (single-volume only).
+    * Solver — Gaussian ICF gamma, MaxEnt MAP solver knobs, output region,
+      and optional tiling for large fields (see decon_mem.py's module
+      docstring for why tiled runs use a different, flat prior).
 
 The dialog reads its widgets into a
-:class:`~.decon_mem.MemsolveDialogState`, builds a
+:class:`~.decon_mem.MemsolveDialogState`. Single-volume runs build a
 :class:`~.decon_mem.MemProblemInputs` via
-:func:`~.decon_mem.build_mem_problem`, and hands the result to
+:func:`~.decon_mem.build_mem_problem`; tiled runs build a plain
+`decon_common.PreparedInputs` via `decon_mem.prepare_inputs` instead (the
+worker does the shared per-tile model/prior construction itself, once it
+knows the real tile shape). Either way the result is handed to
 :class:`~.memsolve_worker.MemsolveDeconvolutionWorker`.
 """
 
@@ -95,7 +97,8 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         self._runner = BufferProcessingRunner(self.viewer, self.output_selector)
 
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
         output_v.addWidget(self.progress_bar)
 
         self.status_label = QPlainTextEdit("Ready")
@@ -135,6 +138,7 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             "absorbed into the MaxEnt prior rather than the forward model."
         )
 
+        self._on_tiling_toggled(self.tiled_check.isChecked())
         self._refresh_compute_target_hint()
         self._refresh_recipe_preview()
 
@@ -221,10 +225,19 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             "'classic' uses the fixed-noise MEMSYS Omega relation; 'auto' "
             "estimates a Gaussian noise scale from the data."
         )
+        self.eval_interval_spin = QSpinBox()
+        self.eval_interval_spin.setRange(1, 200)
+        self.eval_interval_spin.setValue(1)
+        self.eval_interval_spin.setFixedWidth(64)
+        self.eval_interval_spin.setToolTip(
+            "Interval (outer iterations) for live-preview writes. Each "
+            "preview costs an extra curvature-diagnostic evaluation, so "
+            "raise this to reduce overhead on slow/large problems."
+        )
         self.mem_verbose_check = QCheckBox("Verbose")
         self.mem_verbose_check.setToolTip(
-            "Print one-line outer-iteration diagnostics, shown live in the "
-            "status box below."
+            "Include chi2/omega/alpha in each per-iteration status line "
+            "(shown live in the status box below)."
         )
 
         grid.addWidget(QLabel("Max iterations:"), 0, 0, Qt.AlignRight)
@@ -237,6 +250,8 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         grid.addWidget(self.omega_mode_combo, 1, 3)
         grid.addWidget(QLabel("Aim:"), 2, 0, Qt.AlignRight)
         grid.addWidget(self.aim_spin, 2, 1)
+        grid.addWidget(QLabel("Eval interval:"), 2, 2, Qt.AlignRight)
+        grid.addWidget(self.eval_interval_spin, 2, 3)
         grid.addWidget(self.mem_verbose_check, 3, 0, 1, 4)
         vbox.addWidget(mem_grp)
 
@@ -314,6 +329,56 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             "Crop the result back down to the visible (zoom-scaled "
             "detector) field."
         )
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        out_v.addWidget(line)
+
+        self.tiled_check = QCheckBox("Process in tiles (large field)")
+        self.tiled_check.setToolTip(
+            "Split the field into tiles sharing one forward model/ICF, "
+            "solving each with its own MAP run and stitching owned cores "
+            "back together. Tiled output is always cropped to the visible "
+            "field, and uses a flat (not adjoint-initialized) prior shared "
+            "across tiles to avoid seams."
+        )
+        self.tiled_check.toggled.connect(self._on_tiling_toggled)
+        out_v.addWidget(self.tiled_check)
+
+        tile_row = QWidget()
+        tile_form = QFormLayout(tile_row)
+        tile_form.setLabelAlignment(Qt.AlignRight)
+        tile_form.setContentsMargins(0, 0, 0, 0)
+        tile_form.setVerticalSpacing(4)
+        self.tile_size_spin = QSpinBox()
+        self.tile_size_spin.setRange(32, 8192)
+        self.tile_size_spin.setValue(140)
+        self.tile_size_spin.setFixedWidth(80)
+        self.tile_size_spin.setToolTip(
+            "Nominal core size per tile (data pixels, guard excluded)."
+        )
+        tile_form.addRow("Tile size:", self.tile_size_spin)
+        self.guard_px_spin = QSpinBox()
+        self.guard_px_spin.setRange(0, 256)
+        self.guard_px_spin.setValue(0)
+        self.guard_px_spin.setFixedWidth(80)
+        self.guard_px_spin.setToolTip(
+            "Guard pixels (data space) on each side of a tile's core. "
+            "0 = deconlib's default (half the PSF's lateral width)."
+        )
+        tile_form.addRow("Guard px:", self.guard_px_spin)
+        self.min_z_slices_spin = QSpinBox()
+        self.min_z_slices_spin.setRange(1, 8192)
+        self.min_z_slices_spin.setValue(48)
+        self.min_z_slices_spin.setFixedWidth(80)
+        self.min_z_slices_spin.setToolTip(
+            "Keep the full Z extent in one tile when Nz is at or below this."
+        )
+        tile_form.addRow("Min Z slices:", self.min_z_slices_spin)
+        out_v.addWidget(tile_row)
+        self._tile_row_widget = tile_row
+
         vbox.addWidget(out_grp)
 
         preview_grp = QGroupBox("Recipe preview")
@@ -355,6 +420,7 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             self.max_iter_spin, self.tol_omega_spin, self.aim_spin, self.rate_spin,
             self.cg_epsilon_spin, self.cg_max_steps_spin, self.n_probe_g_spin,
             self.seed_spin, self.icf_gamma_spin,
+            self.tile_size_spin, self.guard_px_spin, self.min_z_slices_spin,
         ):
             widget.valueChanged.connect(lambda *_: self._refresh_recipe_preview())
         self.omega_mode_combo.currentIndexChanged.connect(
@@ -365,6 +431,19 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
 
     def _on_diagnostics_toggled(self, checked: bool) -> None:
         self._toggle_group_children(self._diagnostics_group, checked)
+
+    def _on_tiling_toggled(self, checked: bool) -> None:
+        self._tile_row_widget.setVisible(bool(checked))
+        if checked:
+            self.region_valid_radio.setChecked(True)
+        self.region_full_radio.setEnabled(not checked)
+        self.region_full_radio.setToolTip(
+            "Tiled runs always output the visible/cropped field."
+            if checked else
+            "Keep the full padded reconstruction domain, including the "
+            "PSF-support margin deconlib adds automatically."
+        )
+        self._refresh_recipe_preview()
 
     # ------------------------------------------------------------------ #
     # Mixin hooks
@@ -382,6 +461,10 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             zoom_xy=self.sr_xy_spin.value(),
             zoom_z=self.sr_z_spin.value(),
             crop_to_visible=self.region_valid_radio.isChecked(),
+            tiled=self.tiled_check.isChecked(),
+            tile_size=self.tile_size_spin.value(),
+            guard_px=self.guard_px_spin.value(),
+            min_z_slices=self.min_z_slices_spin.value(),
         )
 
     def _refresh_recipe_preview(self) -> None:
@@ -416,6 +499,11 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         ]
         sr_text = " × ".join(f"{float(v):g}" for v in zoom)
         lines.append(f"zoom {sr_text}; object/padded shape {self._format_shape(padded)}")
+        if self.tiled_check.isChecked():
+            n_tiles, tile_shape = dmem.estimate_tile_plan(state, data_shape)
+            lines.append(
+                f"tiled: ~{n_tiles} tile(s) of shape {self._format_shape(tile_shape)}"
+            )
         self.recipe_preview.setPlainText("\n".join(lines))
 
         self.detector_domain_label.setText(self._format_shape(data_shape))
@@ -440,8 +528,13 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             cg_max_steps=self.cg_max_steps_spin.value(),
             n_probe_g=self.n_probe_g_spin.value(),
             seed=self.seed_spin.value(),
+            eval_interval=self.eval_interval_spin.value(),
             verbose=self.mem_verbose_check.isChecked(),
             crop_to_visible=self.region_valid_radio.isChecked(),
+            tiled=self.tiled_check.isChecked(),
+            tile_size=self.tile_size_spin.value(),
+            guard_px=self.guard_px_spin.value(),
+            min_z_slices=self.min_z_slices_spin.value(),
         )
 
     def _prepare(self) -> Optional[object]:
@@ -451,17 +544,29 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
 
         state = self._read_state()
         try:
-            problem_inputs = dmem.build_mem_problem(
-                state=state,
-                y_obs=cropped.y_obs,
-                psf_array=cropped.psf_data,
-                psf_pixel_size_um=cropped.psf_pixel_size,
-            )
+            if state.tiled:
+                # Tiled runs build their forward model/prior per-tile-shape
+                # inside the worker (see decon_mem.py's module docstring),
+                # so the dialog only prepares the plain (y, psf, zoom,
+                # voxel_spacing) payload here.
+                inputs = dmem.prepare_inputs(
+                    state=state,
+                    y_obs=cropped.y_obs,
+                    psf_array=cropped.psf_data,
+                    psf_pixel_size_um=cropped.psf_pixel_size,
+                )
+            else:
+                inputs = dmem.build_mem_problem(
+                    state=state,
+                    y_obs=cropped.y_obs,
+                    psf_array=cropped.psf_data,
+                    psf_pixel_size_um=cropped.psf_pixel_size,
+                )
         except Exception as exc:
             self._set_status(f"{type(exc).__name__}: {exc}", error=True)
             return None
 
-        return problem_inputs, state, cropped.t, cropped.c
+        return inputs, state, cropped.t, cropped.c
 
     # ------------------------------------------------------------------ #
     # Run / cancel
@@ -472,22 +577,25 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         result = self._prepare()
         if result is None:
             return
-        problem_inputs, state, t, c = result
+        inputs, state, t, c = result
 
         stack_channels = self.stack_channels_check.isChecked()
         output_channels = self.viewer.C if stack_channels else 1
         output_channel = c if stack_channels else 0
-        output_shape = dmem.problem_output_5d_shape(
-            problem_inputs,
-            crop_to_visible=state.crop_to_visible,
-            n_channels=output_channels,
-        )
+        if state.tiled:
+            output_shape = dmem.output_5d_shape(
+                state, inputs.y.shape, inputs.psf.shape, n_channels=output_channels,
+            )
+        else:
+            output_shape = dmem.problem_output_5d_shape(
+                inputs, crop_to_visible=state.crop_to_visible, n_channels=output_channels,
+            )
         dmem.log.info(
-            "output buffer shape=%s channel=%d (crop_to_visible=%s)",
-            output_shape, output_channel, state.crop_to_visible,
+            "output buffer shape=%s channel=%d (tiled=%s crop_to_visible=%s)",
+            output_shape, output_channel, state.tiled, state.crop_to_visible,
         )
 
-        vs = problem_inputs.voxel_spacing
+        vs = inputs.voxel_spacing
         if len(vs) == 2:
             out_scale = (1.0, float(vs[0]), float(vs[1]))
         else:
@@ -524,21 +632,22 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             reuse_existing_buffer=stack_channels,
         )
 
-        # No per-iteration callback from mem.run_inference -- the run is a
-        # single blocking call, so the progress bar stays indeterminate.
-        self.progress_bar.setRange(0, 0)
+        if state.tiled:
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.setRange(0, state.max_iter)
+        self.progress_bar.setValue(0)
 
         worker = MemsolveDeconvolutionWorker(
-            problem_inputs=problem_inputs,
+            problem_inputs=None if state.tiled else inputs,
+            prepared=inputs if state.tiled else None,
             state=state,
             buffer=buffer,
             output_channel=output_channel,
         )
 
         worker.status.connect(self._on_status)
-        self._begin_run_status(
-            f"Running MEM solver for up to {state.max_iter} iterations."
-        )
+        self._begin_run_status(self._describe_run(state))
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
@@ -556,8 +665,7 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             self._runner.cancel()
             self._stop_run_status()
             self._set_status(
-                "Cancelling… (MEM's solve has no interruption point, so "
-                "this finishes the current run before stopping)",
+                "Cancelling… (stops at the next outer iteration/tile boundary)",
                 warn=True,
             )
             self.cancel_btn.setEnabled(False)
@@ -566,7 +674,9 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
     # Signal handlers
 
     def _on_progress(self, done, total):
-        pass  # indeterminate for MEM -- see _start()
+        if total > 0 and self.progress_bar.maximum() != total:
+            self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(done)
 
     def _on_status(self, msg: str):
         self._begin_run_status(msg)
@@ -627,6 +737,11 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             f"{self._running_status_base}\nElapsed: {minutes:02d}:{seconds:02d}"
         )
         self.status_label.setStyleSheet("color: #888;")
+
+    def _describe_run(self, state: dmem.MemsolveDialogState) -> str:
+        if state.tiled:
+            return f"Running tiled MEM solver for up to {state.max_iter} iterations per tile."
+        return f"Running MEM solver for up to {state.max_iter} iterations."
 
     def showEvent(self, event):
         super().showEvent(event)

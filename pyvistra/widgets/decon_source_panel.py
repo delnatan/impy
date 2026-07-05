@@ -1,14 +1,12 @@
-"""Shared "Source, PSF && Model" tab for the Richardson-Lucy and MaxEnt
-(memsolve) deconvolution dialogs.
+"""Shared "Source, PSF && Model" tab for the NLCG, Richardson-Lucy, and
+MaxEnt (memsolve) deconvolution dialogs.
 
 `SourcePSFPanelMixin` is a mixin (no `__init__` of its own) providing the
 detector/data region picker, PSF combo + scale-match + Compute-PSF spawn,
-and the forward-model super-res zoom spinboxes -- the part of
-`deconvolution_dialog.py`'s (NLCG) UI that is identical across every
-deconvolution engine. The NLCG dialog itself predates this module and is
-left as-is to avoid regressing it; this mixin exists so the two *new*
-engine dialogs (Richardson-Lucy, MaxEnt/memsolve) don't each duplicate the
-same ~500 lines of region/PSF plumbing.
+and the forward-model super-res zoom spinboxes -- the part of every
+deconvolution engine's UI that is identical regardless of solver, so none
+of the three engine dialogs (NLCG, Richardson-Lucy, MaxEnt/memsolve) needs
+its own copy of the same ~500 lines of region/PSF plumbing.
 
 A host dialog using this mixin must provide, before calling
 `_init_source_psf_panel()`:

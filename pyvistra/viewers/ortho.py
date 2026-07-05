@@ -107,7 +107,15 @@ class OrthoViewer(QMainWindow):
         ]),
     ]
 
-    def __init__(self, data, meta=None, title="Ortho View", channel_colormaps=None):
+    def __init__(
+        self,
+        data,
+        meta=None,
+        title="Ortho View",
+        channel_display=None,
+        t_idx=0,
+        z_idx=None,
+    ):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowTitle(title)
@@ -115,18 +123,21 @@ class OrthoViewer(QMainWindow):
 
         self.data = data  # (T, Z, C, Y, X)
         self.meta = meta or {}
-        self._channel_colormaps = channel_colormaps  # Store for later application
+        # Per-channel display state (clim/gamma/colormap/visible) copied
+        # from the parent window, applied once views exist.
+        self._channel_display = channel_display
         self.T, self.Z, self.C, self.Y, self.X = self.data.shape
 
         # Scale (z, y, x)
         self.scale = self.meta.get("scale", (1.0, 1.0, 1.0))
         sz, sy, sx = self.scale
 
-        # Current Position (in pixels)
-        self.cz = self.Z // 2
+        # Current Position (in pixels) -- z/t inherited from the parent
+        # window so the ortho view opens on the slice being viewed there.
+        self.cz = z_idx if z_idx is not None else self.Z // 2
         self.cy = self.Y // 2
         self.cx = self.X // 2
-        self.ct = 0
+        self.ct = t_idx
 
         # Camera sync flag (must be initialized before reset_cameras)
         self._syncing_cameras = False
@@ -201,32 +212,39 @@ class OrthoViewer(QMainWindow):
         self.grid.addWidget(self.canvas_zx.native, 1, 0)
 
         # -- 2. Create Visuals --
+        channels_meta = self.meta.get("channels")
+
         # YX: (T, Z, C, Y, X) -> Slice Z -> (C, Y, X)
         self.vis_yx = CompositeImageVisual(
-            self.view_yx, self.data, scale=(sy, sx)
+            self.view_yx, self.data, scale=(sy, sx), channels_meta=channels_meta
         )
 
         # ZY: Need (T, X, C, Y, Z). Slice X -> (C, Y, Z)
         # Transpose data: (0, 4, 2, 3, 1) -> T, X, C, Y, Z
         data_zy = TransposedProxy(self.data, (0, 4, 2, 3, 1))
         self.vis_zy = CompositeImageVisual(
-            self.view_zy, data_zy, scale=(sy, sz)
+            self.view_zy, data_zy, scale=(sy, sz), channels_meta=channels_meta
         )
 
         # ZX: Need (T, Y, C, Z, X). Slice Y -> (C, Z, X)
         # Transpose data: (0, 3, 2, 1, 4) -> T, Y, C, Z, X
         data_zx = TransposedProxy(self.data, (0, 3, 2, 1, 4))
         self.vis_zx = CompositeImageVisual(
-            self.view_zx, data_zx, scale=(sz, sx)
+            self.view_zx, data_zx, scale=(sz, sx), channels_meta=channels_meta
         )
 
         self.proxy = MultiViewChannelProxy([self.vis_yx, self.vis_zy, self.vis_zx])
         self._init_overlays()
 
-        # Apply colormaps from source window if provided
-        if self._channel_colormaps:
-            for channel_idx, cmap_name in self._channel_colormaps.items():
-                self.proxy.set_colormap(channel_idx, cmap_name)
+        # Apply per-channel display state (clim/gamma/colormap/visible)
+        # copied from the source window, if provided.
+        if self._channel_display is not None:
+            for c in range(min(len(self._channel_display), self.C)):
+                state = self._channel_display[c]
+                self.proxy.set_clim(c, *state.clim)
+                self.proxy.set_gamma(c, state.gamma)
+                self.proxy.set_colormap(c, state.colormap_name)
+                self.proxy.set_channel_visible(c, state.visible)
 
         # -- 3. Crosshairs --
         # Use cyan color for good contrast against typical fluorescence colormaps

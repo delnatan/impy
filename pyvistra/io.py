@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -818,6 +819,16 @@ def load_image(filepath, use_memmap=True, dims=None):
         - .zarr (Zarr arrays, including OME-Zarr)
         - .psf.h5, .pupil.h5 (deconlib PSF / pupil files)
     """
+    data, meta = _load_image_raw(filepath, use_memmap=use_memmap, dims=dims)
+    _normalize_channels_metadata(meta)
+    return data, meta
+
+
+def _load_image_raw(filepath, use_memmap=True, dims=None):
+    """Format-dispatching body of :func:`load_image`, before metadata
+    normalization. Every format branch below is free to hand back whatever
+    each reader/vendor gives it (e.g. a wavelength as ``"600 nm"``) --
+    ``load_image`` cleans that up in one place afterwards."""
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
@@ -984,6 +995,39 @@ def _coerce_float_or_none(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+# Matches the leading numeric portion of e.g. "600 nm", "600nm", "600.5" --
+# some readers (e.g. Imaris, when the vendor-stored attribute has non-numeric
+# formatting) can only give us a wavelength as a string with units attached.
+_LEADING_NUMBER = re.compile(r"[-+]?\d*\.?\d+")
+
+
+def _coerce_wavelength_nm(value):
+    """Parse a wavelength as a plain float or unit-suffixed string
+    (e.g. ``"600 nm"``) into a clean float, or ``None`` if unparseable."""
+    if isinstance(value, str):
+        match = _LEADING_NUMBER.search(value)
+        value = match.group() if match else None
+    return _coerce_float_or_none(value)
+
+
+def _normalize_channels_metadata(meta):
+    """Coerce every channel's wavelength fields to a clean float (or None).
+
+    Readers pass through whatever the vendor metadata gives them verbatim
+    -- sometimes a plain number, sometimes a string with units baked in.
+    Normalizing once here, regardless of source format, means everything
+    downstream (colormap auto-assignment, PSF wavelength lookups, the
+    metadata dialog, ...) can assume these fields are already numeric.
+    """
+    channels = meta.get("channels")
+    if not channels:
+        return
+    for ch in channels:
+        for key in ("emission_wavelength", "excitation_wavelength"):
+            if key in ch:
+                ch[key] = _coerce_wavelength_nm(ch[key])
 
 
 def _parse_imagej_frame_interval_seconds(imagej_metadata):

@@ -30,8 +30,24 @@ MAP also initializes the starting iterate `h0` from the prior
 model and a data-informed starting point, matching
 `memsolve_gaussian_icf.py`. `RCt` is built from non-negative operators
 (crop/downsample/convolve adjoints, Gaussian-blur ICF) applied to a
-non-negative observation, so it stays positive everywhere without needing
-the flat-prior padding floor the old constant-value prior required.
+non-negative observation, so it is non-negative in exact arithmetic --- in
+practice the FFT-based convolve/downsample adjoints can still ring very
+slightly negative in float32, so it's floored at `_ADJOINT_PRIOR_FLOOR`
+rather than the old constant-value prior's much larger padding floor.
+
+Tiled (large-field) runs are different: they can't share one adjoint-based
+prior across tiles (each tile only sees its own local data, so `RCt(y_tile)`
+would give every tile a different absolute baseline and show up as seams
+at tile boundaries once stitched). `memsolve_worker.MemsolveDeconvolutionWorker
+._run_tiled` instead mirrors
+`deconlib/scripts/tiled_memsolve_demo.py`: one flat prior value
+(`mean(y) / prod(zoom)`), shared by every tile, built once alongside the
+shared per-tile forward model/ICF (every tile reads a window of the same
+shape). Because that prior isn't data-derived per tile, the dialog's tiled
+path skips `build_mem_problem` entirely and instead prepares plain
+`(y, psf, zoom, voxel_spacing)` via `decon_common.prepare_inputs` --
+the worker does the shared-model/prior construction itself, once it knows
+the real tile shape from `plan_tiles`.
 """
 
 from __future__ import annotations
@@ -42,6 +58,7 @@ from typing import Tuple
 import numpy as np
 
 from .decon_common import (  # noqa: F401 (re-exported for `dmem.*` call sites)
+    PreparedInputs,
     _prepare_observation,
     _prepare_psf_kernel,
     compact_psf_shape_for_data,
@@ -51,9 +68,17 @@ from .decon_common import (  # noqa: F401 (re-exported for `dmem.*` call sites)
     output_shape,
     padded_shape,
     per_axis_zoom,
+    prepare_inputs,
     valid_slices,
     visible_shape,
 )
+
+# Numerical-noise floor for the single-volume path's RCt(y) prior -- see
+# `build_mem_problem`'s comment. Much smaller than the tiled path's flat
+# prior floor (`memsolve_worker._TILED_PADDING_PRIOR_VALUE`), since this
+# only needs to clear float32 ringing, not mark a genuinely flux-free
+# padding region.
+_ADJOINT_PRIOR_FLOOR = 1e-6
 
 
 @dataclass(frozen=True)
@@ -75,16 +100,30 @@ class MemsolveDialogState:
     cg_max_steps: int = 50
     n_probe_g: int = 1
     seed: int = 0
-    verbose: bool = False                   # MaxEntConfig.print_outer
+    # Include chi2/omega/alpha in each per-iteration status line (mirrors
+    # RLDialogState.verbose); the line itself is emitted regardless, since
+    # the worker drives the loop itself rather than depending on
+    # MaxEntConfig.print_outer's stdout diagnostics.
+    verbose: bool = False
 
-    # Output region.
+    # Interval (outer iterations) for live-preview buffer writes. Each
+    # preview costs an extra curvature-diagnostic evaluation (see
+    # memsolve_worker.py), so this throttles that overhead the same way
+    # RLDialogState.eval_interval throttles RL's cheaper per-iteration work.
+    eval_interval: int = 1
+
+    # Output region (single-volume only; tiled output is always cropped).
     crop_to_visible: bool = True
 
-    # memsolve's LinearInverseProblem doesn't compose with
-    # deconlib.deconvolution.process_tiles's per-tile solver contract, so
-    # tiling isn't offered in the UI. Fixed so this state still satisfies
-    # decon_common's generic `output_shape`/`output_5d_shape` helpers.
+    # Tiling (large fields). memsolve's LinearInverseProblem doesn't compose
+    # with deconlib.deconvolution.process_tiles's per-tile solver contract
+    # (its RL/NLCG-shaped callback), so the worker drives its own per-tile
+    # MAP loop instead -- see `MemsolveDeconvolutionWorker._run_tiled` and
+    # `deconlib/scripts/tiled_memsolve_demo.py`.
     tiled: bool = False
+    tile_size: int = 140
+    guard_px: int = 0                       # 0 -> deconlib default (half PSF width)
+    min_z_slices: int = 48
 
 
 @dataclass(frozen=True)
@@ -149,7 +188,13 @@ def build_mem_problem(
     def RCt(u):
         return Ct(Rt(u))
 
-    prior = np.asarray(RCt(y), dtype=np.float32)
+    # Floored, not just cast: RCt is built from non-negative operators
+    # applied to a non-negative observation, but the FFT-based
+    # convolve/downsample adjoints can still ring very slightly negative in
+    # float32 at the padded domain's edges -- `mem.validate_problem` rejects
+    # a prior that isn't strictly positive everywhere, so clip that noise
+    # floor rather than let it fail intermittently depending on the data.
+    prior = np.maximum(np.asarray(RCt(y), dtype=np.float32), _ADJOINT_PRIOR_FLOOR)
 
     log.info(
         "build_mem_problem: y=%s psf=%s zoom=%s icf_gamma=%g voxel_spacing=%s "

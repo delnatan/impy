@@ -39,28 +39,39 @@ _TWO_COLOR = {
     "Blue":       ["black", "blue"],
 }
 
-# Vispy built-in catalog (perceptually uniform and other named colormaps).
-# Grouped by use: sequential, diverging (good for signed data with both
+# Vispy built-in catalog (perceptually uniform and other named colormaps),
+# grouped by use — sequential, diverging (good for signed data with both
 # positive and negative peaks — pair with a symmetric auto-contrast), and
-# cyclic (good for phase, orientation, and any wrap-around quantity).
-_VISPY_NAMED = [
-    # Sequential
+# cyclic (good for phase, orientation, and any wrap-around quantity). These
+# groupings also drive the submenus in colormap pickers; see `categories()`.
+_VISPY_SEQUENTIAL = [
     "viridis", "plasma", "magma", "inferno", "cividis",
     "hot", "cool", "turbo", "gray", "gray_r",
-    # Diverging
-    "RdBu", "coolwarm", "diverging", "GrBu", "PuGr", "HiLo",
-    # Cyclic
-    "hsl", "husl",
 ]
+_VISPY_DIVERGING = ["RdBu", "coolwarm", "diverging", "GrBu", "PuGr", "HiLo"]
+_VISPY_CYCLIC = ["hsl", "husl"]
+_VISPY_NAMED = _VISPY_SEQUENTIAL + _VISPY_DIVERGING + _VISPY_CYCLIC
 
 # Names that produce a meaningful display only with a symmetric clim.
 # Channel state may use this hint to anchor zero at the colormap centre
 # even when one tail of the data dominates the percentile bracket.
-DIVERGING_NAMES = frozenset({
-    "RdBu", "coolwarm", "diverging", "GrBu", "PuGr", "HiLo",
-})
+DIVERGING_NAMES = frozenset(_VISPY_DIVERGING)
 
-CYCLIC_NAMES = frozenset({"hsl", "husl"})
+CYCLIC_NAMES = frozenset(_VISPY_CYCLIC)
+
+# Emission wavelength (nm) breakpoints -> matching two-color channel colormap,
+# in ascending order. Used to auto-assign a channel's default color from its
+# emission wavelength metadata (when readers provide one) instead of cycling
+# through a fixed palette. Blue/red emission map to Cyan/Magenta rather than
+# literal Blue/Red -- pure blue and red are dim/low-contrast composited on a
+# black canvas, while cyan and magenta stay visible and pop against green
+# and orange neighbors.
+_WAVELENGTH_COLORMAPS = [
+    (500, "Cyan"),    # blue emission, e.g. DAPI ~460nm, CFP ~475nm
+    (560, "Green"),   # green emission, e.g. GFP ~509nm, YFP ~527nm
+    (600, "Orange"),  # yellow/orange emission, e.g. Cy3/TRITC ~570nm
+]
+_WAVELENGTH_FALLBACK = "Magenta"  # red/far-red emission, e.g. Cy5 ~670nm
 
 
 def is_diverging(name: str) -> bool:
@@ -93,7 +104,45 @@ def register(name: str, stops) -> None:
 
 def names() -> list:
     """Return all available colormap names in display order."""
-    return list(_TWO_COLOR) + list(_VISPY_NAMED) + list(_registry)
+    return [name for _, group in categories() for name in group]
+
+
+def categories() -> list:
+    """Group colormap names into display categories, in display order.
+
+    Returns a list of ``(category_label, [names...])`` pairs. Pickers that
+    want submenus (rather than one flat list) iterate this instead of
+    `names()`.
+    """
+    return [
+        ("Channel Colors", list(_TWO_COLOR)),
+        ("Sequential", list(_VISPY_SEQUENTIAL)),
+        ("Diverging", list(_VISPY_DIVERGING)),
+        ("Cyclic", list(_VISPY_CYCLIC)),
+        ("Custom", list(_registry)),
+    ]
+
+
+def colormap_for_wavelength(wavelength_nm) -> "str | None":
+    """Map an emission wavelength (nm) to a matching two-color colormap name.
+
+    Returns ``None`` if *wavelength_nm* is missing or not a sane positive
+    number, so callers can fall back to their own default (e.g. cycling a
+    fixed palette). Expects an already-normalized float/None -- `load_image`
+    coerces each channel's wavelength fields before this is ever called.
+    """
+    if wavelength_nm is None:
+        return None
+    try:
+        wl = float(wavelength_nm)
+    except (TypeError, ValueError):
+        return None
+    if not wl > 0:
+        return None
+    for breakpoint, name in _WAVELENGTH_COLORMAPS:
+        if wl < breakpoint:
+            return name
+    return _WAVELENGTH_FALLBACK
 
 
 def get(name: str) -> tuple:

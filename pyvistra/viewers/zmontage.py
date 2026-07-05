@@ -68,7 +68,7 @@ class ZMontageViewer(QMainWindow):
         data,
         meta=None,
         title="Z-Montage View",
-        channel_colormaps=None,
+        channel_display=None,
         t_idx=0,
     ):
         super().__init__()
@@ -161,19 +161,24 @@ class ZMontageViewer(QMainWindow):
         main_layout.addWidget(self.canvas.native, 1)
 
         # -- Build the grid: one CompositeImageVisual per Z-slice --
+        channels_meta = self.meta.get("channels")
         self.z_renderers = []
         for z in range(self.Z):
             renderer = CompositeImageVisual(
-                self.view, self.data, scale=(sy, sx)
+                self.view, self.data, scale=(sy, sx), channels_meta=channels_meta
             )
             renderer.update_slice(self.t_idx, z)
             self.z_renderers.append(renderer)
 
         self.renderer = MultiViewChannelProxy(self.z_renderers)
 
-        if channel_colormaps:
-            for channel_idx, cmap_name in channel_colormaps.items():
-                self.renderer.set_colormap(channel_idx, cmap_name)
+        if channel_display is not None:
+            for c in range(min(len(channel_display), self.C)):
+                state = channel_display[c]
+                self.renderer.set_clim(c, *state.clim)
+                self.renderer.set_gamma(c, state.gamma)
+                self.renderer.set_colormap(c, state.colormap_name)
+                self.renderer.set_channel_visible(c, state.visible)
 
         self._z_labels = []
         self._layout_tiles()
