@@ -757,6 +757,8 @@ class ImageWindow(QMainWindow):
         old_is_rgb = self.meta.get("is_rgb", False)
 
         # Update data and metadata
+        if self.img_data is not None and hasattr(self.img_data, "release"):
+            self.img_data.release()
         self.img_data = new_data
         if metadata is not None:
             self.meta = metadata
@@ -2890,6 +2892,8 @@ class ImageWindow(QMainWindow):
         new_data, new_meta = load_image(self.filepath, dims=dims)
 
         # Update data and dimensions
+        if self.img_data is not None and hasattr(self.img_data, "release"):
+            self.img_data.release()
         self.img_data = new_data
         self.meta = new_meta
         self._replace_slice_loader(new_data)

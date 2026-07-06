@@ -125,6 +125,16 @@ class BufferProcessingRunner:
         self.worker.finished.connect(self.thread.quit)
         self.worker.cancelled.connect(self.thread.quit)
         self.worker.error.connect(self.thread.quit)
+
+        # Schedule worker deletion while its own thread's event loop is
+        # still running (connected to the worker's terminal signals, not
+        # to thread.finished) -- deleteLater() posted after the thread's
+        # event loop has already stopped never gets processed, leaking
+        # the worker (and everything it references) indefinitely.
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.cancelled.connect(self.worker.deleteLater)
+        self.worker.error.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
         self.thread.finished.connect(on_thread_finished)
 
         self.thread.start()
@@ -146,11 +156,9 @@ class BufferProcessingRunner:
         if self.output_buffer is not None:
             self.output_buffer.release()
 
-        if self.worker is not None:
-            self.worker.deleteLater()
-        if self.thread is not None:
-            self.thread.deleteLater()
-
+        # Worker/thread deletion is already scheduled via their own
+        # terminal signals (see start_worker / _run_next_frame); just
+        # drop our references here.
         self.source_data = None
         self.output_buffer = None
         self.output_viewer = None
@@ -252,6 +260,13 @@ class BufferProcessingRunner:
         self.worker.finished.connect(self.thread.quit)
         self.worker.cancelled.connect(self.thread.quit)
         self.worker.error.connect(self.thread.quit)
+
+        # See start_worker: schedule worker deletion off its own terminal
+        # signals, not thread.finished, so it actually happens.
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.cancelled.connect(self.worker.deleteLater)
+        self.worker.error.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
         self.thread.finished.connect(self._on_frame_thread_finished)
 
         self.thread.start()
@@ -268,10 +283,6 @@ class BufferProcessingRunner:
 
     def _on_frame_thread_finished(self):
         b = self._batch
-        if self.worker is not None:
-            self.worker.deleteLater()
-        if self.thread is not None:
-            self.thread.deleteLater()
         self.worker = None
         self.thread = None
 
