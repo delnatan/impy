@@ -86,15 +86,20 @@ class ChannelRow(QWidget):
         self.data_dtype = data_dtype
         self.current_colormap = colormap_name
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(4)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(2)
+
+        # Identity row: visibility, colormap swatch, name, gamma.
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(4)
 
         self.chk_visible = QCheckBox()
         self.chk_visible.setChecked(True)
         self.chk_visible.setToolTip("Toggle channel visibility")
         self.chk_visible.toggled.connect(self._on_visibility_changed)
-        layout.addWidget(self.chk_visible)
+        top_row.addWidget(self.chk_visible)
 
         self.color_btn = QPushButton()
         self.color_btn.setFixedSize(24, 20)
@@ -108,13 +113,32 @@ class ChannelRow(QWidget):
         )
         self._update_color_swatch(colormap_name)
         self.color_btn.clicked.connect(self._show_colormap_menu)
-        layout.addWidget(self.color_btn)
+        top_row.addWidget(self.color_btn)
 
         self.name_label = QLabel(channel_name)
-        self.name_label.setFixedWidth(40)
         self.name_label.setStyleSheet("color: #EEE; font-size: 11px;")
         self.name_label.setToolTip(channel_name)
-        layout.addWidget(self.name_label)
+        top_row.addWidget(self.name_label, 1)
+
+        gamma_label = QLabel("γ")
+        gamma_label.setStyleSheet("color: #AAA; font-size: 10px;")
+        top_row.addWidget(gamma_label)
+
+        self.gamma_spin = QDoubleSpinBox()
+        self.gamma_spin.setRange(0.1, 4.0)
+        self.gamma_spin.setSingleStep(0.1)
+        self.gamma_spin.setValue(1.0)
+        self.gamma_spin.setFixedWidth(50)
+        self.gamma_spin.setToolTip("Gamma correction")
+        self.gamma_spin.valueChanged.connect(self._on_gamma_changed)
+        top_row.addWidget(self.gamma_spin)
+
+        layout.addLayout(top_row)
+
+        # Adjustment row: min / histogram / max, full row width.
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(4)
 
         self.min_spin = QDoubleSpinBox()
         self.min_spin.setDecimals(1)
@@ -124,11 +148,11 @@ class ChannelRow(QWidget):
         self.min_spin.setFixedWidth(65)
         self.min_spin.setToolTip("Minimum intensity")
         self.min_spin.valueChanged.connect(self._on_min_changed)
-        layout.addWidget(self.min_spin)
+        bottom_row.addWidget(self.min_spin)
 
         self.histogram = CompactHistogramWidget()
         self.histogram.climChanged.connect(self._on_histogram_clim_changed)
-        layout.addWidget(self.histogram, 1)
+        bottom_row.addWidget(self.histogram, 1)
 
         self.max_spin = QDoubleSpinBox()
         self.max_spin.setDecimals(1)
@@ -138,21 +162,9 @@ class ChannelRow(QWidget):
         self.max_spin.setFixedWidth(65)
         self.max_spin.setToolTip("Maximum intensity")
         self.max_spin.valueChanged.connect(self._on_max_changed)
-        layout.addWidget(self.max_spin)
+        bottom_row.addWidget(self.max_spin)
 
-        gamma_label = QLabel("γ")
-        gamma_label.setStyleSheet("color: #AAA; font-size: 10px;")
-        gamma_label.setFixedWidth(10)
-        layout.addWidget(gamma_label)
-
-        self.gamma_spin = QDoubleSpinBox()
-        self.gamma_spin.setRange(0.1, 4.0)
-        self.gamma_spin.setSingleStep(0.1)
-        self.gamma_spin.setValue(1.0)
-        self.gamma_spin.setFixedWidth(50)
-        self.gamma_spin.setToolTip("Gamma correction")
-        self.gamma_spin.valueChanged.connect(self._on_gamma_changed)
-        layout.addWidget(self.gamma_spin)
+        layout.addLayout(bottom_row)
 
     def _update_color_swatch(self, cmap_name):
         self.color_btn.setIcon(_colormap_icon(cmap_name, size=_SWATCH_ICON_SIZE))
@@ -260,7 +272,7 @@ class ChannelPanel(QWidget):
         super().__init__(parent)
         self.viewer = viewer
         self.setWindowTitle("Channels")
-        self.resize(520, min(220 + viewer.C * 60, 540))
+        self.resize(280, min(140 + viewer.C * 85, 560))
 
         # Auto-contrast tighten/loosen state.
         self._pct_low = 0.5
@@ -362,6 +374,11 @@ class ChannelPanel(QWidget):
 
             self.channel_rows.append(row)
             self.rows_layout.addWidget(row)
+            if c < n_channels - 1:
+                separator = QFrame()
+                separator.setFrameShape(QFrame.HLine)
+                separator.setStyleSheet("color: #3a3a3a;")
+                self.rows_layout.addWidget(separator)
 
         self.rows_layout.addStretch()
 
