@@ -217,7 +217,12 @@ class Workspace(QMainWindow):
         groups = self._groups()
         for group in groups:
             if group.count() == 0 and len(groups) > 1:
-                group.setParent(None)
+                # Do not setParent(None) here: removeTab() doesn't detach a
+                # just-closed viewer that's still pending its deferred
+                # WA_DeleteOnClose deletion, so reparenting this "empty"
+                # group can drag a half-torn-down QMainWindow (with live
+                # vispy/OpenGL children) out of the splitter and crash.
+                # deleteLater() lets Qt's normal teardown handle it safely.
                 group.deleteLater()
                 groups = self._groups()
         self._refresh_mirrored_menus()
