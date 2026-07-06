@@ -225,7 +225,33 @@ class Workspace(QMainWindow):
                 # deleteLater() lets Qt's normal teardown handle it safely.
                 group.deleteLater()
                 groups = self._groups()
+        # Closing a group's last tab fires currentChanged(-1) for *that*
+        # group, which _activate_current blindly writes into the
+        # workspace-wide _active_tab_widget -- even when another group
+        # still has a perfectly good current tab. Left uncorrected, the
+        # menu bar mirror stays blank for the surviving window until the
+        # user clicks its tab. Re-derive the active tab whenever it no
+        # longer points at a widget actually hosted by a group.
+        if self._group_of(self._active_tab_widget) is None:
+            self._reactivate_surviving_tab()
         self._refresh_mirrored_menus()
+
+    def _reactivate_surviving_tab(self):
+        """Pick a sensible active tab from whatever groups remain, skipping
+        empty groups still pending their deferred deletion."""
+        widget = None
+        for group in self._groups():
+            if group.hasFocus() and group.currentWidget() is not None:
+                widget = group.currentWidget()
+                break
+        else:
+            for group in reversed(self._groups()):
+                if group.currentWidget() is not None:
+                    widget = group.currentWidget()
+                    break
+        self._active_tab_widget = widget
+        if widget is not None:
+            manager.set_active_window(widget)
 
     # ------------------------------------------------------------------
     # Public API
