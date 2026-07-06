@@ -194,7 +194,7 @@ class PSFDistillationWorker(QObject):
                 _raise_if_nonfinite(raw, "NLCG estimate")
                 preview = project_psf(raw)
                 if s.center_output:
-                    preview = np.fft.fftshift(preview)
+                    preview = np.fft.ifftshift(preview)
                 _write_to_buffer(
                     self._buffer, preview, channel=self._output_channel,
                     log_stats=False,
@@ -241,7 +241,7 @@ class PSFDistillationWorker(QObject):
         _raise_if_nonfinite(raw, "NLCG result")
         psf = project_psf(raw)
         if s.center_output:
-            psf = np.fft.fftshift(psf)
+            psf = np.fft.ifftshift(psf)
         _write_to_buffer(self._buffer, psf, channel=self._output_channel)
         self.progress.emit(result.iterations, s.num_iter)
         self.status.emit(

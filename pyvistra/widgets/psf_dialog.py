@@ -2,7 +2,7 @@ import os
 import traceback
 
 import numpy as np
-from qtpy.QtCore import QObject, Qt, QThread, Signal
+from qtpy.QtCore import QObject, Qt, QThread, QTimer, Signal
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -19,6 +19,7 @@ from qtpy.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -33,6 +34,26 @@ from .region_selector import RegionSelector
 SRC_THEORETICAL = 0
 SRC_DISTILLED = 1
 SRC_PUPIL = 2
+
+# Curated Zernike modes (OSA/ANSI index, label) exposed as sliders. Piston
+# and the two tilts are skipped — they translate the PSF, not its shape.
+# Plain ints are used as dict keys (ZernikeAberration accepts int or
+# ZernikeMode) so this module never needs to import deconlib at load time.
+_ZERNIKE_MODES = [
+    (3, "Astig (oblique)"),
+    (4, "Defocus"),
+    (5, "Astig (vertical)"),
+    (6, "Trefoil (Y)"),
+    (7, "Coma (Y)"),
+    (8, "Coma (X)"),
+    (9, "Trefoil (X)"),
+    (10, "Quadrafoil (Y)"),
+    (11, "Astig-2 (oblique)"),
+    (12, "Spherical"),
+    (13, "Astig-2 (vertical)"),
+    (14, "Quadrafoil (X)"),
+]
+_ZERNIKE_SLIDER_SCALE = 100.0  # slider is int radians*100, range [-3, 3] rad
 
 
 class PSFComputeDialog(QDialog):
@@ -51,6 +72,12 @@ class PSFComputeDialog(QDialog):
 
         self._buffer = None  # Holds computed PSF as ImageBuffer
         self._metadata = None  # PSF parameters for saving
+
+        self._preview_viewer = None  # Live-preview OrthoViewer, when open
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(150)
+        self._preview_timer.timeout.connect(self._refresh_preview)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(8, 8, 8, 8)
@@ -439,6 +466,78 @@ class PSFComputeDialog(QDialog):
         aberr_layout.addStretch()
         layout.addWidget(aberr_group)
 
+        # Zernike Aberrations — interactive coefficients + live preview.
+        # Applies only to the Theoretical source (SRC_THEORETICAL), where
+        # deconlib's compute_widefield_psf/compute_spinning_disk_psf accept
+        # a `zernike={osa_index: coeff}` kwarg directly.
+        zernike_group = QGroupBox("Zernike Aberrations")
+        zernike_layout = QVBoxLayout(zernike_group)
+        zernike_layout.setContentsMargins(8, 6, 8, 6)
+        zernike_layout.setSpacing(4)
+
+        zernike_header = QHBoxLayout()
+        self.zernike_check = QCheckBox("Enable")
+        zernike_header.addWidget(self.zernike_check)
+        self.zernike_reset_btn = QPushButton("Reset")
+        self.zernike_reset_btn.clicked.connect(self._reset_zernike_coeffs)
+        zernike_header.addWidget(self.zernike_reset_btn)
+        zernike_header.addStretch()
+        self.zernike_preview_btn = QPushButton("Live Preview")
+        self.zernike_preview_btn.clicked.connect(self._toggle_preview)
+        zernike_header.addWidget(self.zernike_preview_btn)
+        zernike_layout.addLayout(zernike_header)
+
+        zernike_grid = QGridLayout()
+        zernike_grid.setHorizontalSpacing(6)
+        zernike_grid.setVerticalSpacing(2)
+        zernike_grid.setColumnStretch(1, 1)
+        self._zernike_sliders = {}
+        self._zernike_spins = {}
+        for row, (idx, label) in enumerate(_ZERNIKE_MODES):
+            zernike_grid.addWidget(QLabel(f"{label}:"), row, 0, Qt.AlignRight)
+
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(-300, 300)
+            slider.setValue(0)
+            zernike_grid.addWidget(slider, row, 1)
+
+            spin = QDoubleSpinBox()
+            spin.setRange(-3.0, 3.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.05)
+            spin.setValue(0.0)
+            spin.setMaximumWidth(_SPIN_WIDTH)
+            zernike_grid.addWidget(spin, row, 2)
+
+            slider.valueChanged.connect(
+                lambda v, s=spin: self._sync_zernike_spin_from_slider(s, v)
+            )
+            spin.valueChanged.connect(
+                lambda v, sl=slider: self._sync_zernike_slider_from_spin(sl, v)
+            )
+            self._zernike_sliders[idx] = slider
+            self._zernike_spins[idx] = spin
+        zernike_layout.addLayout(zernike_grid)
+        layout.addWidget(zernike_group)
+
+        # Any control that affects the theoretical PSF schedules a debounced
+        # live-preview recompute (no-op when no preview window is open).
+        for spin in (
+            self.wavelength_spin, self.na_spin, self.ni_spin, self.ns_spin,
+            self.nz_spin, self.ny_spin, self.nx_spin,
+            self.dz_spin, self.dy_spin, self.dx_spin,
+            self.wavelength_exc_spin, self.wavelength_em_spin,
+            self.pinhole_spin, self.magnification_spin,
+            self.disk_magnification_spin, self.depth_spin,
+        ):
+            spin.valueChanged.connect(self._schedule_preview_refresh)
+        self.modality_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+        for check in (
+            self.normalize_check, self.vectorial_check, self.center_check,
+            self.aberr_check, self.zernike_check,
+        ):
+            check.toggled.connect(self._schedule_preview_refresh)
+
         # Output Selector
         self.output_selector = ImageOutputSelector(
             default_title="Computed PSF",
@@ -551,6 +650,96 @@ class PSFComputeDialog(QDialog):
         """Show/hide spinning disk parameters based on selection."""
         is_spinning_disk = index == 1
         self.sd_group.setVisible(is_spinning_disk)
+
+    def _sync_zernike_spin_from_slider(self, spin, value):
+        spin.blockSignals(True)
+        spin.setValue(value / _ZERNIKE_SLIDER_SCALE)
+        spin.blockSignals(False)
+        self._schedule_preview_refresh()
+
+    def _sync_zernike_slider_from_spin(self, slider, value):
+        slider.blockSignals(True)
+        slider.setValue(int(round(value * _ZERNIKE_SLIDER_SCALE)))
+        slider.blockSignals(False)
+        self._schedule_preview_refresh()
+
+    def _reset_zernike_coeffs(self):
+        for idx, spin in self._zernike_spins.items():
+            spin.blockSignals(True)
+            spin.setValue(0.0)
+            spin.blockSignals(False)
+            slider = self._zernike_sliders[idx]
+            slider.blockSignals(True)
+            slider.setValue(0)
+            slider.blockSignals(False)
+        self._schedule_preview_refresh()
+
+    def _zernike_coeffs(self):
+        """Current {osa_index: coefficient_radians} for every slider row."""
+        return {idx: spin.value() for idx, spin in self._zernike_spins.items()}
+
+    def _schedule_preview_refresh(self, *_args):
+        if self._preview_viewer is not None:
+            self._preview_timer.start()
+
+    def _toggle_preview(self):
+        """Open the live-preview OrthoViewer, or just raise the existing one."""
+        if self._preview_viewer is not None:
+            self._preview_viewer.raise_()
+            self._preview_viewer.activateWindow()
+            return
+        self._open_preview()
+
+    def _open_preview(self):
+        if self.source_combo.currentIndex() != SRC_THEORETICAL:
+            self.status_label.setText(
+                "Live preview only supports the Theoretical source"
+            )
+            self.status_label.setStyleSheet("color: #F44;")
+            return
+
+        from ..ui.workspace import present_window
+        from ..viewers.ortho import OrthoViewer
+
+        try:
+            psf, _ = self._compute_theoretical_psf()
+        except Exception as exc:
+            self.status_label.setText(f"Preview error: {exc}")
+            self.status_label.setStyleSheet("color: #F44;")
+            return
+
+        psf_5d = psf[np.newaxis, :, np.newaxis, :, :]
+        meta = {
+            "scale": (
+                self.dz_spin.value(), self.dy_spin.value(), self.dx_spin.value(),
+            )
+        }
+        viewer = OrthoViewer(psf_5d, meta=meta, title="PSF Live Preview")
+        viewer.destroyed.connect(lambda *_a, v=viewer: self._clear_preview_if(v))
+        self._preview_viewer = viewer
+        present_window(viewer, floating=True)
+
+    def _clear_preview_if(self, viewer):
+        if self._preview_viewer is viewer:
+            self._preview_viewer = None
+
+    def _refresh_preview(self):
+        viewer = self._preview_viewer
+        if viewer is None or self.source_combo.currentIndex() != SRC_THEORETICAL:
+            return
+        try:
+            psf, _ = self._compute_theoretical_psf()
+        except Exception as exc:
+            self.status_label.setText(f"Preview error: {exc}")
+            self.status_label.setStyleSheet("color: #F44;")
+            return
+        psf_5d = psf[np.newaxis, :, np.newaxis, :, :]
+        if psf_5d.shape == viewer.data.shape:
+            viewer.data[:] = psf_5d
+            viewer.update_views()
+        else:
+            viewer.close()
+            self._open_preview()
 
     def _on_source_changed(self, index):
         """Switch the source-specific parameter page."""
@@ -814,6 +1003,8 @@ class PSFComputeDialog(QDialog):
             from deconlib.psf.aberrations import IndexMismatch
             aberrations = [IndexMismatch(self.depth_spin.value())]
 
+        zernike = self._zernike_coeffs() if self.zernike_check.isChecked() else None
+
         modality = "widefield" if self.modality_combo.currentIndex() == 0 else "spinning_disk"
 
         if modality == "widefield":
@@ -824,6 +1015,7 @@ class PSFComputeDialog(QDialog):
                 shape=(Ny, Nx), spacing=(dy, dx), z=z,
                 normalize=normalize,
                 aberrations=aberrations,
+                zernike=zernike,
                 vectorial=vectorial,
             )
         else:
@@ -839,6 +1031,7 @@ class PSFComputeDialog(QDialog):
                 disk_magnification=self.disk_magnification_spin.value(),
                 normalize=normalize,
                 aberrations=aberrations,
+                zernike=zernike,
                 vectorial=vectorial,
             )
 
@@ -1016,6 +1209,8 @@ class PSFComputeDialog(QDialog):
             self.status_label.setStyleSheet("color: #C84;")
             event.ignore()
             return
+        if self._preview_viewer is not None:
+            self._preview_viewer.close()
         super().closeEvent(event)
 
     def _compute_pupil_psf(self):
@@ -1106,6 +1301,10 @@ class PSFComputeDialog(QDialog):
             "aberrations": {
                 "index_mismatch": self.aberr_check.isChecked(),
                 "emitter_depth_um": self.depth_spin.value() if self.aberr_check.isChecked() else 0.0,
+                "zernike_enabled": self.zernike_check.isChecked(),
+                "zernike_coefficients": (
+                    self._zernike_coeffs() if self.zernike_check.isChecked() else {}
+                ),
             },
             "computed_at": datetime.now().isoformat(),
         }

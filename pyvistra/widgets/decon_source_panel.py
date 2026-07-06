@@ -720,7 +720,7 @@ class SourcePSFPanelMixin:
         ).astype(np.float32)
         if Zp == 1:
             psf_data = psf_data[0]
-        if not psf_win.meta.get("psf_dc_corner", True):
+        if not psf_win.meta.get("psf_dc_corner", False):
             psf_data = np.fft.fftshift(psf_data)
 
         y_obs = np.ascontiguousarray(

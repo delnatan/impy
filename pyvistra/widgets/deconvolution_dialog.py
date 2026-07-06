@@ -656,7 +656,7 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         ).astype(np.float32)
         if Zp == 1:
             psf_data = psf_data[0]
-        if not psf_win.meta.get("psf_dc_corner", True):
+        if not psf_win.meta.get("psf_dc_corner", False):
             psf_data = np.fft.fftshift(psf_data)
 
         y_obs = np.ascontiguousarray(
@@ -669,7 +669,7 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             t, c, z_slice, y_slice, x_slice,
             tuple(y_obs.shape),
             psf_win.windowTitle(), c_psf, tuple(psf_data.shape),
-            psf_win.meta.get("psf_dc_corner", True),
+            psf_win.meta.get("psf_dc_corner", False),
             psf_win.meta.get("spacing", psf_win.meta.get("scale")),
             self.viewer.meta.get("scale"),
         )
