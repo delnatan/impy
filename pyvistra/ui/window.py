@@ -86,6 +86,7 @@ from ..widgets import (
     AlignmentDialog,
     AxesDialog,
     show_channel_dock,
+    CombineImagesDialog,
     FFTDialog,
     ImageMathDialog,
     MetadataDialog,
@@ -145,6 +146,7 @@ MENU_SPEC = [
         {"label": "Align Images...", "method": "show_alignment_dialog"},
         {"label": "Z Projection...", "method": "show_z_projection_dialog"},
         {"label": "Image Math...", "method": "show_image_math_dialog"},
+        {"label": "Combine Images...", "method": "show_combine_images_dialog"},
         {"label": "FFT...", "method": "show_fft_dialog"},
         {"label": "Deconvolution", "submenu": [
             {"label": "NLCG (default)...", "method": "show_deconvolution_dialog"},
@@ -369,6 +371,7 @@ class ImageWindow(QMainWindow):
         self.transform_dialog = None
         self.z_projection_dialog = None
         self._image_math_dialog = None
+        self._combine_images_dialog = None
         self._fft_dialog = None
         self._deconvolution_dialog = None
         self._rl_deconvolution_dialog = None
@@ -2810,6 +2813,12 @@ class ImageWindow(QMainWindow):
             self._image_math_dialog = ImageMathDialog(self, parent=self)
         self._image_math_dialog.show()
         self._image_math_dialog.raise_()
+
+    def show_combine_images_dialog(self):
+        if self._combine_images_dialog is None:
+            self._combine_images_dialog = CombineImagesDialog(self, parent=self)
+        self._combine_images_dialog.show()
+        self._combine_images_dialog.raise_()
 
     def show_fft_dialog(self):
         if self._fft_dialog is None:

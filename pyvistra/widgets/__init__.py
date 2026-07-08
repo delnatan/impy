@@ -40,6 +40,7 @@ from .convergence_plot import (
 )
 from .z_projection_dialog import ZProjectionDialog
 from .image_math_dialog import ImageMathDialog
+from .combine_images_dialog import CombineImagesDialog
 from .fft_dialog import FFTDialog
 from .deconvolution_dialog import DeconvolutionDialog
 from .deconvolution_worker import NLCGDeconvolutionWorker
@@ -80,6 +81,7 @@ __all__ = [
     "AxesDialog",
     "ZProjectionDialog",
     "ImageMathDialog",
+    "CombineImagesDialog",
     "FFTDialog",
     "DeconvolutionDialog",
     "NLCGDeconvolutionWorker",
