@@ -17,6 +17,16 @@ from pyvistra.io import build_z_projection_metadata
 from .output_selector import ImageOutputSelector
 from .processing_helper import BufferProcessingRunner
 
+# method name -> (reducer, output dtype is float)
+_METHODS = {
+    "max": (np.max, False),
+    "min": (np.min, False),
+    "mean": (np.mean, True),
+    "sum": (np.sum, True),
+    "std": (np.std, True),
+    "median": (np.median, True),
+}
+
 
 class ZProjectionWorker(QObject):
     """Background worker for Z projections."""
@@ -56,15 +66,15 @@ class ZProjectionWorker(QObject):
                         self._source[t, z_start : z_end + 1, c, :, :]
                     )
 
-                    if method == "max":
-                        if stack.ndim == 2:
-                            projected = stack
-                        else:
-                            projected = np.max(stack, axis=0)
-                    else:
+                    if method not in _METHODS:
                         raise ValueError(
                             f"Unsupported Z projection method: {method}"
                         )
+                    reducer, _is_float = _METHODS[method]
+
+                    if stack.ndim == 2:
+                        stack = stack[np.newaxis, ...]
+                    projected = reducer(stack, axis=0)
 
                     if projected.shape != (Y, X):
                         projected = np.asarray(projected).reshape(Y, X)
@@ -103,6 +113,11 @@ class ZProjectionDialog(QDialog):
 
         self.method_combo = QComboBox()
         self.method_combo.addItem("Maximum Intensity", "max")
+        self.method_combo.addItem("Minimum Intensity", "min")
+        self.method_combo.addItem("Mean", "mean")
+        self.method_combo.addItem("Sum", "sum")
+        self.method_combo.addItem("Standard Deviation", "std")
+        self.method_combo.addItem("Median", "median")
         form.addRow("Method:", self.method_combo)
 
         _T, Z, _C, _Y, _X = self.viewer.img_data.shape
@@ -201,9 +216,14 @@ class ZProjectionDialog(QDialog):
             method=method,
         )
 
+        _reducer, is_float = _METHODS[method]
+        output_dtype = (
+            np.dtype(np.float32) if is_float else np.dtype(self.viewer.img_data.dtype)
+        )
+
         source, buffer = self._runner.prepare_output(
             output_shape=(T, 1, C, Y, X),
-            output_dtype=np.dtype(self.viewer.img_data.dtype),
+            output_dtype=output_dtype,
             output_meta=output_meta,
         )
 
