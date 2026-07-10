@@ -398,6 +398,12 @@ class LineProfileDialog(QDialog):
         self.series_config = OrderedDict()
         self._computed_series = []
 
+        # Key used with ImageWindow.show_line_overlay/hide_line_overlay to
+        # draw a read-only indicator of the profile path on compared
+        # windows (the source window already shows its own editable
+        # LineROI/shape, so it never gets one of these).
+        self._overlay_key = "line_profile"
+
         self._connected_windows = set()
         self._is_shutting_down = False
 
@@ -737,12 +743,15 @@ class LineProfileDialog(QDialog):
             return
 
         wid = item.data(Qt.UserRole)
-        self.series_config.pop(wid, None)
+        cfg = self.series_config.pop(wid, None)
+        if cfg is not None:
+            self._hide_profile_overlay(cfg.get("window"))
 
         self._refresh_series_list()
         self._refresh_profiles()
 
     def _clear_series(self):
+        self._hide_all_overlays()
         self.series_config.clear()
         self._computed_series = []
         self.current_roi = None
@@ -963,6 +972,13 @@ class LineProfileDialog(QDialog):
             else:
                 channels = [int(cfg.get("channel", 0))]
 
+            if window is self.source_window or not visible:
+                self._hide_profile_overlay(window)
+            else:
+                overlay_channel = channels[0] if channels else int(cfg.get("channel", 0))
+                overlay_color = self._get_window_channel_color(window, overlay_channel, 0)
+                self._sync_profile_overlay(window, path_px_window, overlay_color)
+
             for ch in channels:
                 profile, ch_used = self._sample_profile(window, path_px_window, ch)
                 if profile is None:
@@ -1076,6 +1092,29 @@ class LineProfileDialog(QDialog):
             return _to_qcolor(colors[channel_idx], QColor(FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)])).name()
         return FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)]
 
+    def _sync_profile_overlay(self, window, path_px, color):
+        """Draw/update the profile-path indicator on a compared window.
+
+        Skipped for the source window, which already renders the real,
+        editable LineROI/shape the profile was taken from.
+        """
+        if window is None or window is self.source_window:
+            return
+        if not hasattr(window, "show_line_overlay"):
+            return
+
+        qcolor = _to_qcolor(color, QColor(255, 255, 0))
+        rgba = (qcolor.redF(), qcolor.greenF(), qcolor.blueF(), 0.9)
+        window.show_line_overlay(self._overlay_key, path_px, color=rgba)
+
+    def _hide_profile_overlay(self, window):
+        if window is not None and hasattr(window, "hide_line_overlay"):
+            window.hide_line_overlay(self._overlay_key)
+
+    def _hide_all_overlays(self):
+        for cfg in self.series_config.values():
+            self._hide_profile_overlay(cfg.get("window"))
+
     def _export_profiles(self):
         visible = [s for s in self._computed_series if s.get("visible", True)]
         if not visible:
@@ -1163,6 +1202,16 @@ class LineProfileDialog(QDialog):
                     self._update_profile(roi)
                     return
 
+        # No newly-selected LineROI took over as source; restore any
+        # previously-configured overlays (hidden on the last hideEvent).
+        self._refresh_profiles()
+
+    def hideEvent(self, event):
+        # Don't leave stale profile-path indicators on other windows while
+        # this dialog isn't visible; showEvent restores them.
+        self._hide_all_overlays()
+        super().hideEvent(event)
+
     def closeEvent(self, event):
         if self._is_shutting_down:
             super().closeEvent(event)
@@ -1172,6 +1221,8 @@ class LineProfileDialog(QDialog):
 
     def cleanup(self):
         self._is_shutting_down = True
+
+        self._hide_all_overlays()
 
         try:
             manager.window_registered.disconnect(self._on_window_registered)

@@ -1,14 +1,18 @@
-"""Deconvolution dialog — NLCG engine (deconlib.deconvolution.nlcg_*).
+"""Deconvolution dialog — ER-Decon engine (deconlib.deconvolution.erdecon_*).
 
-Two-tab layout, mirroring the Richardson-Lucy/MaxEnt dialogs:
+Edge-preserving Hessian-log deconvolution by Gauss-Newton-CG (Arigovindan,
+Fung, Elnatan et al. 2013, simplified — see
+`deconlib.deconvolution.erdecon_mlx` module docstring). Two-tab layout,
+mirroring the NLCG/Richardson-Lucy/MaxEnt dialogs:
     * Source, PSF && Model — ROI / frame / channel / PSF window picker,
       forward-model zoom (shared `SourcePSFPanelMixin`).
-    * Solver — optional regularizer, NLCG solver knobs, output region,
-      and optional tiling for large fields.
+    * Solver — data term (Gaussian/Poisson), the (always-on) edge-preserving
+      Hessian-log regularizer's lambda/eps, Gauss-Newton-CG solver knobs,
+      output region, and optional tiling for large fields.
 
-The dialog reads its widgets into a :class:`~.decon_nlcg.NLCGDialogState`,
-builds a :class:`~.decon_nlcg.PreparedInputs`, and hands the result to
-:class:`~.deconvolution_worker.NLCGDeconvolutionWorker`.
+The dialog reads its widgets into a :class:`~.decon_erdecon.ERDeconDialogState`,
+builds a :class:`~.decon_erdecon.PreparedInputs`, and hands the result to
+:class:`~.erdecon_worker.ERDeconWorker`.
 """
 
 from __future__ import annotations
@@ -40,75 +44,23 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from qtpy.QtGui import QValidator
-
-from pyvistra.data.shapes import rectangle_bounds
-
 from .decon_source_panel import SourcePSFPanelMixin
+from .deconvolution_dialog import ScientificDoubleSpinBox
 from .output_selector import ImageOutputSelector
 from .processing_helper import BufferProcessingRunner
-from . import decon_nlcg as dnl
-from .deconvolution_worker import NLCGDeconvolutionWorker
+from . import decon_erdecon as der
+from .erdecon_worker import ERDeconWorker
 
 
-class ScientificDoubleSpinBox(QDoubleSpinBox):
-    """A `QDoubleSpinBox` that displays/accepts scientific notation.
-
-    Meant for small-magnitude tolerances/weights (e.g. ``1e-4``) where a
-    fixed-decimals spinbox is either unreadable (too many zeros) or loses
-    precision (too few decimals silently rounds the value to 0). Internal
-    storage keeps full double precision (`decimals()` stays high); only
-    display/typing uses scientific notation. Arrow keys step by one order
-    of magnitude (×10 / ÷10) rather than a fixed linear increment, which is
-    the natural step for this kind of value.
-    """
-
-    def __init__(self, parent=None, display_precision: int = 1):
-        super().__init__(parent)
-        self._display_precision = display_precision
-        self.setDecimals(15)
-
-    def textFromValue(self, value: float) -> str:
-        return f"{value:.{self._display_precision}e}"
-
-    def valueFromText(self, text: str) -> float:
-        try:
-            return float(text)
-        except ValueError:
-            return 0.0
-
-    def validate(self, text: str, pos: int):
-        text = text.strip()
-        if text in ("", "-", "+"):
-            return (QValidator.Intermediate, text, pos)
-        try:
-            float(text)
-            return (QValidator.Acceptable, text, pos)
-        except ValueError:
-            pass
-        import re
-        if re.fullmatch(r"[+-]?\d*\.?\d*[eE][+-]?\d*", text):
-            return (QValidator.Intermediate, text, pos)
-        return (QValidator.Invalid, text, pos)
-
-    def stepBy(self, steps: int) -> None:
-        value = self.value()
-        if value <= 0.0:
-            floor = self.minimum() if self.minimum() > 0.0 else 1e-6
-            self.setValue(floor if steps > 0 else 0.0)
-            return
-        self.setValue(value * (10.0 ** steps))
-
-
-class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
-    """Single-channel 2D/3D deconvolution dialog (NLCG)."""
+class ERDeconDialog(SourcePSFPanelMixin, QDialog):
+    """Single-channel 2D/3D deconvolution dialog (ER-Decon)."""
 
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
-        self.setWindowTitle("Deconvolution")
+        self.setWindowTitle("ER-Decon (Edge-Preserving)")
         self.setWindowFlags(Qt.Tool)
-        self.resize(600, 660)
+        self.resize(600, 680)
         self.setMinimumSize(540, 460)
 
         self._runner = None
@@ -127,11 +79,6 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_source_psf_tab(), "Source, PSF && Model")
         tabs.addTab(self._build_solver_tab(), "Solver")
-        # Stretch factor 1: the tabs absorb all extra height on a vertical
-        # resize (their scroll areas just need to scroll less), while the
-        # output/progress/status group below -- added with the default
-        # stretch of 0 -- stays at its natural size and so stays pinned to
-        # the bottom instead of drifting or stretching along with it.
         main.addWidget(tabs, 1)
 
         output_group = QWidget()
@@ -140,7 +87,7 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         output_v.setSpacing(6)
 
         self.output_selector = ImageOutputSelector(
-            default_title="Deconvolved",
+            default_title="Deconvolved (ER-Decon)",
             formats=[".tif", ".ims"],
         )
         output_v.addWidget(self.output_selector)
@@ -152,9 +99,6 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         self.progress_bar.setValue(0)
         output_v.addWidget(self.progress_bar)
 
-        # Use a read-only QPlainTextEdit instead of a QLabel so long error
-        # messages (tracebacks, multi-line diagnostics) wrap inside the
-        # widget instead of stretching the dialog horizontally.
         self.status_label = QPlainTextEdit("Ready")
         self.status_label.setReadOnly(True)
         self.status_label.setFixedHeight(56)
@@ -182,14 +126,12 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
 
         self._finish_source_psf_panel_init()
 
-        # apply initial visibility once everything is wired
-        self._on_regularizer_mode_changed()
         self._on_tiling_toggled(self.tiled_check.isChecked())
         self._refresh_compute_target_hint()
         self._refresh_recipe_preview()
 
     # ------------------------------------------------------------------ #
-    # Tab builders
+    # Solver tab
 
     def _build_solver_tab(self) -> QWidget:
         tab = QWidget()
@@ -209,49 +151,76 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         vbox.setContentsMargins(8, 8, 8, 8)
         vbox.setSpacing(6)
 
-        # Regularization (optional; off by default).
-        reg_grp = QGroupBox("Regularization (optional)")
-        reg_grp.setToolTip(
-            "Early stopping alone is usually enough — leave this off unless "
-            "you see residual axial streaking or noise amplification."
+        # Data term — Gaussian LS (default, cheaper) or Poisson I-divergence.
+        data_grp = QGroupBox("Data term")
+        data_layout = QHBoxLayout(data_grp)
+        data_layout.setContentsMargins(8, 6, 8, 6)
+        data_layout.setSpacing(8)
+        self.data_gaussian_radio = QRadioButton("Gaussian (least-squares)")
+        self.data_gaussian_radio.setChecked(True)
+        self.data_gaussian_radio.setToolTip(
+            "||K g - f||^2 — read-noise-limited or well-exposed data; cheaper."
         )
-        reg_layout = QHBoxLayout(reg_grp)
-        reg_layout.setContentsMargins(8, 6, 8, 6)
-        reg_layout.setSpacing(8)
-        self.reg_none_radio = QRadioButton("Off")
-        self.reg_none_radio.setChecked(True)
-        self.reg_gradient_radio = QRadioButton("Gradient")
-        self.reg_hessian_radio = QRadioButton("Hessian")
-        reg_layout.addWidget(self.reg_none_radio)
-        reg_layout.addWidget(self.reg_gradient_radio)
-        reg_layout.addWidget(self.reg_hessian_radio)
-        reg_layout.addSpacing(10)
-        reg_layout.addWidget(QLabel("weight:"))
+        self.data_poisson_radio = QRadioButton("Poisson (shot-noise)")
+        self.data_poisson_radio.setToolTip(
+            "Shot-noise I-divergence, the statistically correct term for "
+            "photon-limited data. Model the pedestal via Background rather "
+            "than pre-subtracting it."
+        )
+        data_layout.addWidget(self.data_gaussian_radio)
+        data_layout.addWidget(self.data_poisson_radio)
+        data_layout.addStretch()
+        self._data_term_group = QButtonGroup(self)
+        self._data_term_group.addButton(self.data_gaussian_radio)
+        self._data_term_group.addButton(self.data_poisson_radio)
+        vbox.addWidget(data_grp)
+
+        # Edge-preserving Hessian-log regularizer — always on (intrinsic to
+        # the algorithm, unlike NLCG's optional gradient/Hessian term).
+        reg_grp = QGroupBox("Edge-preserving regularizer")
+        reg_grp.setToolTip(
+            "log(eps + |Hg|^2) curvature penalty — smooths noise, preserves "
+            "edges. Not optional; this is what distinguishes ER-Decon from "
+            "plain NLCG/RL."
+        )
+        reg_grid = QGridLayout(reg_grp)
+        reg_grid.setContentsMargins(8, 6, 8, 6)
+        reg_grid.setHorizontalSpacing(10)
+        reg_grid.setVerticalSpacing(4)
+        reg_grid.setColumnStretch(1, 1)
+        reg_grid.setColumnStretch(3, 1)
+
         self.reg_weight_spin = ScientificDoubleSpinBox()
         self.reg_weight_spin.setRange(0.0, 1e6)
-        self.reg_weight_spin.setValue(0.0)
+        self.reg_weight_spin.setValue(0.05)
         self.reg_weight_spin.setFixedWidth(96)
-        self.reg_weight_spin.setEnabled(False)
         self.reg_weight_spin.setToolTip(
-            "Regularization weight (beta). Scene/SNR/scale dependent — start "
-            "small (e.g. 1e-5) and increase until residual streaking/noise "
-            "amplification is controlled without over-smoothing real structure."
+            "Smoothness weight lambda. Scene/SNR/scale dependent — start at "
+            "the default and increase to control noise amplification."
         )
-        reg_layout.addWidget(self.reg_weight_spin)
-        reg_layout.addStretch()
-        self._reg_group = QButtonGroup(self)
-        self._reg_group.addButton(self.reg_none_radio)
-        self._reg_group.addButton(self.reg_gradient_radio)
-        self._reg_group.addButton(self.reg_hessian_radio)
-        self._reg_group.buttonToggled.connect(self._on_regularizer_mode_changed)
+        self.eps_reg_spin = ScientificDoubleSpinBox()
+        self.eps_reg_spin.setRange(1e-12, 1e6)
+        self.eps_reg_spin.setValue(1e-2)
+        self.eps_reg_spin.setFixedWidth(96)
+        self.eps_reg_spin.setToolTip(
+            "Curvature threshold eps, in units of |Hg|^2 (an absolute "
+            "curvature scale on the normalized [0, 1] data, not a fraction "
+            "of lambda). Curvature below it is smoothed as noise, above it "
+            "preserved as an edge — broad, flat optimum; tune to the "
+            "reconstruction's curvature, not to lambda."
+        )
+        reg_grid.addWidget(QLabel("Lambda:"), 0, 0, Qt.AlignRight)
+        reg_grid.addWidget(self.reg_weight_spin, 0, 1)
+        reg_grid.addWidget(QLabel("Eps:"), 0, 2, Qt.AlignRight)
+        reg_grid.addWidget(self.eps_reg_spin, 0, 3)
         vbox.addWidget(reg_grp)
 
-        # NLCG solver knobs — primary fields, with an "Advanced" collapsible
-        # group for knobs that rarely need tuning.
-        self._nlcg_box = self._build_nlcg_knobs()
-        vbox.addWidget(self._nlcg_box)
-        self._nlcg_advanced_box = self._build_nlcg_advanced_knobs()
-        vbox.addWidget(self._nlcg_advanced_box)
+        # Gauss-Newton-CG solver knobs — primary fields, with an "Advanced"
+        # collapsible group for knobs that rarely need tuning.
+        self._erdecon_box = self._build_erdecon_knobs()
+        vbox.addWidget(self._erdecon_box)
+        self._erdecon_advanced_box = self._build_erdecon_advanced_knobs()
+        vbox.addWidget(self._erdecon_advanced_box)
 
         # Output region + tiling — one group: tiling forces the cropped
         # region, so they're presented together instead of as two boxes.
@@ -375,8 +344,8 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         self._on_diagnostics_toggled(False)
         return tab
 
-    def _build_nlcg_knobs(self) -> QGroupBox:
-        grp = QGroupBox("NLCG solver")
+    def _build_erdecon_knobs(self) -> QGroupBox:
+        grp = QGroupBox("Gauss-Newton-CG solver")
         grid = QGridLayout(grp)
         grid.setContentsMargins(8, 6, 8, 6)
         grid.setHorizontalSpacing(10)
@@ -387,33 +356,26 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         def _ispin(lo, hi, val, w=64):
             s = QSpinBox(); s.setRange(lo, hi); s.setValue(val); s.setFixedWidth(w); return s
 
-        def _dspin(lo, hi, val, dec=3, step=None, w=72):
-            s = QDoubleSpinBox(); s.setRange(lo, hi); s.setDecimals(dec)
-            s.setValue(val); s.setFixedWidth(w)
-            if step is not None: s.setSingleStep(step)
-            return s
-
-        self.num_iter_spin = _ispin(1, 5000, 150)
-        self.slack_spin = _dspin(0.0, 10.0, 1.25, dec=3, step=0.05)
-        self.slack_spin.setToolTip(
-            "Discrepancy-principle target multiplier (unregularized only). "
-            "0 disables it, falling through to the Eq. 17 test."
+        self.num_iter_spin = _ispin(1, 5000, 50)
+        self.num_iter_spin.setToolTip("Maximum outer Newton iterations.")
+        self.eval_interval_spin = _ispin(1, 500, 5)
+        self.eval_interval_spin.setToolTip(
+            "Interval (iterations) for live-preview writes and objective logging."
         )
         self.verbose_check = QCheckBox("Verbose")
         self.verbose_check.setToolTip(
-            "Print per-iteration diagnostics (mean I-divergence, step length, "
-            "CG mixing) to stdout, and show the running I-divergence in the "
-            "status box below — useful for tuning."
+            "Print per-iteration diagnostics (I-divergence, phi, step length, "
+            "Newton decrement) to stdout."
         )
 
         grid.addWidget(QLabel("Iterations:"), 0, 0, Qt.AlignRight)
         grid.addWidget(self.num_iter_spin, 0, 1)
-        grid.addWidget(QLabel("Slack:"), 0, 2, Qt.AlignRight)
-        grid.addWidget(self.slack_spin, 0, 3)
+        grid.addWidget(QLabel("Eval interval:"), 0, 2, Qt.AlignRight)
+        grid.addWidget(self.eval_interval_spin, 0, 3)
         grid.addWidget(self.verbose_check, 1, 0, 1, 4)
         return grp
 
-    def _build_nlcg_advanced_knobs(self) -> QGroupBox:
+    def _build_erdecon_advanced_knobs(self) -> QGroupBox:
         grp = QGroupBox("Advanced solver knobs")
         grp.setCheckable(True)
         grp.setChecked(False)
@@ -433,24 +395,52 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             if step is not None: s.setSingleStep(step)
             return s
 
-        self.eval_interval_spin = _ispin(1, 500, 1)
+        self.newton_tol_spin = ScientificDoubleSpinBox()
+        self.newton_tol_spin.setRange(0.0, 1.0)
+        self.newton_tol_spin.setValue(1e-3)
+        self.newton_tol_spin.setFixedWidth(80)
+        self.newton_tol_spin.setToolTip(
+            "Primary convergence test. Stops once the Newton decrement "
+            "(predicted decrease in phi) drops below this fraction of its "
+            "first-iteration value. 0 disables it."
+        )
         self.tol_spin = ScientificDoubleSpinBox()
         self.tol_spin.setRange(0.0, 1.0)
-        self.tol_spin.setValue(1e-4)
+        self.tol_spin.setValue(0.0)
         self.tol_spin.setFixedWidth(80)
         self.tol_spin.setToolTip(
-            "Relative iterate-to-iterate change (Eq. 17). Stops early once it "
-            "drops below this — the fallback safety net for when the "
-            "discrepancy-principle target (Slack) is unreachable, or the "
-            "primary stopping test when a regularizer is enabled. "
-            "0 disables it."
+            "Secondary convergence test, off by default (0). When positive, "
+            "also stops once the relative change in the (regularizer-free) "
+            "data misfit falls below this."
         )
-        self.min_iter_spin = _ispin(0, 500, 10)
-        self.restart_interval_spin = _ispin(0, 500, 0)
-        self.restart_interval_spin.setToolTip(
-            "Force a steepest-descent restart every N iterations. 0 disables it."
+        self.min_iter_spin = _ispin(0, 500, 5)
+        self.min_iter_spin.setToolTip(
+            "Minimum outer iterations before either convergence test fires."
         )
-        self.newton_iters_spin = _ispin(1, 20, 3)
+        self.cg_max_steps_spin = _ispin(1, 500, 25)
+        self.cg_max_steps_spin.setToolTip("Max inner CG steps per Newton solve.")
+        self.cg_tol_spin = _dspin(0.0, 1.0, 0.1, dec=3, step=0.01)
+        self.cg_tol_spin.setToolTip(
+            "Inner CG relative-residual tolerance. A loose default gives an "
+            "inexact/truncated Newton step, cheaper and usually as good."
+        )
+        self.ls_max_backtracks_spin = _ispin(1, 200, 30)
+        self.ls_max_backtracks_spin.setToolTip(
+            "Max Armijo halvings before declaring the line search stuck."
+        )
+        self.ls_c1_spin = ScientificDoubleSpinBox()
+        self.ls_c1_spin.setRange(1e-12, 1.0)
+        self.ls_c1_spin.setValue(1e-4)
+        self.ls_c1_spin.setFixedWidth(80)
+        self.ls_c1_spin.setToolTip("Armijo sufficient-decrease constant.")
+        self.normalize_check = QCheckBox("Normalize data amplitude")
+        self.normalize_check.setChecked(True)
+        self.normalize_check.setToolTip(
+            "Divide the data by its max before solving so Lambda/Eps refer "
+            "to a fixed [0, 1] amplitude; the result is scaled back to "
+            "original units. Uncheck only if Lambda/Eps are already tuned "
+            "to this data's raw amplitude."
+        )
 
         def _row(r, la, wa, lb, wb):
             grid.addWidget(QLabel(la), r, 0, Qt.AlignRight)
@@ -458,10 +448,12 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             grid.addWidget(QLabel(lb), r, 2, Qt.AlignRight)
             grid.addWidget(wb,         r, 3)
 
-        _row(0, "Eval interval:", self.eval_interval_spin, "Convergence tol:", self.tol_spin)
-        _row(1, "Min iter:", self.min_iter_spin, "Restart every:", self.restart_interval_spin)
-        grid.addWidget(QLabel("Newton iters:"), 2, 0, Qt.AlignRight)
-        grid.addWidget(self.newton_iters_spin, 2, 1)
+        _row(0, "Newton tol:", self.newton_tol_spin, "Convergence tol:", self.tol_spin)
+        _row(1, "Min iter:", self.min_iter_spin, "CG max steps:", self.cg_max_steps_spin)
+        _row(2, "CG tol:", self.cg_tol_spin, "Line search max:", self.ls_max_backtracks_spin)
+        grid.addWidget(QLabel("Armijo c1:"), 3, 0, Qt.AlignRight)
+        grid.addWidget(self.ls_c1_spin, 3, 1)
+        grid.addWidget(self.normalize_check, 3, 2, 1, 2)
         grp.toggled.connect(lambda checked: self._toggle_group_children(grp, checked))
         self._toggle_group_children(grp, False)
         return grp
@@ -470,17 +462,18 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
     # Dynamic visibility
 
     def _connect_recipe_preview_signals(self) -> None:
-        widgets = [
-            self.reg_none_radio, self.reg_gradient_radio, self.reg_hessian_radio,
-        ]
+        widgets = [self.data_gaussian_radio, self.data_poisson_radio]
         for widget in widgets:
             widget.toggled.connect(lambda *_: self._on_source_psf_changed())
         for spin in (
-            self.num_iter_spin, self.slack_spin,
-            self.reg_weight_spin, self.eval_interval_spin, self.tol_spin,
-            self.min_iter_spin, self.restart_interval_spin, self.newton_iters_spin,
+            self.reg_weight_spin, self.eps_reg_spin,
+            self.num_iter_spin, self.eval_interval_spin,
+            self.newton_tol_spin, self.tol_spin, self.min_iter_spin,
+            self.cg_max_steps_spin, self.cg_tol_spin,
+            self.ls_max_backtracks_spin, self.ls_c1_spin,
         ):
             spin.valueChanged.connect(lambda *_: self._on_source_psf_changed())
+        self.normalize_check.toggled.connect(lambda *_: self._on_source_psf_changed())
 
     # ------------------------------------------------------------------ #
     # Mixin hooks
@@ -490,10 +483,6 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             self._refresh_compute_target_hint()
         if hasattr(self, "recipe_preview"):
             self._refresh_recipe_preview()
-
-    def _on_regularizer_mode_changed(self, *_):
-        self.reg_weight_spin.setEnabled(not self.reg_none_radio.isChecked())
-        self._on_source_psf_changed()
 
     def _on_tiling_toggled(self, checked: bool) -> None:
         self._tile_row_widget.setVisible(bool(checked))
@@ -511,10 +500,10 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
     def _on_diagnostics_toggled(self, checked: bool) -> None:
         self._toggle_group_children(self._diagnostics_group, checked)
 
-    def _current_state_for_shape(self) -> Optional[dnl.NLCGDialogState]:
+    def _current_state_for_shape(self) -> der.ERDeconDialogState:
         # A lightweight state good enough for shape math (zoom + region
         # knobs only); the full state is built in _read_state().
-        return dnl.NLCGDialogState(
+        return der.ERDeconDialogState(
             zoom_xy=self.sr_xy_spin.value(),
             zoom_z=self.sr_z_spin.value(),
             crop_to_visible=self.region_valid_radio.isChecked(),
@@ -535,30 +524,22 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             return
         state = self._current_state_for_shape()
         ndim = len(data_shape)
-        zoom = dnl.per_axis_zoom(state, ndim)
-        visible = dnl.visible_shape(data_shape, zoom)
+        zoom = der.per_axis_zoom(state, ndim)
+        visible = der.visible_shape(data_shape, zoom)
         kernel = self._current_psf_kernel_shape()
         padded = (
-            dnl.padded_shape(visible, kernel)
+            der.padded_shape(visible, kernel)
             if kernel is not None and len(kernel) == ndim
             else visible
         )
-        output_spatial_shape = dnl.output_shape(
+        output_spatial_shape = der.output_shape(
             state, data_shape, kernel or tuple(1 for _ in range(ndim))
         )
 
-        reg_kind = (
-            "gradient" if self.reg_gradient_radio.isChecked()
-            else "hessian" if self.reg_hessian_radio.isChecked()
-            else "off"
-        )
-        reg_text = (
-            f"regularizer {reg_kind} (weight={self.reg_weight_spin.value():g})"
-            if reg_kind != "off" else "no regularizer (early stopping only)"
-        )
-
+        data_term = "poisson" if self.data_poisson_radio.isChecked() else "gaussian"
         lines = [
-            f"NLCG, {self.num_iter_spin.value()} iter max, {reg_text}",
+            f"ER-Decon ({data_term}), {self.num_iter_spin.value()} iter max, "
+            f"lambda={self.reg_weight_spin.value():g} eps={self.eps_reg_spin.value():g}",
             f"data {self._format_shape(data_shape)} -> "
             f"visible {self._format_shape(visible)} -> "
             f"output {self._format_shape(output_spatial_shape)}",
@@ -566,7 +547,7 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         sr_text = " × ".join(f"{float(v):g}" for v in zoom)
         lines.append(f"zoom {sr_text}; object/padded shape {self._format_shape(padded)}")
         if self.tiled_check.isChecked():
-            n_tiles, tile_shape = dnl.estimate_tile_plan(state, data_shape)
+            n_tiles, tile_shape = der.estimate_tile_plan(state, data_shape)
             lines.append(
                 f"tiled: ~{n_tiles} tile(s) of shape {self._format_shape(tile_shape)}"
             )
@@ -580,25 +561,25 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
     # ------------------------------------------------------------------ #
     # State / inputs
 
-    def _read_state(self) -> dnl.NLCGDialogState:
-        reg_kind = (
-            "gradient" if self.reg_gradient_radio.isChecked()
-            else "hessian" if self.reg_hessian_radio.isChecked()
-            else "none"
-        )
-        return dnl.NLCGDialogState(
+    def _read_state(self) -> der.ERDeconDialogState:
+        data_term = "poisson" if self.data_poisson_radio.isChecked() else "gaussian"
+        return der.ERDeconDialogState(
             zoom_xy=self.sr_xy_spin.value(),
             zoom_z=self.sr_z_spin.value(),
-            regularizer_kind=reg_kind,
             reg_weight=self.reg_weight_spin.value(),
+            eps_reg=self.eps_reg_spin.value(),
+            data_term=data_term,
             num_iter=self.num_iter_spin.value(),
             background=self.background_spin.value(),
+            normalize=self.normalize_check.isChecked(),
             eval_interval=self.eval_interval_spin.value(),
-            slack=self.slack_spin.value(),
+            newton_tol=self.newton_tol_spin.value(),
             tol=self.tol_spin.value(),
             min_iter=self.min_iter_spin.value(),
-            restart_interval=self.restart_interval_spin.value(),
-            newton_iters=self.newton_iters_spin.value(),
+            cg_max_steps=self.cg_max_steps_spin.value(),
+            cg_tol=self.cg_tol_spin.value(),
+            ls_max_backtracks=self.ls_max_backtracks_spin.value(),
+            ls_c1=self.ls_c1_spin.value(),
             verbose=self.verbose_check.isChecked(),
             crop_to_visible=self.region_valid_radio.isChecked(),
             tiled=self.tiled_check.isChecked(),
@@ -608,103 +589,23 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         )
 
     def _prepare(self, t: Optional[int] = None) -> Optional[object]:
-        """Read inputs, slice the source, prepare the deconlib payload.
-
-        `t` selects the frame to crop; defaults to `t_start_spin` (the
-        first/only frame) when omitted. Returns ``(prepared, state, t, c)``
-        on success, or `None` on a user error (with the status label
-        updated).
-        """
-        _T, Z, _C, Y, X = self.viewer.img_data.shape
-        c = self.channel_spin.value()
-        if t is None:
-            t = self.t_start_spin.value()
-
-        if self.full_radio.isChecked():
-            z_slice = slice(0, Z)
-            y_slice = slice(0, Y)
-            x_slice = slice(0, X)
-        else:
-            idx = self.shape_combo.currentIndex()
-            if idx < 0 or idx >= len(self._rect_shapes):
-                self._set_status("No rectangle shape selected.", error=True)
-                return None
-            _, rec = self._rect_shapes[idx]
-            xl, yl, xr, yr = rectangle_bounds(
-                rec, self.viewer.img_data.shape[-2:]
-            )
-            if yl == yr or xl == xr:
-                self._set_status("Shape has zero area.", error=True)
-                return None
-            y_slice = slice(yl, yr)
-            x_slice = slice(xl, xr)
-            if Z > 1 and self.around_z_radio.isChecked():
-                half = self.z_half_spin.value()
-                z_center = self.z_center_spin.value()
-                z_slice = slice(max(0, z_center - half), min(Z, z_center + half + 1))
-            else:
-                z_slice = slice(0, Z)
-
-        psf_win = self.psf_combo.currentData()
-        if psf_win is None:
-            self._set_status("No PSF window selected.", error=True)
+        cropped = self._crop_observation_and_psf(t)
+        if cropped is None:
             return None
-        c_psf = self.psf_channel_spin.value()
-        _Tp, Zp, _Cp, _Yp, _Xp = psf_win.img_data.shape
-        psf_data = np.asarray(
-            psf_win.img_data[0, :, c_psf, :, :]
-        ).astype(np.float32)
-        if Zp == 1:
-            psf_data = psf_data[0]
-        if not psf_win.meta.get("psf_dc_corner", False):
-            psf_data = np.fft.fftshift(psf_data)
-
-        y_obs = np.ascontiguousarray(
-            self.viewer.img_data[t, z_slice, c, y_slice, x_slice]
-        ).astype(np.float32)
-        dnl.log.info(
-            "dialog: t=%d c=%d z_slice=%s y_slice=%s x_slice=%s "
-            "y_obs=%s psf_window='%s' psf_channel=%d psf_window_shape=%s "
-            "psf_dc_corner=%s psf_spacing=%s viewer_scale=%s",
-            t, c, z_slice, y_slice, x_slice,
-            tuple(y_obs.shape),
-            psf_win.windowTitle(), c_psf, tuple(psf_data.shape),
-            psf_win.meta.get("psf_dc_corner", False),
-            psf_win.meta.get("spacing", psf_win.meta.get("scale")),
-            self.viewer.meta.get("scale"),
-        )
-        if y_obs.shape[0] == 1:
-            y_obs = y_obs[0]
-
-        if psf_data.ndim != y_obs.ndim:
-            self._set_status(
-                f"PSF is {psf_data.ndim}D but observation is {y_obs.ndim}D.",
-                error=True,
-            )
-            return None
-
-        psf_spacing = psf_win.meta.get(
-            "spacing", psf_win.meta.get("scale", (1.0, 1.0, 1.0))
-        )
-        if psf_data.ndim == 2:
-            psf_pixel_size = tuple(float(s) for s in psf_spacing[-2:])
-        else:
-            psf_pixel_size = tuple(float(s) for s in psf_spacing[-3:])
 
         state = self._read_state()
-
         try:
-            prepared = dnl.prepare_inputs(
+            prepared = der.prepare_inputs(
                 state=state,
-                y_obs=y_obs,
-                psf_array=psf_data,
-                psf_pixel_size_um=psf_pixel_size,
+                y_obs=cropped.y_obs,
+                psf_array=cropped.psf_data,
+                psf_pixel_size_um=cropped.psf_pixel_size,
             )
         except Exception as exc:
             self._set_status(f"{type(exc).__name__}: {exc}", error=True)
             return None
 
-        return prepared, state, t, c
+        return prepared, state, cropped.t, cropped.c
 
     # ------------------------------------------------------------------ #
     # Run / cancel
@@ -721,11 +622,11 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         stack_channels = self.stack_channels_check.isChecked()
         output_channels = self.viewer.C if stack_channels else 1
         output_channel = c if stack_channels else 0
-        output_shape = dnl.output_5d_shape(
+        output_shape = der.output_5d_shape(
             state, prepared.y.shape, prepared.psf.shape,
             n_channels=output_channels, n_frames=len(frame_ts),
         )
-        dnl.log.info(
+        der.log.info(
             "output buffer shape=%s channel=%d (tiled=%s crop_to_visible=%s "
             "frames=%s)",
             output_shape, output_channel, state.tiled, state.crop_to_visible,
@@ -735,7 +636,7 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         # Output spacing = fine-grid spacing (data spacing ÷ zoom), corrected
         # for the rounding `visible_shape` applies when data_shape * zoom
         # isn't an exact integer.
-        vs = dnl.effective_voxel_spacing(
+        vs = der.effective_voxel_spacing(
             prepared.voxel_spacing, prepared.zoom, prepared.y.shape
         )
         if len(vs) == 2:
@@ -758,13 +659,13 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             ]
 
         output_meta = {
-            "filename": "Deconvolved",
+            "filename": "Deconvolved (ER-Decon)",
             "scale": out_scale,
             "is_rgb": False,
             "channels": channels,
             "source_channel": c,
             "source_frame": frame_ts[0] if len(frame_ts) == 1 else list(frame_ts),
-            "algorithm": "nlcg",
+            "algorithm": "erdecon",
         }
 
         def prepare_for_t(frame_t):
@@ -772,17 +673,17 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             if result is None:
                 return None
             frame_prepared, frame_state, _t, _c = result
-            regularizer = dnl.build_regularizer(
+            hessian = der.build_hessian(
                 frame_state, frame_prepared.y.ndim, frame_prepared.voxel_spacing
             )
-            return frame_prepared, frame_state, regularizer
+            return frame_prepared, frame_state, hessian
 
         def make_worker(frame_data, output_frame):
-            frame_prepared, frame_state, regularizer = frame_data
-            return NLCGDeconvolutionWorker(
+            frame_prepared, frame_state, hessian = frame_data
+            return ERDeconWorker(
                 prepared=frame_prepared,
                 state=frame_state,
-                regularizer=regularizer,
+                hessian=hessian,
                 buffer=self._runner.output_buffer,
                 output_channel=output_channel,
                 output_frame=output_frame,
@@ -885,10 +786,10 @@ class DeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         )
         self.status_label.setStyleSheet("color: #888;")
 
-    def _describe_run(self, state: dnl.NLCGDialogState) -> str:
+    def _describe_run(self, state: der.ERDeconDialogState) -> str:
         if state.tiled:
-            return f"Running tiled NLCG for up to {state.num_iter} iterations per tile."
-        return f"Running NLCG for up to {state.num_iter} iterations."
+            return f"Running tiled ER-Decon for up to {state.num_iter} iterations per tile."
+        return f"Running ER-Decon for up to {state.num_iter} iterations."
 
     def showEvent(self, event):
         super().showEvent(event)

@@ -58,8 +58,8 @@ class RichardsonLucyDialog(SourcePSFPanelMixin, QDialog):
         self.viewer = viewer
         self.setWindowTitle("Richardson-Lucy Deconvolution")
         self.setWindowFlags(Qt.Tool)
-        self.resize(560, 500)
-        self.setMinimumSize(520, 400)
+        self.resize(600, 640)
+        self.setMinimumSize(540, 460)
 
         self._runner = None
         self._running_status_base: Optional[str] = None
@@ -451,7 +451,12 @@ class RichardsonLucyDialog(SourcePSFPanelMixin, QDialog):
             frame_ts,
         )
 
-        vs = prepared.voxel_spacing
+        # Output spacing = fine-grid spacing (data spacing ÷ zoom), corrected
+        # for the rounding `visible_shape` applies when data_shape * zoom
+        # isn't an exact integer.
+        vs = drl.effective_voxel_spacing(
+            prepared.voxel_spacing, prepared.zoom, prepared.y.shape
+        )
         if len(vs) == 2:
             out_scale = (1.0, float(vs[0]), float(vs[1]))
         else:

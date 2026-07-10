@@ -68,7 +68,8 @@ class PSFComputeDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Compute PSF")
         self.setWindowFlags(Qt.Tool)
-        self.resize(420, 520)
+        self.resize(460, 700)
+        self.setMinimumSize(420, 520)
 
         self._buffer = None  # Holds computed PSF as ImageBuffer
         self._metadata = None  # PSF parameters for saving
@@ -487,7 +488,13 @@ class PSFComputeDialog(QDialog):
         zernike_header.addWidget(self.zernike_preview_btn)
         zernike_layout.addLayout(zernike_header)
 
-        zernike_grid = QGridLayout()
+        # Sliders live in their own widget (not just a sub-layout) so they
+        # can be shown/hidden as a block, keyed off "Enable" — collapsed by
+        # default since this is the single tallest section in the dialog
+        # (12 rows) and irrelevant until aberrations are turned on.
+        self._zernike_sliders_widget = QWidget()
+        zernike_grid = QGridLayout(self._zernike_sliders_widget)
+        zernike_grid.setContentsMargins(0, 0, 0, 0)
         zernike_grid.setHorizontalSpacing(6)
         zernike_grid.setVerticalSpacing(2)
         zernike_grid.setColumnStretch(1, 1)
@@ -517,8 +524,10 @@ class PSFComputeDialog(QDialog):
             )
             self._zernike_sliders[idx] = slider
             self._zernike_spins[idx] = spin
-        zernike_layout.addLayout(zernike_grid)
+        zernike_layout.addWidget(self._zernike_sliders_widget)
         layout.addWidget(zernike_group)
+        self._zernike_sliders_widget.setVisible(self.zernike_check.isChecked())
+        self.zernike_check.toggled.connect(self._zernike_sliders_widget.setVisible)
 
         # Any control that affects the theoretical PSF schedules a debounced
         # live-preview recompute (no-op when no preview window is open).

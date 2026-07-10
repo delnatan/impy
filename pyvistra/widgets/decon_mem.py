@@ -48,12 +48,27 @@ path skips `build_mem_problem` entirely and instead prepares plain
 `(y, psf, zoom, voxel_spacing)` via `decon_common.prepare_inputs` --
 the worker does the shared-model/prior construction itself, once it knows
 the real tile shape from `plan_tiles`.
+
+`build_mem_problem` also accepts an optional `prior_source`: a plain array
+at visible-grid resolution (`model.visible_shape`), e.g. read straight out
+of another open window (`memsolve_dialog.py`'s prior-source combo lists
+every open window the same way the PSF combo does). This is how the dialog
+supports experimenting with priors deconlib itself doesn't build --
+a low-pass-filtered version of the data, an over-regularized NLCG solution,
+anything -- without teaching this module to compute any of those itself:
+the caller does whatever it wants to produce a visible-grid array (via
+another dialog, another window, external code) and this just embeds it via
+`decon_common.embed_edge_padded`, which edge-extends it out to
+`padded_shape` so the PSF-support margin isn't an artificial flat/zero
+rim. Single-volume only, same as the default adjoint prior -- there's no
+tiled equivalent yet (see the tiling paragraph above for why a per-tile
+version of this is a separate, harder problem).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -62,6 +77,8 @@ from .decon_common import (  # noqa: F401 (re-exported for `dmem.*` call sites)
     _prepare_observation,
     _prepare_psf_kernel,
     compact_psf_shape_for_data,
+    effective_voxel_spacing,
+    embed_edge_padded,
     estimate_tile_plan,
     log,
     output_5d_shape,
@@ -89,6 +106,13 @@ class MemsolveDialogState:
 
     # Gaussian ICF (isotropic sigma, physical units matching voxel spacing).
     icf_gamma_um: float = 0.085
+
+    # Data likelihood passed straight through to mem.LinearInverseProblem /
+    # mem.MaxEntProblem ("poisson" | "gaussian"). "gaussian" omits a
+    # per-pixel sigma (deconlib doesn't hand this dialog a live
+    # noise-estimate map), so mem falls back to unit sigma -- an unweighted
+    # least-squares chi2.
+    likelihood: str = "poisson"
 
     # MaxEnt MAP solver knobs (see mem.maxent.MaxEntConfig).
     max_iter: int = 50
@@ -151,12 +175,17 @@ def build_mem_problem(
     y_obs: np.ndarray,
     psf_array: np.ndarray,
     psf_pixel_size_um: Tuple[float, ...],
+    prior_source: Optional[np.ndarray] = None,
 ) -> MemProblemInputs:
     """Build the operator chain + prior `MemsolveDeconvolutionWorker` needs.
 
     Mirrors `memsolve_gaussian_icf.py`'s forward model exactly: padded
     visible -> convolve -> downsample -> crop -> data, plus a Gaussian ICF
     hidden -> visible operator.
+
+    `prior_source`, if given, is a visible-grid array (shape ==
+    `model.visible_shape`) used as the prior instead of the default
+    `RCt(y)` -- see the module docstring's "prior_source" paragraph.
     """
     from deconlib.deconvolution import GaussianICF, as_numpy_op, make_forward_model
 
@@ -188,19 +217,29 @@ def build_mem_problem(
     def RCt(u):
         return Ct(Rt(u))
 
-    # Floored, not just cast: RCt is built from non-negative operators
-    # applied to a non-negative observation, but the FFT-based
-    # convolve/downsample adjoints can still ring very slightly negative in
-    # float32 at the padded domain's edges -- `mem.validate_problem` rejects
-    # a prior that isn't strictly positive everywhere, so clip that noise
-    # floor rather than let it fail intermittently depending on the data.
-    prior = np.maximum(np.asarray(RCt(y), dtype=np.float32), _ADJOINT_PRIOR_FLOOR)
+    if prior_source is None:
+        # Floored, not just cast: RCt is built from non-negative operators
+        # applied to a non-negative observation, but the FFT-based
+        # convolve/downsample adjoints can still ring very slightly negative
+        # in float32 at the padded domain's edges -- `mem.validate_problem`
+        # rejects a prior that isn't strictly positive everywhere, so clip
+        # that noise floor rather than let it fail intermittently depending
+        # on the data.
+        prior = np.maximum(np.asarray(RCt(y), dtype=np.float32), _ADJOINT_PRIOR_FLOOR)
+        prior_desc = "RCt(y)"
+    else:
+        prior = np.maximum(
+            embed_edge_padded(prior_source, model.padded_shape, model.valid_slices),
+            _ADJOINT_PRIOR_FLOOR,
+        )
+        prior_desc = "prior_source (edge-padded)"
 
     log.info(
         "build_mem_problem: y=%s psf=%s zoom=%s icf_gamma=%g voxel_spacing=%s "
-        "padded_shape=%s prior=RCt(y) min/max=%.6g/%.6g",
+        "padded_shape=%s prior=%s min/max=%.6g/%.6g",
         tuple(y.shape), tuple(psf.shape), zoom, state.icf_gamma_um,
-        voxel_spacing, model.padded_shape, float(prior.min()), float(prior.max()),
+        voxel_spacing, model.padded_shape, prior_desc,
+        float(prior.min()), float(prior.max()),
     )
 
     return MemProblemInputs(

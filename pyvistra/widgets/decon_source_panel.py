@@ -30,11 +30,13 @@ from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -91,7 +93,19 @@ class SourcePSFPanelMixin:
 
     def _build_source_psf_tab(self) -> QWidget:
         tab = QWidget()
-        vbox = QVBoxLayout(tab)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        vbox = QVBoxLayout(content)
         vbox.setContentsMargins(8, 8, 8, 8)
         vbox.setSpacing(6)
 

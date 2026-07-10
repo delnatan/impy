@@ -152,6 +152,7 @@ MENU_SPEC = [
             {"label": "NLCG (default)...", "method": "show_deconvolution_dialog"},
             {"label": "Richardson-Lucy...", "method": "show_rl_deconvolution_dialog"},
             {"label": "MaxEnt (memsolve)...", "method": "show_memsolve_deconvolution_dialog"},
+            {"label": "ER-Decon (edge-preserving)...", "method": "show_erdecon_dialog"},
         ]},
         {"label": "PSF Distillation (NLCG)...", "method": "show_psf_distillation_dialog"},
         None,
@@ -376,6 +377,7 @@ class ImageWindow(QMainWindow):
         self._deconvolution_dialog = None
         self._rl_deconvolution_dialog = None
         self._memsolve_deconvolution_dialog = None
+        self._erdecon_dialog = None
         self._psf_distillation_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
@@ -408,6 +410,11 @@ class ImageWindow(QMainWindow):
         self._stroke_points = []  # Accumulated path for contour
         self._contour_max_dist = 0.0  # Max distance from contour start
         self._mask_propagate_z = False  # Fill all Z slices (cookie-cut)
+
+        # Ad hoc read-only overlays keyed by caller-chosen string (e.g. a
+        # LineProfileDialog compare series). Lets dialogs in widgets/ draw a
+        # vispy visual here without importing vispy themselves.
+        self._external_overlays = {}
 
         # 10. Track State (multiple named track layers)
         self._track_layers = OrderedDict()  # name -> {"tracks": TrackTable, "visual": TrackLayerVisual, "visible": True}
@@ -549,6 +556,11 @@ class ImageWindow(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         self.window_shown.emit(self)
+        # Qt doesn't repaint hidden widgets, so canvas.update() calls made
+        # while this window was a non-current tab (e.g. a docked split-tab
+        # group) are no-ops -- the vispy scene state itself is current, but
+        # nothing forces a redraw of it. Catch up now that we're visible.
+        self.canvas.update()
 
     def closeEvent(self, event):
         manager.unregister(self)
@@ -569,6 +581,10 @@ class ImageWindow(QMainWindow):
         if self._focused_point_roi is not None:
             self._focused_point_roi.remove()
             self._focused_point_roi = None
+
+        for overlay in self._external_overlays.values():
+            overlay.parent = None
+        self._external_overlays.clear()
 
         # Stop receiving buffer change notifications before tearing down.
         if self._buffer_unsubscribe is not None:
@@ -2518,6 +2534,41 @@ class ImageWindow(QMainWindow):
             self.label_overlay.refresh()
         self.canvas.update()
 
+    def show_line_overlay(self, key, points, color=(1.0, 1.0, 0.0, 0.9), width=2):
+        """Show/update a read-only polyline overlay identified by ``key``.
+
+        Lets dialogs outside ``ui/`` (e.g. ``LineProfileDialog``) indicate a
+        path sourced from another window without importing vispy themselves
+        (``widgets/`` stays vispy-free per the layering rule). ``points`` is
+        an (N, 2+) array of image-pixel coordinates; fewer than 2 points
+        hides the overlay.
+        """
+        overlay = self._external_overlays.get(key)
+        if overlay is None:
+            overlay = scene.visuals.Line(pos=np.zeros((2, 2)), parent=self.view.scene)
+            overlay.set_gl_state(
+                preset="translucent", blend=True, depth_test=False
+            )
+            overlay.order = 100
+            self._external_overlays[key] = overlay
+
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[0] < 2:
+            overlay.visible = False
+            self.canvas.update()
+            return
+
+        overlay.set_data(pos=pts[:, :2], color=color, width=width)
+        overlay.visible = True
+        self.canvas.update()
+
+    def hide_line_overlay(self, key):
+        """Remove the overlay previously shown via ``show_line_overlay``."""
+        overlay = self._external_overlays.pop(key, None)
+        if overlay is not None:
+            overlay.parent = None
+            self.canvas.update()
+
     def _show_contour_marker(self, x, y):
         """Show visual marker at contour start point."""
         if self._contour_marker is None:
@@ -2846,6 +2897,13 @@ class ImageWindow(QMainWindow):
             self._memsolve_deconvolution_dialog = MemsolveDeconvolutionDialog(self, parent=self)
         self._memsolve_deconvolution_dialog.show()
         self._memsolve_deconvolution_dialog.raise_()
+
+    def show_erdecon_dialog(self):
+        from pyvistra.widgets.erdecon_dialog import ERDeconDialog
+        if self._erdecon_dialog is None:
+            self._erdecon_dialog = ERDeconDialog(self, parent=self)
+        self._erdecon_dialog.show()
+        self._erdecon_dialog.raise_()
 
     def show_psf_distillation_dialog(self):
         from pyvistra.widgets.psf_distillation_dialog import PSFDistillationDialog
@@ -4225,6 +4283,11 @@ def imshow(
     # Ensure QApplication exists
     app = QApplication.instance()
     if app is None:
+        # AA_ShareOpenGLContexts must be set before the QApplication is
+        # constructed: it keeps vispy canvases' GL resources valid when a
+        # viewer moves between top-level windows (workspace tab float/dock),
+        # which otherwise segfaults.
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
         app = QApplication(sys.argv)
 
     # Apply Theme

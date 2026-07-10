@@ -15,6 +15,18 @@ The dialog reads its widgets into a
 worker does the shared per-tile model/prior construction itself, once it
 knows the real tile shape). Either way the result is handed to
 :class:`~.memsolve_worker.MemsolveDeconvolutionWorker`.
+
+The Solver tab's "Prior" group picks the MaxEnt default model: the default
+adjoint `RCt(y)`, or any other open window's data (via `prior_source_combo`,
+populated the same "every open window" way as the PSF combo). This is how
+experiments with priors this dialog doesn't build itself -- a low-pass
+image, an over-regularized NLCG solution, anything -- plug in: compute the
+candidate elsewhere as its own window, then pick it here. The window must
+already be at visible-grid resolution/shape (`_update_prior_shape_check`
+compares against `dmem.visible_shape` and flags a mismatch); it gets
+edge-padded out to `padded_shape` by `decon_common.embed_edge_padded`
+inside `build_mem_problem`. Single-volume only -- disabled while tiling is
+checked (see decon_mem.py's module docstring for why).
 """
 
 from __future__ import annotations
@@ -46,6 +58,8 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from pyvistra.ui.manager import manager
+
 from .deconvolution_dialog import ScientificDoubleSpinBox
 from .decon_source_panel import SourcePSFPanelMixin
 from .output_selector import ImageOutputSelector
@@ -62,8 +76,8 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         self.viewer = viewer
         self.setWindowTitle("MaxEnt Deconvolution (memsolve)")
         self.setWindowFlags(Qt.Tool)
-        self.resize(560, 540)
-        self.setMinimumSize(520, 420)
+        self.resize(600, 660)
+        self.setMinimumSize(540, 460)
 
         self._runner = None
         self._running_status_base: Optional[str] = None
@@ -127,6 +141,8 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         main.addLayout(btn_row)
 
         self._finish_source_psf_panel_init()
+        self._psf_refresh_timer.timeout.connect(self._refresh_prior_source_combo)
+        self._refresh_prior_source_combo()
 
         # memsolve has no additive-background parameter -- a constant
         # background is naturally absorbed into the MaxEnt prior instead
@@ -180,6 +196,35 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         icf_form.addRow("Gamma (μm):", self.icf_gamma_spin)
         vbox.addWidget(icf_grp)
 
+        prior_grp = QGroupBox("Prior (MaxEnt default model)")
+        prior_form = QFormLayout(prior_grp)
+        prior_form.setLabelAlignment(Qt.AlignRight)
+        prior_form.setVerticalSpacing(4)
+        prior_form.setContentsMargins(8, 6, 8, 6)
+
+        prior_row = QWidget()
+        prior_row_layout = QHBoxLayout(prior_row)
+        prior_row_layout.setContentsMargins(0, 0, 0, 0)
+        prior_row_layout.setSpacing(6)
+        self.prior_source_combo = QComboBox()
+        self.prior_source_combo.addItem("Adjoint of data — RCt(y)  (default)", None)
+        self.prior_source_combo.currentIndexChanged.connect(
+            self._on_prior_source_selected
+        )
+        prior_row_layout.addWidget(self.prior_source_combo, 1)
+        prior_row_layout.addWidget(QLabel("Ch:"))
+        self.prior_channel_spin = QSpinBox()
+        self.prior_channel_spin.setRange(0, 0)
+        self.prior_channel_spin.setFixedWidth(48)
+        self.prior_channel_spin.setEnabled(False)
+        prior_row_layout.addWidget(self.prior_channel_spin)
+        prior_form.addRow("Source:", prior_row)
+
+        self.prior_shape_label = QLabel("—")
+        self.prior_shape_label.setStyleSheet("font-size: 10px;")
+        prior_form.addRow("Shape check:", self.prior_shape_label)
+        vbox.addWidget(prior_grp)
+
         mem_grp = QGroupBox("MaxEnt solver")
         grid = QGridLayout(mem_grp)
         grid.setContentsMargins(8, 6, 8, 6)
@@ -225,6 +270,15 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             "'classic' uses the fixed-noise MEMSYS Omega relation; 'auto' "
             "estimates a Gaussian noise scale from the data."
         )
+        self.likelihood_combo = QComboBox()
+        self.likelihood_combo.addItems(["poisson", "gaussian"])
+        self.likelihood_combo.setToolTip(
+            "Data likelihood assumed by the MAP solver. 'poisson' matches "
+            "photon-counting detector noise (memsolve_gaussian_icf.py's "
+            "default). 'gaussian' uses an unweighted least-squares chi2 "
+            "(unit per-pixel sigma, since this dialog has no live "
+            "noise-estimate map to pass in)."
+        )
         self.eval_interval_spin = QSpinBox()
         self.eval_interval_spin.setRange(1, 200)
         self.eval_interval_spin.setValue(1)
@@ -252,7 +306,9 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         grid.addWidget(self.aim_spin, 2, 1)
         grid.addWidget(QLabel("Eval interval:"), 2, 2, Qt.AlignRight)
         grid.addWidget(self.eval_interval_spin, 2, 3)
-        grid.addWidget(self.mem_verbose_check, 3, 0, 1, 4)
+        grid.addWidget(QLabel("Noise model:"), 3, 0, Qt.AlignRight)
+        grid.addWidget(self.likelihood_combo, 3, 1)
+        grid.addWidget(self.mem_verbose_check, 4, 0, 1, 4)
         vbox.addWidget(mem_grp)
 
         adv_grp = QGroupBox("Advanced solver knobs")
@@ -426,6 +482,9 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         self.omega_mode_combo.currentIndexChanged.connect(
             lambda *_: self._refresh_recipe_preview()
         )
+        self.likelihood_combo.currentIndexChanged.connect(
+            lambda *_: self._refresh_recipe_preview()
+        )
         self._on_diagnostics_toggled(False)
         return tab
 
@@ -443,7 +502,88 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             "Keep the full padded reconstruction domain, including the "
             "PSF-support margin deconlib adds automatically."
         )
+        self.prior_source_combo.setEnabled(not checked)
+        self.prior_channel_spin.setEnabled(
+            not checked and self.prior_source_combo.currentData() is not None
+        )
+        self.prior_source_combo.setToolTip(
+            "Tiled runs always use a shared flat prior (see decon_mem.py's "
+            "module docstring) — a per-window prior isn't supported for "
+            "tiled runs yet."
+            if checked else
+            "Prior used for the single-volume MAP solve. Defaults to the "
+            "adjoint of the data; pick another open window to use its data "
+            "as the prior instead (must match the visible/reconstruction "
+            "shape below)."
+        )
         self._refresh_recipe_preview()
+
+    # ------------------------------------------------------------------ #
+    # Prior source combo
+
+    def _refresh_prior_source_combo(self) -> None:
+        current = self.prior_source_combo.currentData()
+        self.prior_source_combo.blockSignals(True)
+        self.prior_source_combo.clear()
+        self.prior_source_combo.addItem("Adjoint of data — RCt(y)  (default)", None)
+        for _wid, win in sorted(manager.get_all().items()):
+            if win is self.viewer:
+                continue
+            label = win.windowTitle().split("]", 1)[-1].strip()
+            self.prior_source_combo.addItem(f"From window: {label}", win)
+        idx = self.prior_source_combo.findData(current) if current is not None else 0
+        self.prior_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.prior_source_combo.blockSignals(False)
+        self._on_prior_source_selected(self.prior_source_combo.currentIndex())
+
+    def _on_prior_source_selected(self, _idx) -> None:
+        win = self.prior_source_combo.currentData()
+        tiled = self.tiled_check.isChecked()
+        if win is None:
+            self.prior_channel_spin.setRange(0, 0)
+            self.prior_channel_spin.setEnabled(False)
+            self.prior_shape_label.setText("—")
+        else:
+            _T, _Z, C, _Y, _X = win.img_data.shape
+            self.prior_channel_spin.setRange(0, max(0, C - 1))
+            self.prior_channel_spin.setEnabled(not tiled)
+            self._update_prior_shape_check(win)
+        self._refresh_recipe_preview()
+
+    def _update_prior_shape_check(self, win) -> None:
+        data_shape = self._current_data_shape()
+        if data_shape is None:
+            self.prior_shape_label.setText("—")
+            return
+        state = self._current_state_for_shape()
+        zoom = dmem.per_axis_zoom(state, len(data_shape))
+        expected = dmem.visible_shape(data_shape, zoom)
+        actual = self._current_prior_window_shape(win)
+        if actual == expected:
+            self.prior_shape_label.setText(f"✓  {self._format_shape(actual)}")
+            self.prior_shape_label.setStyleSheet("color: #4A4; font-size: 10px;")
+        else:
+            self.prior_shape_label.setText(
+                f"✗  window {self._format_shape(actual)} ≠ "
+                f"visible {self._format_shape(expected)}"
+            )
+            self.prior_shape_label.setStyleSheet("color: #F44; font-size: 10px;")
+
+    def _current_prior_window_shape(self, win) -> tuple:
+        _T, Zp, _C, Yp, Xp = win.img_data.shape
+        if self.viewer.img_data.shape[1] <= 1 or Zp <= 1:
+            return (Yp, Xp)
+        return (Zp, Yp, Xp)
+
+    def _current_prior_source_array(self) -> Optional[np.ndarray]:
+        win = self.prior_source_combo.currentData()
+        if win is None:
+            return None
+        c = self.prior_channel_spin.value()
+        arr = np.asarray(win.img_data[0, :, c, :, :]).astype(np.float32)
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        return arr
 
     # ------------------------------------------------------------------ #
     # Mixin hooks
@@ -491,7 +631,8 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         )
 
         lines = [
-            f"MaxEnt (memsolve), {self.max_iter_spin.value()} iter max, "
+            f"MaxEnt (memsolve, {self.likelihood_combo.currentText()}), "
+            f"{self.max_iter_spin.value()} iter max, "
             f"ICF gamma={self.icf_gamma_spin.value():g} μm",
             f"data {self._format_shape(data_shape)} -> "
             f"visible {self._format_shape(visible)} -> "
@@ -499,7 +640,17 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         ]
         sr_text = " × ".join(f"{float(v):g}" for v in zoom)
         lines.append(f"zoom {sr_text}; object/padded shape {self._format_shape(padded)}")
-        if self.tiled_check.isChecked():
+        tiled = self.tiled_check.isChecked()
+        prior_win = self.prior_source_combo.currentData()
+        if tiled:
+            lines.append("prior: flat (tiled runs always use a shared flat prior)")
+        elif prior_win is None:
+            lines.append("prior: adjoint of data — RCt(y)")
+        else:
+            label = prior_win.windowTitle().split("]", 1)[-1].strip()
+            self._update_prior_shape_check(prior_win)
+            lines.append(f"prior: window '{label}'")
+        if tiled:
             n_tiles, tile_shape = dmem.estimate_tile_plan(state, data_shape)
             lines.append(
                 f"tiled: ~{n_tiles} tile(s) of shape {self._format_shape(tile_shape)}"
@@ -519,6 +670,7 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             zoom_xy=self.sr_xy_spin.value(),
             zoom_z=self.sr_z_spin.value(),
             icf_gamma_um=self.icf_gamma_spin.value(),
+            likelihood=self.likelihood_combo.currentText(),
             max_iter=self.max_iter_spin.value(),
             tol_omega=self.tol_omega_spin.value(),
             aim=self.aim_spin.value(),
@@ -561,6 +713,7 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
                     y_obs=cropped.y_obs,
                     psf_array=cropped.psf_data,
                     psf_pixel_size_um=cropped.psf_pixel_size,
+                    prior_source=self._current_prior_source_array(),
                 )
         except Exception as exc:
             self._set_status(f"{type(exc).__name__}: {exc}", error=True)
@@ -600,7 +753,12 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
             frame_ts,
         )
 
-        vs = inputs.voxel_spacing
+        # Output spacing = fine-grid spacing (data spacing ÷ zoom), corrected
+        # for the rounding `visible_shape` applies when data_shape * zoom
+        # isn't an exact integer.
+        vs = dmem.effective_voxel_spacing(
+            inputs.voxel_spacing, inputs.zoom, inputs.y.shape
+        )
         if len(vs) == 2:
             out_scale = (1.0, float(vs[0]), float(vs[1]))
         else:
@@ -757,6 +915,7 @@ class MemsolveDeconvolutionDialog(SourcePSFPanelMixin, QDialog):
         super().showEvent(event)
         self._refresh_psf_combo()
         self._refresh_shape_combo()
+        self._refresh_prior_source_combo()
 
     def closeEvent(self, event):
         if self._runner and self._runner.worker is not None:

@@ -48,6 +48,8 @@ from .richardson_lucy_dialog import RichardsonLucyDialog
 from .richardson_lucy_worker import RLDeconvolutionWorker
 from .memsolve_dialog import MemsolveDeconvolutionDialog
 from .memsolve_worker import MemsolveDeconvolutionWorker
+from .erdecon_dialog import ERDeconDialog
+from .erdecon_worker import ERDeconWorker
 from .psf_distillation_dialog import PSFDistillationDialog
 from .psf_distillation_worker import PSFDistillationWorker
 from .processing_helper import BufferProcessingRunner
@@ -89,6 +91,8 @@ __all__ = [
     "RLDeconvolutionWorker",
     "MemsolveDeconvolutionDialog",
     "MemsolveDeconvolutionWorker",
+    "ERDeconDialog",
+    "ERDeconWorker",
     "PSFDistillationDialog",
     "PSFDistillationWorker",
     "OverlaySettingsDialog",

@@ -116,7 +116,7 @@ class MemsolveDeconvolutionWorker(QObject):
         problem = mem.LinearInverseProblem(
             y=pi.y,
             prior=pi.prior,
-            likelihood="poisson",
+            likelihood=s.likelihood,
             R=pi.R,
             Rt=pi.Rt,
             C=pi.C,
@@ -157,7 +157,7 @@ class MemsolveDeconvolutionWorker(QObject):
         # mirrors mem.inference's own combined-operator path, so this matches
         # what mem.run_inference would have built for the same problem.
         mem_problem = mem.MaxEntProblem.data(
-            pi.y, pi.prior, pi.RC, pi.RCt, likelihood="poisson",
+            pi.y, pi.prior, pi.RC, pi.RCt, likelihood=s.likelihood,
         )
 
         self.status.emit("Running MEM solver…")
@@ -308,7 +308,7 @@ class MemsolveDeconvolutionWorker(QObject):
             problem = mem.LinearInverseProblem(
                 y=data_tile,
                 prior=tile_prior,
-                likelihood="poisson",
+                likelihood=s.likelihood,
                 R=R, Rt=Rt, C=C, Ct=Ct, RC=RC, RCt=RCt,
                 name=f"tile_{spec.index}",
             )

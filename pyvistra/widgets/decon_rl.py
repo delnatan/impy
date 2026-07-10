@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from .decon_common import (  # noqa: F401 (re-exported for `drl.*` call sites)
     PreparedInputs,
     compact_psf_shape_for_data,
+    effective_voxel_spacing,
     estimate_tile_plan,
     log,
     output_5d_shape,

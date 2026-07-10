@@ -1498,6 +1498,11 @@ def open_tiled_viewer(image_paths, tiles_per_page=50):
     if app is None:
         import sys
 
+        # AA_ShareOpenGLContexts must be set before the QApplication is
+        # constructed: it keeps vispy canvases' GL resources valid when a
+        # viewer moves between top-level windows (workspace tab float/dock),
+        # which otherwise segfaults.
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
         app = QApplication(sys.argv)
 
     # Apply theme

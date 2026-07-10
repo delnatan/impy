@@ -71,6 +71,31 @@ def visible_shape(data_shape: Tuple[int, ...], zoom: Tuple[float, ...]) -> Tuple
     return tuple(max(1, int(round(d * z))) for d, z in zip(data_shape, zoom))
 
 
+def effective_voxel_spacing(
+    voxel_spacing: Tuple[float, ...],
+    zoom: Tuple[float, ...],
+    data_shape: Tuple[int, ...],
+) -> Tuple[float, ...]:
+    """Physical spacing of the reconstruction grid deconlib actually built.
+
+    `visible_shape` rounds `data_shape * zoom` to an integer array size, so
+    the grid deconlib's downsampler implements has `visible / data_shape`
+    visible pixels per data pixel per axis, not the nominal `zoom` --
+    these diverge whenever `data_shape * zoom` isn't already an exact
+    integer. Scaling `voxel_spacing` (the PSF's declared spacing) by
+    `zoom * data_shape / visible` corrects for that rounding. The two
+    spacings differ by up to half an output pixel across the field.
+    Output metadata must use this effective spacing, or a
+    physical-coordinate line profile (e.g. a before/after-decon compare)
+    accumulates a small, edge-growing offset.
+    """
+    visible = visible_shape(data_shape, zoom)
+    return tuple(
+        vs * z * d / v
+        for vs, z, d, v in zip(voxel_spacing, zoom, data_shape, visible)
+    )
+
+
 def padded_shape(
     visible: Tuple[int, ...], psf_shape: Tuple[int, ...]
 ) -> Tuple[int, ...]:
@@ -268,6 +293,32 @@ def prepare_inputs(
     )
 
     return PreparedInputs(y=y, psf=psf, zoom=zoom, voxel_spacing=voxel_spacing)
+
+
+def embed_edge_padded(
+    visible_array: np.ndarray,
+    padded: Tuple[int, ...],
+    slices: Tuple[slice, ...],
+) -> np.ndarray:
+    """Place a visible-grid array into `padded` shape, edge-extending the margin.
+
+    Turns a prior candidate that's already at visible-grid resolution (e.g.
+    an array read from another open window) into the padded/hidden-domain
+    array a MaxEnt prior needs. Edge-extension -- rather than a flat/zero
+    margin -- keeps the default model continuous across the PSF-support
+    boundary `slices` carves out of `padded`, instead of introducing an
+    artificial dark/bright rim the solver has to fight during the first few
+    iterations.
+    """
+    arr = np.asarray(visible_array, dtype=np.float32)
+    expected = tuple(sl.stop - sl.start for sl in slices)
+    if arr.shape != expected:
+        raise ValueError(
+            f"prior source shape {arr.shape} does not match visible shape "
+            f"{expected}"
+        )
+    pad_width = tuple((sl.start, p - sl.stop) for sl, p in zip(slices, padded))
+    return np.pad(arr, pad_width, mode="edge")
 
 
 # --------------------------------------------------------------------------- #
