@@ -9,18 +9,21 @@ import os
 from pathlib import Path
 
 import numpy as np
-from qtpy.QtCore import QPoint, QRect, QSize, Qt
+from qtpy.QtCore import QEvent, QPoint, QRect, QSize, Qt
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDockWidget,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLayout,
     QLayoutItem,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -35,7 +38,9 @@ from vispy import scene
 
 from .. import colormaps as _colormaps
 from ..contrast import compute_percentile_clim
+from ..data.annotations import TileAnnotations
 from ..data.channel_state import ChannelDisplayList
+from ..data.colors import get_distinct_color, rgb_to_hex
 from ..io import load_image
 from ..visuals.image import (
     DEFAULT_CHANNEL_COLORMAPS,
@@ -43,7 +48,17 @@ from ..visuals.image import (
     get_colormap,
 )
 from ..widgets import ChannelPanel, ChannelRow, show_channel_dock
+from ..widgets.annotation_stats_panel import AnnotationStatsPanel
 from ..widgets.axes_dialog import AxesDialog
+from ..widgets.manage_categories_dialog import ManageCategoriesDialog
+
+
+def _readable_text_color(hex_color):
+    """Pick black or white text for readability against hex_color."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return "black" if luminance > 0.6 else "white"
 
 
 class TiledVisualProxy:
@@ -62,13 +77,17 @@ class TiledVisualProxy:
     def __init__(self, viewer):
         self.viewer = viewer
         self._max_channels = 0
+        # Channels whose clim was explicitly set via the global panel (as
+        # opposed to left at the per-tile auto-contrast default). Only
+        # these are pushed into newly loaded/reloaded tiles, so paging or
+        # reordering axes doesn't stomp on auto-contrast for the rest.
+        self._custom_clim = set()
         self.display = ChannelDisplayList(0)
         self.display.subscribe(self._on_display_changed)
 
     def update_max_channels(self, max_c):
         """Update the maximum number of channels across all tiles."""
-        if max_c <= self._max_channels:
-            self._max_channels = max_c
+        if max_c == self._max_channels:
             return
 
         # Preserve existing state; append defaults for new channels.
@@ -87,6 +106,7 @@ class TiledVisualProxy:
         new.subscribe(self._on_display_changed)
         self.display = new
         self._max_channels = max_c
+        self._custom_clim = {c for c in self._custom_clim if c < max_c}
 
     def _on_display_changed(self, channel_idx, field):
         state = self.display[channel_idx]
@@ -145,6 +165,7 @@ class TiledVisualProxy:
         return True
 
     def set_clim(self, channel_idx, vmin, vmax):
+        self._custom_clim.add(channel_idx)
         self.display.set_clim(channel_idx, vmin, vmax)
 
     def get_aggregate_data(self, channel_idx):
@@ -180,9 +201,13 @@ class TiledVisualProxy:
     def apply_settings_to_tile(self, tile):
         """Apply current global settings to a newly loaded tile.
 
-        Only colormap/gamma/visibility are synced globally — contrast
-        stays per-tile (see class docstring), so clim is left untouched
-        here (auto-contrasted on load in ``TileWidget.load``).
+        Colormap/gamma/visibility always sync globally. Contrast is
+        per-tile by default (auto-contrasted on load in
+        ``TileWidget.load``) *unless* the user has explicitly set a
+        channel's clim via the global panel (tracked in
+        ``_custom_clim``), in which case that clim is re-applied so it
+        survives paging and axis reordering instead of being clobbered
+        by the fresh tile's auto-contrast.
         """
         if tile.renderer is None:
             return
@@ -193,6 +218,8 @@ class TiledVisualProxy:
             tile.renderer.set_colormap(c, state.colormap_name)
             tile.renderer.set_gamma(c, state.gamma)
             tile.renderer.set_channel_visible(c, state.visible)
+            if c in self._custom_clim:
+                tile.renderer.set_clim(c, *state.clim)
 
 
 class TiledChannelPanel(QWidget):
@@ -219,11 +246,11 @@ class TiledChannelPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
 
-        info_label = QLabel(
+        self.info_label = QLabel(
             f"<b>Global Channel Settings</b> ({viewer.max_C} channels)"
         )
-        info_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(info_label)
+        self.info_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.info_label)
 
         note_label = QLabel(
             "<i>Adjust min/max to set global contrast. "
@@ -267,6 +294,20 @@ class TiledChannelPanel(QWidget):
         self.refresh_ui()
 
     def _setup_channel_rows(self):
+        """(Re)build one row per current channel.
+
+        Safe to call again later: clears out any previously built rows
+        first, so it can be used both at construction time and whenever
+        the tile set's channel count changes (e.g. after reordering axes
+        swaps Z <-> C).
+        """
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.channel_rows = []
+
         for c in range(self.viewer.max_C):
             ch_name = f"Ch {c + 1}"
             cmap_name = self.proxy.get_colormap_name(c)
@@ -278,6 +319,9 @@ class TiledChannelPanel(QWidget):
             self.channel_rows.append(row)
             self.rows_layout.addWidget(row)
         self.rows_layout.addStretch()
+        self.info_label.setText(
+            f"<b>Global Channel Settings</b> ({self.viewer.max_C} channels)"
+        )
 
     def _swatch_color(self, c_idx):
         colors = self.proxy.channel_colors
@@ -331,6 +375,10 @@ class TiledChannelPanel(QWidget):
 
     def refresh_ui(self):
         """Refresh all channel rows from current proxy state + aggregate data."""
+        if len(self.channel_rows) != self.viewer.max_C:
+            self._setup_channel_rows()
+            self.resize(520, min(180 + self.viewer.max_C * 55, 460))
+
         for c, row in enumerate(self.channel_rows):
             agg_data = self.proxy.get_aggregate_data(c)
             color = self._swatch_color(c)
@@ -478,6 +526,13 @@ class TileWidget(QFrame):
         self._camera_change_callback = None
         self._ignore_camera_events = False
 
+        # Selection (visual highlight; see TiledViewer._on_tile_selected)
+        self._selected = False
+        self._selection_callback = None
+
+        # Annotation (small corner badge; see TiledViewer.annotate_selected_tiles)
+        self._annotation_category = None
+
         # Setup UI
         self._setup_ui()
 
@@ -497,6 +552,9 @@ class TileWidget(QFrame):
             TileWidget:hover {
                 border: 1px solid #555;
             }
+            TileWidget[selected="true"] {
+                border: 2px solid #4da6ff;
+            }
             """
         )
 
@@ -515,10 +573,21 @@ class TileWidget(QFrame):
         # Connect to canvas events for camera sync (wheel=zoom, release=end of pan)
         self.canvas.events.mouse_wheel.connect(self._on_camera_change)
         self.canvas.events.mouse_release.connect(self._on_camera_change)
+        # Click-to-select (canvas covers most of the tile's area, so
+        # selection needs its own hook independent of mousePressEvent).
+        self.canvas.events.mouse_press.connect(self._on_canvas_mouse_press)
 
         # Canvas widget
         self.canvas.native.setMinimumSize(50, 50)
         layout.addWidget(self.canvas.native, 1)
+
+        # Annotation badge: small colored corner chip, hidden until a
+        # category is set. Parented to the canvas (not the layout) so it
+        # floats over the top-left corner of the image regardless of
+        # tile size; top-left never needs repositioning on resize.
+        self.annotation_badge = QLabel(self.canvas.native)
+        self.annotation_badge.move(4, 4)
+        self.annotation_badge.hide()
 
         # Info label (shows filename + view state)
         self.info_label = QLabel("")
@@ -678,6 +747,53 @@ class TileWidget(QFrame):
         """Set callback for camera change events."""
         self._camera_change_callback = callback
 
+    def set_selection_callback(self, callback):
+        """Set callback(tile, ctrl_or_cmd, shift) invoked when this tile is clicked."""
+        self._selection_callback = callback
+
+    def set_selected(self, selected):
+        """Update the visual highlight state (see TiledViewer.selected_tiles)."""
+        self._selected = selected
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def set_annotation(self, category, color_hex=None):
+        """Show/hide the corner badge for category (None/"" hides it)."""
+        self._annotation_category = category or None
+        if not category:
+            self.annotation_badge.hide()
+            self.annotation_badge.setToolTip("")
+            return
+
+        bg = color_hex or "#666666"
+        text_color = _readable_text_color(bg)
+        self.annotation_badge.setText(category[:4])
+        self.annotation_badge.setToolTip(category)
+        self.annotation_badge.setStyleSheet(
+            f"background-color: {bg}; color: {text_color}; font-size: 9px; "
+            "font-weight: bold; padding: 1px 4px; border-radius: 3px;"
+        )
+        self.annotation_badge.adjustSize()
+        self.annotation_badge.show()
+        self.annotation_badge.raise_()
+
+    def _on_canvas_mouse_press(self, event):
+        if self._selection_callback is not None:
+            mods = event.modifiers
+            ctrl_or_cmd = "Control" in mods or "Meta" in mods
+            shift = "Shift" in mods
+            self._selection_callback(self, ctrl_or_cmd, shift)
+
+    def mousePressEvent(self, event):
+        """Handle clicks landing on the frame itself (padding, info label)."""
+        if self._selection_callback is not None:
+            mods = event.modifiers()
+            ctrl_or_cmd = bool(mods & (Qt.ControlModifier | Qt.MetaModifier))
+            shift = bool(mods & Qt.ShiftModifier)
+            self._selection_callback(self, ctrl_or_cmd, shift)
+        super().mousePressEvent(event)
+
     def get_camera_rect(self):
         """Get current camera view rect."""
         return self.view.camera.rect
@@ -765,7 +881,23 @@ class TileWidget(QFrame):
         meta_action = menu.addAction("Show Info")
         meta_action.triggered.connect(self._show_metadata)
 
+        menu.addSeparator()
+
+        # Annotate (applies to the whole current multi-selection)
+        annotate_action = menu.addAction("Annotate...")
+        annotate_action.triggered.connect(self._annotate)
+
         menu.exec_(self.mapToGlobal(pos))
+
+    def _annotate(self):
+        """Right-click 'Annotate...': tag this tile, or the whole
+        selection if this tile is already part of it."""
+        viewer = self._parent_viewer
+        if viewer is None:
+            return
+        if self not in viewer.selected_tiles:
+            viewer._on_tile_selected(self, ctrl_or_cmd=False, shift=False)
+        viewer.annotate_selected_tiles()
 
     def _auto_contrast(self):
         """Apply auto-contrast to all channels."""
@@ -823,9 +955,6 @@ class TiledViewer(QMainWindow):
     Gallery view for multiple images with flow layout and pagination.
     """
 
-    # Maximum tiles per page options
-    TILES_PER_PAGE_OPTIONS = [25, 50, 100]
-
     # Mirrored onto the Workspace's persistent menu bar while docked
     # (see ui/workspace.py); format documented at window.MENU_SPEC.
     MENU_SPEC = [
@@ -837,9 +966,17 @@ class TiledViewer(QMainWindow):
             None,
             {"label": "Reorder Axes...", "method": "show_axes_dialog"},
         ]),
+        ("Annotate", [
+            {"label": "Annotate Selected...", "shortcut": "T", "method": "annotate_selected_tiles"},
+            None,
+            {"label": "Group by Category", "shortcut": "G", "method": "sort_by_annotation"},
+            None,
+            {"label": "Manage Categories...", "method": "show_manage_categories_dialog"},
+            {"label": "Annotation Stats...", "method": "show_annotation_stats"},
+        ]),
     ]
 
-    def __init__(self, image_paths, tiles_per_page=50, parent=None):
+    def __init__(self, image_paths, tiles_per_page=25, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
@@ -855,6 +992,8 @@ class TiledViewer(QMainWindow):
         self.channel_idx = 0
         self.z_projection = False
         self.z_proj_range = (0, 0)
+        self._proj_range_customized = False
+        self._updating_proj_range = False
 
         # Sync pan/zoom state
         self.sync_pan_zoom = False
@@ -872,6 +1011,21 @@ class TiledViewer(QMainWindow):
         self._current_dims = None
 
         self.tile_widgets = []
+        self.selected_tiles = []  # Multi-selection (Cmd/Ctrl+click, Shift+click)
+        self._selection_anchor = None  # Anchor tile for Shift+click range-select
+
+        # Folder-level annotations (filename -> category), persisted next
+        # to the common image directory. Colors are assigned to category
+        # names in first-seen order and kept stable for the session.
+        self.annotations = TileAnnotations(self._compute_common_dir(image_paths))
+        self._category_colors = {}
+        for category in self.annotations.categories():
+            self._category_color(category)
+
+        # A previously-persisted axes order (see reorder_axes) means this
+        # folder doesn't need Reorder Axes... re-applied on every reopen.
+        if self.annotations.dims:
+            self._current_dims = self.annotations.dims
 
         # Visual proxy for global channel settings
         self.visual_proxy = TiledVisualProxy(self)
@@ -879,9 +1033,169 @@ class TiledViewer(QMainWindow):
         # Channel panel (created lazily)
         self.channel_panel = None
 
+        # Annotation stats dock (created lazily)
+        self.annotation_stats_panel = None
+        self._annotation_stats_dock = None
+
         self._setup_ui()
         self._setup_menu()
         self._load_current_page()
+
+    @staticmethod
+    def _compute_common_dir(image_paths):
+        """Common parent directory of image_paths (anchors the annotation file)."""
+        dirs = [os.path.dirname(os.path.abspath(p)) for p in image_paths]
+        if not dirs:
+            return os.getcwd()
+        try:
+            return os.path.commonpath(dirs)
+        except ValueError:
+            # No common path (e.g. different drives on Windows) — fall
+            # back to the first image's own directory.
+            return dirs[0]
+
+    def _tile_relpath(self, tile):
+        return self.annotations.relpath(tile.file_path)
+
+    def _category_color(self, category):
+        """Hex color for category, assigned in first-seen order and
+        kept stable for the life of this viewer."""
+        if category not in self._category_colors:
+            index = len(self._category_colors)
+            rgba = get_distinct_color(index, alpha=1.0)
+            self._category_colors[category] = rgb_to_hex(rgba)
+        return self._category_colors[category]
+
+    def _refresh_tile_badge(self, tile):
+        if not tile.file_path:
+            return
+        category = self.annotations.get(self._tile_relpath(tile))
+        color = self._category_color(category) if category else None
+        tile.set_annotation(category, color)
+
+    def show_manage_categories_dialog(self):
+        """Add/rename/delete this folder's predefined category list."""
+        dlg = ManageCategoriesDialog(self.annotations, parent=self)
+        dlg.exec_()
+        # Colors are assigned in first-seen order over the vocabulary too,
+        # so a rename/delete/add can shift them — recompute from scratch.
+        self._category_colors = {}
+        for category in self.annotations.categories():
+            self._category_color(category)
+        for tile in self.tile_widgets:
+            self._refresh_tile_badge(tile)
+        self._refresh_annotation_stats()
+
+    def show_annotation_stats(self):
+        """Show (creating on first use) the per-category population stats
+        dock: count and percentage of the whole annotated folder, not just
+        the current page."""
+        if self.annotation_stats_panel is None:
+            panel = AnnotationStatsPanel(self)
+            dock = QDockWidget("Annotation Stats", self)
+            dock.setObjectName("annotation_stats_dock")
+            dock.setWidget(panel)
+            self.addDockWidget(Qt.RightDockWidgetArea, dock)
+            self.annotation_stats_panel = panel
+            self._annotation_stats_dock = dock
+        self._annotation_stats_dock.show()
+        self._annotation_stats_dock.raise_()
+        self._refresh_annotation_stats()
+
+    def _refresh_annotation_stats(self):
+        if (
+            self.annotation_stats_panel is not None
+            and self._annotation_stats_dock.isVisible()
+        ):
+            self.annotation_stats_panel.refresh(
+                self.annotations, len(self.image_paths)
+            )
+
+    def annotate_selected_tiles(self):
+        """Prompt for a category and apply it to every selected tile.
+
+        The picker only offers this folder's predefined category
+        vocabulary (see ManageCategoriesDialog) — no free text entry —
+        so a typo or stray space can't silently create a near-duplicate
+        category.
+        """
+        tiles = self.selected_tiles
+        if not tiles:
+            return
+
+        items = [""] + self.annotations.categories()
+        current = (
+            self.annotations.get(self._tile_relpath(tiles[0])) or ""
+            if len(tiles) == 1
+            else ""
+        )
+        if current and current not in items:
+            # Tile is tagged with a category no longer in the vocabulary
+            # (e.g. removed via Manage Categories) — keep it selectable
+            # so re-annotating doesn't silently blank an existing tag.
+            items.append(current)
+        start_idx = items.index(current) if current in items else 0
+
+        if not self.annotations.categories():
+            QMessageBox.information(
+                self,
+                "Annotate",
+                "No categories defined yet. Use Annotate > Manage "
+                "Categories... to add some first.",
+            )
+            return
+
+        if len(tiles) == 1:
+            prompt = f"Category for {Path(tiles[0].file_path).name}:"
+        else:
+            prompt = f"Category for {len(tiles)} images:"
+
+        text, ok = QInputDialog.getItem(
+            self, "Annotate", prompt, items, start_idx, editable=False
+        )
+        if not ok:
+            return
+
+        category = text.strip()
+        self.annotations.update(
+            (self._tile_relpath(tile), category) for tile in tiles
+        )
+        for tile in tiles:
+            self._refresh_tile_badge(tile)
+        self._update_status()
+        self._refresh_annotation_stats()
+
+    def sort_by_annotation(self):
+        """Rearrange the current page's tiles so tiles sharing the same
+        category — including un-annotated, grouped first — sit in one
+        contiguous block (stable order within each group).
+
+        A page never holds more than 100 tiles (see per_page_spin's
+        range), so a full re-sort on every call is cheap. Grouping by
+        category (not just isolating un-annotated) cuts visual clutter
+        while annotating: same-category tiles end up next to each other
+        instead of scattered across the grid.
+        """
+        if not self.tile_widgets:
+            return
+
+        def category_key(tile):
+            if not tile.file_path:
+                return ""
+            return self.annotations.get(self._tile_relpath(tile)) or ""
+
+        # Stable sort: "" (un-annotated) sorts first, then categories
+        # alphabetically; ties keep their original relative order.
+        new_order = sorted(self.tile_widgets, key=category_key)
+        if new_order == self.tile_widgets:
+            return
+
+        for tile in self.tile_widgets:
+            self.flow_layout.removeWidget(tile)
+        for tile in new_order:
+            self.flow_layout.addWidget(tile)
+        self.tile_widgets = new_order
+        self.flow_container.adjustSize()
 
     def _setup_ui(self):
         self.setWindowTitle(f"Tiled Viewer - {len(self.image_paths)} images")
@@ -919,19 +1233,16 @@ class TiledViewer(QMainWindow):
 
         # Tiles per page
         toolbar1_layout.addWidget(QLabel("Tiles/page:"))
-        self.per_page_combo = QComboBox()
-        for n in self.TILES_PER_PAGE_OPTIONS:
-            self.per_page_combo.addItem(str(n), n)
-        idx = (
-            self.TILES_PER_PAGE_OPTIONS.index(self.tiles_per_page)
-            if self.tiles_per_page in self.TILES_PER_PAGE_OPTIONS
-            else 1
-        )
-        self.per_page_combo.setCurrentIndex(idx)
-        self.per_page_combo.currentIndexChanged.connect(
-            self._on_per_page_changed
-        )
-        toolbar1_layout.addWidget(self.per_page_combo)
+        self.per_page_spin = QSpinBox()
+        self.per_page_spin.setRange(1, 100)
+        self.per_page_spin.setValue(self.tiles_per_page)
+        self.per_page_spin.setFixedWidth(70)
+        # Don't reload on every keystroke while typing a number — only on
+        # Enter/focus-out or arrow-button clicks (same convention as the
+        # min/max spinboxes in ChannelRow).
+        self.per_page_spin.setKeyboardTracking(False)
+        self.per_page_spin.valueChanged.connect(self._on_per_page_changed)
+        toolbar1_layout.addWidget(self.per_page_spin)
 
         toolbar1_layout.addSpacing(20)
 
@@ -1116,8 +1427,6 @@ class TiledViewer(QMainWindow):
 
     def show_axes_dialog(self):
         """Show dialog to reorder axes for ambiguous TIFF dimensions."""
-        from qtpy.QtWidgets import QMessageBox
-
         # Find a tile with raw_shape metadata
         raw_shape = None
         for tile in self.tile_widgets:
@@ -1145,18 +1454,26 @@ class TiledViewer(QMainWindow):
         Args:
             dims: Dimension string (e.g., 'tyx', 'zyx', 'zcyx', 'tzyx')
         """
-        # Store the dims for future page loads
+        # Store the dims for future page loads, and persist so reopening
+        # this same folder doesn't need Reorder Axes... applied again.
         self._current_dims = dims
+        self.annotations.set_dims(dims)
 
         # Reload all current tiles with the new dimension ordering
         for tile in self.tile_widgets:
             if tile.file_path:
                 tile.unload()
                 tile.load(tile.file_path, dims=dims)
-                self.visual_proxy.apply_settings_to_tile(tile)
 
-        # Update dimension controls based on reloaded images
+        # Update dimension controls (incl. visual_proxy's channel count)
+        # based on the *reloaded* images before syncing per-channel
+        # settings — otherwise a channel-count change (e.g. Z <-> C) means
+        # apply_settings_to_tile below sees the stale, too-small channel
+        # count and silently skips the new channels.
         self._update_dimension_controls()
+
+        for tile in self.tile_widgets:
+            self.visual_proxy.apply_settings_to_tile(tile)
 
         # Apply current global settings (mode, z-slice, etc.)
         self._apply_global_settings()
@@ -1183,9 +1500,65 @@ class TiledViewer(QMainWindow):
         """Update status bar."""
         start = self.current_page * self.tiles_per_page + 1
         end = min(start + len(self.tile_widgets) - 1, len(self.image_paths))
-        self.status_label.setText(
-            f"Showing {start}-{end} of {len(self.image_paths)} images"
-        )
+        text = f"Showing {start}-{end} of {len(self.image_paths)} images"
+        if len(self.selected_tiles) == 1 and self.selected_tiles[0].file_path:
+            text += f"   |   Selected: {Path(self.selected_tiles[0].file_path).name}"
+        elif len(self.selected_tiles) > 1:
+            text += f"   |   Selected: {len(self.selected_tiles)} images"
+        self.status_label.setText(text)
+
+    def _select_tile(self, tile, extend=False):
+        """Select a tile, optionally extending the current selection."""
+        if not extend:
+            self._clear_selection()
+        if tile not in self.selected_tiles:
+            self.selected_tiles.append(tile)
+            tile.set_selected(True)
+
+    def _deselect_tile(self, tile):
+        """Remove a tile from the current selection."""
+        if tile in self.selected_tiles:
+            self.selected_tiles.remove(tile)
+            tile.set_selected(False)
+
+    def _clear_selection(self):
+        """Deselect all currently selected tiles."""
+        for tile in self.selected_tiles:
+            tile.set_selected(False)
+        self.selected_tiles.clear()
+
+    def _on_tile_selected(self, tile, ctrl_or_cmd=False, shift=False):
+        """Handle a tile click.
+
+        Plain click: single-select. Cmd/Ctrl+click: toggle this tile in/out
+        of the selection. Shift+click: select the contiguous range between
+        the last anchor tile and this one (grid order).
+        """
+        if shift and self._selection_anchor is not None:
+            self._select_range(self._selection_anchor, tile)
+        elif ctrl_or_cmd:
+            if tile in self.selected_tiles:
+                self._deselect_tile(tile)
+            else:
+                self._select_tile(tile, extend=True)
+            self._selection_anchor = tile
+        else:
+            self._select_tile(tile, extend=False)
+            self._selection_anchor = tile
+        self._update_status()
+
+    def _select_range(self, anchor, tile):
+        """Select the contiguous range of tiles between anchor and tile."""
+        if anchor not in self.tile_widgets or tile not in self.tile_widgets:
+            self._select_tile(tile, extend=False)
+            return
+        i0 = self.tile_widgets.index(anchor)
+        i1 = self.tile_widgets.index(tile)
+        lo, hi = min(i0, i1), max(i0, i1)
+        self._clear_selection()
+        for t in self.tile_widgets[lo : hi + 1]:
+            self.selected_tiles.append(t)
+            t.set_selected(True)
 
     def _update_dimension_controls(self):
         """Update dimension sliders based on loaded tiles."""
@@ -1218,9 +1591,32 @@ class TiledViewer(QMainWindow):
         if max_Z > 1:
             self.z_slider.setRange(0, max_Z - 1)
             self.z_slider.setValue(min(self.z_idx, max_Z - 1))
+
+            # Preserve the user's chosen projection range (clamped to the
+            # new extent) instead of forcing it back to full range on
+            # every page/reorder — same "keep current value" treatment
+            # the T/Z/channel sliders above already get. Only default to
+            # the full range until the user has actually customized it.
+            # Computed *before* touching proj_range_slider below: even
+            # setRange() alone synchronously emits valueChanged (clamping
+            # the old value into the new bounds), which would otherwise
+            # corrupt self.z_proj_range/_proj_range_customized before we
+            # get a chance to read them.
+            if not self._proj_range_customized:
+                clamped_range = (0, max_Z - 1)
+            else:
+                clamped_range = (
+                    min(self.z_proj_range[0], max_Z - 1),
+                    min(self.z_proj_range[1], max_Z - 1),
+                )
+            # Guard flag: both setRange() and setValue() below can emit
+            # valueChanged; neither must be mistaken by
+            # _on_proj_range_changed for the user customizing the range.
+            self._updating_proj_range = True
             self.proj_range_slider.setRange(0, max_Z - 1)
-            self.proj_range_slider.setValue((0, max_Z - 1))
-            self.z_proj_range = (0, max_Z - 1)
+            self.proj_range_slider.setValue(clamped_range)
+            self._updating_proj_range = False
+            self.z_proj_range = clamped_range
             self.z_widget.setVisible(True)
         else:
             self.z_widget.setVisible(False)
@@ -1258,27 +1654,37 @@ class TiledViewer(QMainWindow):
             )
 
     def _load_current_page(self):
-        """Load tiles for current page."""
-        # Clear existing tiles
-        self._clear_tiles()
+        """Load tiles for current page.
 
-        # Calculate slice
+        Reuses existing ``TileWidget``s (and their vispy GL contexts)
+        wherever possible instead of destroying and recreating them —
+        see ``_resize_tile_pool`` for why that matters.
+        """
         start = self.current_page * self.tiles_per_page
         end = min(start + self.tiles_per_page, len(self.image_paths))
+        page_paths = self.image_paths[start:end]
 
-        # Create and load tiles
-        for path in self.image_paths[start:end]:
-            tile = TileWidget(self.tile_size, parent=self)
-            tile.set_show_info(self.show_info)
-            tile.set_camera_callback(self._on_tile_camera_changed)
+        self._resize_tile_pool(len(page_paths))
+
+        for tile, path in zip(self.tile_widgets, page_paths):
+            tile.unload()
             tile.load(path, dims=self._current_dims)
-            # Apply global visual settings (colormap, gamma, visibility)
-            self.visual_proxy.apply_settings_to_tile(tile)
-            self.flow_layout.addWidget(tile)
-            self.tile_widgets.append(tile)
+            self._refresh_tile_badge(tile)
 
-        # Update dimension controls based on loaded images
+        # Tile identity may no longer match what's on screen (different
+        # page/count), so any prior selection no longer means anything.
+        self._clear_selection()
+        self._selection_anchor = None
+
+        # Update dimension controls (incl. visual_proxy's channel count)
+        # before applying per-channel settings below — see reorder_axes
+        # for why this ordering matters.
         self._update_dimension_controls()
+
+        # Apply global visual settings (colormap, gamma, visibility, and
+        # any explicitly-customized clim) to each newly loaded tile.
+        for tile in self.tile_widgets:
+            self.visual_proxy.apply_settings_to_tile(tile)
 
         # Apply current global settings (mode, z-slice, etc.)
         self._apply_global_settings()
@@ -1294,13 +1700,59 @@ class TiledViewer(QMainWindow):
         # Force layout update
         self.flow_container.adjustSize()
 
+    def _resize_tile_pool(self, n_needed):
+        """Grow/shrink ``self.tile_widgets`` to exactly ``n_needed`` tiles.
+
+        Each tile owns a vispy ``SceneCanvas``, i.e. its own native GL
+        context. Destroying and recreating all of them on *every* page
+        flip or tiles-per-page change churns GL contexts fast enough
+        that macOS's leak detector fires ("Context leak detected,
+        CoreAnalytics returned false") and — this is the real problem,
+        the log line is just the symptom — process RSS climbs steadily
+        with each churn and never comes back down, even though nothing
+        is leaked on the Python side (`deleteLater()` + forcing the
+        posted `DeferredDelete` events to run immediately doesn't help
+        either; the leaked resource is the native GL context itself).
+        Reusing tiles across page loads sidesteps this: for plain
+        prev/next navigation (constant tiles_per_page) it creates zero
+        new contexts after the first page.
+        """
+        if len(self.tile_widgets) > n_needed:
+            surplus = self.tile_widgets[n_needed:]
+            self.tile_widgets = self.tile_widgets[:n_needed]
+            for tile in surplus:
+                tile.unload()
+                tile.canvas.close()
+                self.flow_layout.removeWidget(tile)
+                tile.deleteLater()
+            # Force the deferred deletions to run now rather than
+            # whenever Qt next goes idle, so a shrink immediately
+            # followed by a grow (e.g. tiles-per-page 20 -> 4 -> 20)
+            # doesn't pile up several pages' worth of unreleased
+            # contexts before any of them are actually freed.
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            QApplication.processEvents()
+
+        while len(self.tile_widgets) < n_needed:
+            tile = TileWidget(self.tile_size, parent=self)
+            tile.set_show_info(self.show_info)
+            tile.set_camera_callback(self._on_tile_camera_changed)
+            tile.set_selection_callback(self._on_tile_selected)
+            self.flow_layout.addWidget(tile)
+            self.tile_widgets.append(tile)
+
     def _clear_tiles(self):
-        """Remove and unload all current tiles."""
+        """Remove and unload all current tiles (full teardown, e.g. on close)."""
         for tile in self.tile_widgets:
             tile.unload()
+            tile.canvas.close()
             self.flow_layout.removeWidget(tile)
             tile.deleteLater()
         self.tile_widgets.clear()
+        self.selected_tiles = []
+        self._selection_anchor = None
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        QApplication.processEvents()
 
     def _prev_page(self):
         """Go to previous page."""
@@ -1314,9 +1766,9 @@ class TiledViewer(QMainWindow):
             self.current_page += 1
             self._load_current_page()
 
-    def _on_per_page_changed(self, index):
+    def _on_per_page_changed(self, value):
         """Handle tiles per page change."""
-        self.tiles_per_page = self.per_page_combo.currentData()
+        self.tiles_per_page = value
         # Reset to first page and reload
         self.current_page = 0
         self._load_current_page()
@@ -1369,7 +1821,10 @@ class TiledViewer(QMainWindow):
 
     def _on_proj_range_changed(self, value):
         """Handle projection range slider change."""
+        if self._updating_proj_range:
+            return
         self.z_proj_range = value
+        self._proj_range_customized = True
         self.proj_range_label.setText(f"{value[0]}-{value[1]}")
         if self.z_projection:
             self._apply_global_settings()
@@ -1473,6 +1928,12 @@ class TiledViewer(QMainWindow):
             self.sync_panzoom_check.setChecked(
                 not self.sync_panzoom_check.isChecked()
             )
+        elif key == Qt.Key_T:
+            # Annotate current selection
+            self.annotate_selected_tiles()
+        elif key == Qt.Key_G:
+            # Group un-annotated tiles into one contiguous block
+            self.sort_by_annotation()
         else:
             super().keyPressEvent(event)
 
@@ -1482,13 +1943,13 @@ class TiledViewer(QMainWindow):
         super().closeEvent(event)
 
 
-def open_tiled_viewer(image_paths, tiles_per_page=50):
+def open_tiled_viewer(image_paths, tiles_per_page=25):
     """
     Convenience function to open a tiled viewer.
 
     Args:
         image_paths: List of image file paths
-        tiles_per_page: Maximum tiles per page (default 50)
+        tiles_per_page: Maximum tiles per page (default 25)
 
     Returns:
         TiledViewer instance

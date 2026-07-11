@@ -7,6 +7,7 @@ from .proxies import (
     Numpy5DProxy,
     Zarr5DProxy,
 )
+from .annotations import TileAnnotations
 from .buffer import ImageBuffer
 from .points import PointTable
 from .tracks import TrackTable
@@ -28,6 +29,7 @@ __all__ = [
     "Imaris5DProxy",
     "Numpy5DProxy",
     "Zarr5DProxy",
+    "TileAnnotations",
     "ImageBuffer",
     "PointTable",
     "TrackTable",
