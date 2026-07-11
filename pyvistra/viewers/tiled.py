@@ -51,6 +51,7 @@ from ..widgets import ChannelPanel, ChannelRow, show_channel_dock
 from ..widgets.annotation_stats_panel import AnnotationStatsPanel
 from ..widgets.axes_dialog import AxesDialog
 from ..widgets.manage_categories_dialog import ManageCategoriesDialog
+from ..widgets.thumbnail_grid import ThumbnailGridWidget
 
 
 def _readable_text_color(hex_color):
@@ -109,6 +110,9 @@ class TiledVisualProxy:
         self._custom_clim = {c for c in self._custom_clim if c < max_c}
 
     def _on_display_changed(self, channel_idx, field):
+        if self.viewer._fast_mode:
+            self.viewer.thumbnail_grid.invalidate_pixmaps()
+            return
         state = self.display[channel_idx]
         for renderer in self._get_tile_renderers():
             if channel_idx >= len(renderer.layers):
@@ -129,6 +133,14 @@ class TiledVisualProxy:
             self.display[c].display_color() or self._NEUTRAL_SWATCH
             for c in range(len(self.display))
         ]
+
+    @property
+    def custom_clim(self):
+        """Live ``set[int]`` of channel indices explicitly overridden via
+        the global panel. Mutating it in place (e.g. ``.clear()``) is
+        how ``TiledViewer``'s fast-mode "Auto Contrast All" reverts
+        every channel back to per-image auto-contrast."""
+        return self._custom_clim
 
     def _get_tile_renderers(self):
         """Get all renderers from loaded tiles."""
@@ -955,6 +967,14 @@ class TiledViewer(QMainWindow):
     Gallery view for multiple images with flow layout and pagination.
     """
 
+    # Above this per-file size, a folder uses the general-purpose
+    # per-tile vispy rendering (per-tile pan/zoom, per-tile live
+    # contrast). At or below it, every file in the folder is cheap
+    # enough to decode+cache in memory, so the folder is rendered
+    # through the fast pure-Qt ThumbnailGridWidget instead (see
+    # _detect_fast_mode) -- no per-tile GL context, instant paging/sort.
+    FAST_MODE_MAX_BYTES = 512 * 1024
+
     # Mirrored onto the Workspace's persistent menu bar while docked
     # (see ui/workspace.py); format documented at window.MENU_SPEC.
     MENU_SPEC = [
@@ -984,6 +1004,10 @@ class TiledViewer(QMainWindow):
         self.tiles_per_page = tiles_per_page
         self.current_page = 0
         self.tile_size = 200  # Default tile size in pixels
+
+        # Decided once, up front: every downstream method branches on
+        # this instead of inspecting file sizes again.
+        self._fast_mode = self._detect_fast_mode(image_paths)
 
         # Global view state
         self.t_idx = 0
@@ -1042,6 +1066,22 @@ class TiledViewer(QMainWindow):
         self._load_current_page()
 
     @staticmethod
+    def _detect_fast_mode(image_paths):
+        """True if every file is small enough for the fast thumbnail
+        grid (see FAST_MODE_MAX_BYTES). A folder mixing one huge file
+        into a pile of thumbnails falls back to the general vispy path
+        for all of it -- simpler than mixing two render paths."""
+        if not image_paths:
+            return False
+        try:
+            return all(
+                os.path.getsize(p) <= TiledViewer.FAST_MODE_MAX_BYTES
+                for p in image_paths
+            )
+        except OSError:
+            return False
+
+    @staticmethod
     def _compute_common_dir(image_paths):
         """Common parent directory of image_paths (anchors the annotation file)."""
         dirs = [os.path.dirname(os.path.abspath(p)) for p in image_paths]
@@ -1072,6 +1112,55 @@ class TiledViewer(QMainWindow):
         category = self.annotations.get(self._tile_relpath(tile))
         color = self._category_color(category) if category else None
         tile.set_annotation(category, color)
+
+    def _refresh_fast_badges(self):
+        """Rebuild the whole folder's path -> (category, color) map and
+        push it to the thumbnail grid. Cheap: just dict lookups over
+        already-loaded annotations, no file I/O."""
+        badges = {}
+        for path in self.image_paths:
+            category = self.annotations.get(self.annotations.relpath(path))
+            if category:
+                badges[path] = (category, self._category_color(category))
+        self.thumbnail_grid.set_annotations(badges)
+
+    def _update_fast_dimension_controls(self):
+        """Fast-mode counterpart to _update_dimension_controls: only
+        max_C matters (no per-tile T/Z/mode sliders), and it can only
+        grow as more images finish decoding in the background."""
+        max_c = self.thumbnail_grid.max_channels()
+        if max_c > self.max_C:
+            self.max_C = max_c
+        self.visual_proxy.update_max_channels(self.max_C)
+        self.thumbnail_grid.set_channel_display(
+            self.visual_proxy.display, self.visual_proxy.custom_clim
+        )
+        if self.channel_panel is not None and self.channel_panel.isVisible():
+            self.channel_panel.refresh_ui()
+
+    def _on_fast_selection_changed(self, paths):
+        self._update_status()
+
+    def _on_fast_thumbnail_decoded(self, path):
+        self._update_fast_dimension_controls()
+
+    def _fast_open_in_viewer(self, path):
+        """Fast-mode "Open in Viewer": full ImageWindow for per-pixel
+        inspection, mirroring TileWidget._open_in_viewer."""
+        from ..ui import ImageWindow
+        from ..ui.workspace import present_window
+
+        present_window(ImageWindow(path))
+
+    def _fast_show_metadata(self, path):
+        """Fast-mode "Show Info": the decode cache only keeps the small
+        plane + channel metadata, not the full metadata dict, so this
+        re-reads it on demand (cheap -- these are small files)."""
+        from ..widgets import MetadataDialog
+
+        _, meta = load_image(path, dims=self._current_dims)
+        dlg = MetadataDialog(meta, parent=self)
+        dlg.exec_()
 
     def show_manage_categories_dialog(self):
         """Add/rename/delete this folder's predefined category list."""
@@ -1119,14 +1208,17 @@ class TiledViewer(QMainWindow):
         so a typo or stray space can't silently create a near-duplicate
         category.
         """
-        tiles = self.selected_tiles
-        if not tiles:
+        if self._fast_mode:
+            paths = self.thumbnail_grid.selected_paths
+        else:
+            paths = [tile.file_path for tile in self.selected_tiles]
+        if not paths:
             return
 
         items = [""] + self.annotations.categories()
         current = (
-            self.annotations.get(self._tile_relpath(tiles[0])) or ""
-            if len(tiles) == 1
+            self.annotations.get(self.annotations.relpath(paths[0])) or ""
+            if len(paths) == 1
             else ""
         )
         if current and current not in items:
@@ -1145,10 +1237,10 @@ class TiledViewer(QMainWindow):
             )
             return
 
-        if len(tiles) == 1:
-            prompt = f"Category for {Path(tiles[0].file_path).name}:"
+        if len(paths) == 1:
+            prompt = f"Category for {Path(paths[0]).name}:"
         else:
-            prompt = f"Category for {len(tiles)} images:"
+            prompt = f"Category for {len(paths)} images:"
 
         text, ok = QInputDialog.getItem(
             self, "Annotate", prompt, items, start_idx, editable=False
@@ -1158,10 +1250,13 @@ class TiledViewer(QMainWindow):
 
         category = text.strip()
         self.annotations.update(
-            (self._tile_relpath(tile), category) for tile in tiles
+            (self.annotations.relpath(p), category) for p in paths
         )
-        for tile in tiles:
-            self._refresh_tile_badge(tile)
+        if self._fast_mode:
+            self._refresh_fast_badges()
+        else:
+            for tile in self.selected_tiles:
+                self._refresh_tile_badge(tile)
         self._update_status()
         self._refresh_annotation_stats()
 
@@ -1176,6 +1271,19 @@ class TiledViewer(QMainWindow):
         while annotating: same-category tiles end up next to each other
         instead of scattered across the grid.
         """
+        if self._fast_mode:
+            paths = self.thumbnail_grid.paths
+            if not paths:
+                return
+
+            def path_category_key(path):
+                return self.annotations.get(self.annotations.relpath(path)) or ""
+
+            new_order = sorted(paths, key=path_category_key)
+            if new_order != paths:
+                self.thumbnail_grid.set_order(new_order)
+            return
+
         if not self.tile_widgets:
             return
 
@@ -1386,6 +1494,12 @@ class TiledViewer(QMainWindow):
         toolbar2_layout.addStretch()
 
         main_layout.addWidget(toolbar2)
+        if self._fast_mode:
+            # Mode/channel/time/Z sliders and per-tile pan/zoom sync
+            # don't apply to a flat thumbnail grid -- "Auto Contrast
+            # All" and "Reorder Axes..." remain reachable via the menu
+            # bar / keyboard shortcuts regardless of this row's visibility.
+            toolbar2.setVisible(False)
 
         # Scroll area for tiles
         self.scroll_area = QScrollArea()
@@ -1393,10 +1507,32 @@ class TiledViewer(QMainWindow):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
-        # Container with flow layout
-        self.flow_container = QWidget()
-        self.flow_layout = FlowLayout(self.flow_container, spacing=0)
-        self.scroll_area.setWidget(self.flow_container)
+        if self._fast_mode:
+            self.thumbnail_grid = ThumbnailGridWidget()
+            self.thumbnail_grid.set_tile_size(self.tile_size)
+            self.thumbnail_grid.set_show_info(self.show_info)
+            self.thumbnail_grid.selectionChanged.connect(
+                self._on_fast_selection_changed
+            )
+            self.thumbnail_grid.annotateRequested.connect(
+                self.annotate_selected_tiles
+            )
+            self.thumbnail_grid.openInViewerRequested.connect(
+                self._fast_open_in_viewer
+            )
+            self.thumbnail_grid.showInfoRequested.connect(
+                self._fast_show_metadata
+            )
+            self.thumbnail_grid.decoded.connect(self._on_fast_thumbnail_decoded)
+            self.scroll_area.setWidget(self.thumbnail_grid)
+            self.flow_container = None
+            self.flow_layout = None
+        else:
+            # Container with flow layout
+            self.flow_container = QWidget()
+            self.flow_layout = FlowLayout(self.flow_container, spacing=0)
+            self.scroll_area.setWidget(self.flow_container)
+            self.thumbnail_grid = None
 
         main_layout.addWidget(self.scroll_area, 1)
 
@@ -1427,12 +1563,18 @@ class TiledViewer(QMainWindow):
 
     def show_axes_dialog(self):
         """Show dialog to reorder axes for ambiguous TIFF dimensions."""
-        # Find a tile with raw_shape metadata
         raw_shape = None
-        for tile in self.tile_widgets:
-            if tile.meta and "raw_shape" in tile.meta:
-                raw_shape = tile.meta["raw_shape"]
-                break
+        if self._fast_mode:
+            for path in self.thumbnail_grid.paths:
+                _, meta = load_image(path, dims=self._current_dims)
+                if meta and "raw_shape" in meta:
+                    raw_shape = meta["raw_shape"]
+                    break
+        else:
+            for tile in self.tile_widgets:
+                if tile.meta and "raw_shape" in tile.meta:
+                    raw_shape = tile.meta["raw_shape"]
+                    break
 
         if raw_shape is None:
             QMessageBox.information(
@@ -1458,6 +1600,14 @@ class TiledViewer(QMainWindow):
         # this same folder doesn't need Reorder Axes... applied again.
         self._current_dims = dims
         self.annotations.set_dims(dims)
+
+        if self._fast_mode:
+            # Every already-decoded plane was parsed under the old axis
+            # order -- wipe the cache and re-decode the current page
+            # under the new one.
+            self.thumbnail_grid.clear_decode_cache()
+            self._load_current_page()
+            return
 
         # Reload all current tiles with the new dimension ordering
         for tile in self.tile_widgets:
@@ -1499,6 +1649,18 @@ class TiledViewer(QMainWindow):
     def _update_status(self):
         """Update status bar."""
         start = self.current_page * self.tiles_per_page + 1
+        if self._fast_mode:
+            n_shown = len(self.thumbnail_grid.paths)
+            end = min(start + n_shown - 1, len(self.image_paths))
+            text = f"Showing {start}-{end} of {len(self.image_paths)} images"
+            selected = self.thumbnail_grid.selected_paths
+            if len(selected) == 1:
+                text += f"   |   Selected: {Path(selected[0]).name}"
+            elif len(selected) > 1:
+                text += f"   |   Selected: {len(selected)} images"
+            self.status_label.setText(text)
+            return
+
         end = min(start + len(self.tile_widgets) - 1, len(self.image_paths))
         text = f"Showing {start}-{end} of {len(self.image_paths)} images"
         if len(self.selected_tiles) == 1 and self.selected_tiles[0].file_path:
@@ -1664,6 +1826,10 @@ class TiledViewer(QMainWindow):
         end = min(start + self.tiles_per_page, len(self.image_paths))
         page_paths = self.image_paths[start:end]
 
+        if self._fast_mode:
+            self._load_current_page_fast(page_paths)
+            return
+
         self._resize_tile_pool(len(page_paths))
 
         for tile, path in zip(self.tile_widgets, page_paths):
@@ -1699,6 +1865,29 @@ class TiledViewer(QMainWindow):
 
         # Force layout update
         self.flow_container.adjustSize()
+
+    def _load_current_page_fast(self, page_paths):
+        """Fast-mode page load.
+
+        ``ThumbnailGridWidget.set_items`` only changes what's laid
+        out/selectable -- its ``DecodeCache`` is a separate, long-lived
+        object that isn't touched here, so a page revisited later is
+        served from cache instead of re-decoding.
+        """
+        self.thumbnail_grid.set_items(page_paths, dims=self._current_dims)
+
+        # Decode the current page first, then the rest of the folder in
+        # the background so paging around later tends to already be warm.
+        page_set = set(page_paths)
+        priority = page_paths + [
+            p for p in self.image_paths if p not in page_set
+        ]
+        self.thumbnail_grid.set_priority(priority)
+
+        self._refresh_fast_badges()
+        self._update_fast_dimension_controls()
+        self._update_page_controls()
+        self._update_status()
 
     def _resize_tile_pool(self, n_needed):
         """Grow/shrink ``self.tile_widgets`` to exactly ``n_needed`` tiles.
@@ -1778,6 +1967,10 @@ class TiledViewer(QMainWindow):
         self.tile_size = value
         self.size_label.setText(f"{value}px")
 
+        if self._fast_mode:
+            self.thumbnail_grid.set_tile_size(value)
+            return
+
         for tile in self.tile_widgets:
             tile.set_tile_size(value)
 
@@ -1830,18 +2023,33 @@ class TiledViewer(QMainWindow):
             self._apply_global_settings()
 
     def _auto_contrast_all(self):
-        """Apply auto-contrast to all visible tiles."""
+        """Apply auto-contrast to all visible tiles.
+
+        In fast mode, every image's own per-image auto-contrast is
+        already its default clim (baked in at decode time) -- so this
+        just reverts any explicit global-panel overrides back to that
+        default and recomposites.
+        """
+        if self._fast_mode:
+            self.visual_proxy.custom_clim.clear()
+            self.thumbnail_grid.invalidate_pixmaps()
+            return
         for tile in self.tile_widgets:
             tile._auto_contrast()
 
     def _reset_all_views(self):
         """Reset view (fit image) for all tiles."""
+        if self._fast_mode:
+            return  # no per-tile camera in the fast grid
         for tile in self.tile_widgets:
             tile._fit_view()
 
     def _on_show_info_toggled(self, checked):
         """Handle show info checkbox toggle."""
         self.show_info = checked
+        if self._fast_mode:
+            self.thumbnail_grid.set_show_info(checked)
+            return
         for tile in self.tile_widgets:
             tile.set_show_info(checked)
         # Trigger reflow
@@ -1939,6 +2147,8 @@ class TiledViewer(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up on close."""
+        if self._fast_mode:
+            self.thumbnail_grid.close()
         self._clear_tiles()
         super().closeEvent(event)
 

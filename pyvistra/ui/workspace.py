@@ -35,7 +35,7 @@ reliably re-sync the underlying NSMenu, so a "hidden" menu can keep
 showing — and stay clickable — after the active tab changes.
 """
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QKeySequence
 from qtpy.QtWidgets import (
     QAction,
@@ -115,6 +115,14 @@ class _TabGroup(QTabWidget):
         self.setDocumentMode(True)
         self.tabCloseRequested.connect(self._close_tab)
         self.currentChanged.connect(self._activate_current)
+        # currentChanged does not fire when the clicked tab is already
+        # the current one in its group -- exactly what happens with two
+        # single-tab groups side by side after a split. Without this,
+        # clicking the "other" group's tab leaves the workspace's
+        # notion of the active tab (and manager.active_window) stuck on
+        # whichever tab last actually changed, so menu actions dispatch
+        # to the wrong window.
+        self.tabBar().tabBarClicked.connect(self._activate_current)
         self.tabBar().setContextMenuPolicy(Qt.CustomContextMenu)
         self.tabBar().customContextMenuRequested.connect(self._tab_menu)
 
@@ -297,6 +305,16 @@ class Workspace(QMainWindow):
             }
             for action in window._docked_menu_shortcuts:
                 action.setShortcut(QKeySequence())
+            # Force the viewer's own menu bar off the native top-of-screen
+            # bar permanently (not just hidden) before hiding it. A native
+            # QMenuBar's visibility toggling doesn't reliably resync the
+            # underlying NSMenu on macOS -- the same class of bug the
+            # class docstring documents for the mirrored workspace bar --
+            # so re-showing it later in float_window() can leave the
+            # floated window with no visible menu at all. Once non-native
+            # it renders as a plain in-window widget, whose visibility
+            # toggles exactly as reliably as any other widget.
+            window.menuBar().setNativeMenuBar(False)
             window.menuBar().setVisible(False)
         group = self._active_group()
         group.addTab(window, title or window.windowTitle() or "Image")
@@ -336,6 +354,21 @@ class Workspace(QMainWindow):
         window.setParent(None)
         window.show()
         window.raise_()
+        # Reparenting out of the tab group back to a real top-level window
+        # can leave QMainWindowLayout (and children that only recompute on
+        # an actual geometry change, e.g. vispy's canvas backend) holding
+        # sizes computed for the old embedded geometry -- nothing relayouts
+        # until the user manually drags an edge. Defer a same-size nudge to
+        # the next event-loop tick (after the OS has assigned the new
+        # top-level window's real frame) so both the Qt layout and the
+        # canvas recompute immediately instead of waiting on a manual
+        # resize.
+        def _nudge_size():
+            size = window.size()
+            window.resize(size.width() + 1, size.height())
+            window.resize(size)
+
+        QTimer.singleShot(0, _nudge_size)
         self._collapse_empty_groups()
 
     def _drop_tab(self, window):

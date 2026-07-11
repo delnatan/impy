@@ -31,32 +31,39 @@ class AnnotationStatsPanel(QWidget):
 
     def refresh(self, annotations, total_count):
         """Rebuild the table from `annotations` (a TileAnnotations) against
-        `total_count` images total (un-annotated = total_count - tagged)."""
+        `total_count` images total (un-annotated = total_count - tagged).
+        Percentages are of the tagged (classified) total, not of
+        `total_count` — the "Un-annotated" row has no percentage."""
         counts = {}
         for category in annotations.values():
             counts[category] = counts.get(category, 0) + 1
-        untagged = max(total_count - sum(counts.values()), 0)
+        tagged_total = sum(counts.values())
+        untagged = max(total_count - tagged_total, 0)
 
         vocabulary = annotations.categories()
-        rows = [("Un-annotated", untagged)]
-        rows += [(name, counts.get(name, 0)) for name in vocabulary]
+        rows = [("Un-annotated", untagged, False)]
+        rows += [(name, counts.get(name, 0), True) for name in vocabulary]
         # Categories still in use but no longer in the vocabulary (e.g.
         # removed via Manage Categories) still deserve a row.
         rows += [
-            (name, count)
+            (name, count, True)
             for name, count in counts.items()
             if name not in vocabulary
         ]
 
         self.table.setRowCount(len(rows))
-        for r, (name, count) in enumerate(rows):
-            pct = (count / total_count * 100) if total_count else 0.0
+        for r, (name, count, has_pct) in enumerate(rows):
             self.table.setItem(r, 0, QTableWidgetItem(name))
 
             count_item = QTableWidgetItem(str(count))
             count_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(r, 1, count_item)
 
-            pct_item = QTableWidgetItem(f"{pct:.1f}%")
+            if has_pct:
+                pct = (count / tagged_total * 100) if tagged_total else 0.0
+                pct_text = f"{pct:.1f}%"
+            else:
+                pct_text = "–"
+            pct_item = QTableWidgetItem(pct_text)
             pct_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(r, 2, pct_item)
