@@ -65,9 +65,14 @@ def compute_percentile_clim(plane, pct_low=0.5, pct_high=99.98, ignore_zeros=Tru
     if vmax > vmin:
         return vmin, vmax
 
-    # Percentile bracket collapsed — fall back to actual extent.
-    dmin = float(np.nanmin(valid))
-    dmax = float(np.nanmax(valid))
+    # Percentile bracket collapsed on `valid` (e.g. a binary/label mask
+    # whose only nonzero value is a constant like 1 -- ignore_zeros then
+    # discards the very zeros needed to tell background from
+    # foreground). Retry against the full finite array before giving up
+    # on real contrast: if it has range, that range still separates
+    # background from foreground even though `valid` alone didn't.
+    dmin = float(np.nanmin(finite))
+    dmax = float(np.nanmax(finite))
     if dmax > dmin:
         return dmin, dmax
 

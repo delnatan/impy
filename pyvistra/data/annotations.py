@@ -6,12 +6,18 @@ folder never mixes extra files in with the images themselves. Keys are
 paths relative to the common image directory rather than bare filenames,
 so a folder with nested subfolders still round-trips without collisions.
 
-Two header lines (prefixed with "#", written before the relpath/category
+Header lines (prefixed with "#", written before the relpath/category
 data) carry folder-level settings so they don't need to be re-entered
 every time the same folder is reopened:
 
     #categories\tCategoryA\tCategoryB\tCategoryC
     #dims\ttzcyx
+    #channel_colors\t0=#ff8800:additive:1.0\t1=#00ff00:overlay:0.8
+
+``#channel_colors`` is the fast thumbnail grid's per-channel color/blend
+-mode/opacity overlay settings (see ``data/overlay_state.py``); only
+channels overridden from the default need an entry, so it's sparse and
+absent entirely for folders that never touched the Colors... panel.
 
 The category vocabulary is optional — if absent, `categories()` falls
 back to whatever category names are actually in use (the original
@@ -38,6 +44,7 @@ class TileAnnotations(MutableMapping):
         self._categories = {}  # relpath -> category name
         self._category_vocab = []  # explicit predefined category list, if any
         self.dims = None  # persisted axes-order string (e.g. "tzcyx"), or None
+        self.channel_colors = {}  # channel_idx -> (color_hex, blend_mode, opacity)
         self.load()
 
     @staticmethod
@@ -55,6 +62,7 @@ class TileAnnotations(MutableMapping):
         self._categories.clear()
         self._category_vocab = []
         self.dims = None
+        self.channel_colors = {}
         if not os.path.exists(self.file_path):
             return
         with open(self.file_path, "r", encoding="utf-8") as f:
@@ -67,10 +75,39 @@ class TileAnnotations(MutableMapping):
                     if len(parts) == 2 and parts[1]:
                         self.dims = parts[1]
                     continue
+                if parts[0] == "#channel_colors":
+                    self.channel_colors = self._parse_channel_colors(parts[1:])
+                    continue
                 if len(parts) != 2 or not parts[0]:
                     continue
                 relpath, category = parts
                 self._categories[relpath] = category
+
+    @staticmethod
+    def _parse_channel_colors(entries):
+        """Parse ``["0=#ff8800:additive:1.0", ...]`` into
+        ``{0: ("#ff8800", "additive", 1.0)}``, skipping malformed entries
+        so a hand-edited or truncated file still loads."""
+        result = {}
+        for entry in entries:
+            if not entry:
+                continue
+            try:
+                idx_str, rest = entry.split("=", 1)
+                color_hex, blend_mode, opacity_str = rest.split(":")
+                result[int(idx_str)] = (color_hex, blend_mode, float(opacity_str))
+            except (ValueError, IndexError):
+                continue
+        return result
+
+    @staticmethod
+    def _format_channel_colors(channel_colors):
+        return "\t".join(
+            f"{idx}={color_hex}:{blend_mode}:{opacity}"
+            for idx, (color_hex, blend_mode, opacity) in sorted(
+                channel_colors.items()
+            )
+        )
 
     def save(self):
         """Write the current header settings and categories out, data
@@ -80,6 +117,12 @@ class TileAnnotations(MutableMapping):
                 f.write("#categories\t" + "\t".join(self._category_vocab) + "\n")
             if self.dims:
                 f.write(f"#dims\t{self.dims}\n")
+            if self.channel_colors:
+                f.write(
+                    "#channel_colors\t"
+                    + self._format_channel_colors(self.channel_colors)
+                    + "\n"
+                )
             for relpath, category in sorted(self._categories.items()):
                 f.write(f"{relpath}\t{category}\n")
 
@@ -183,6 +226,13 @@ class TileAnnotations(MutableMapping):
     def set_dims(self, dims):
         """Persist the axes-order string used for this folder."""
         self.dims = dims
+        self.save()
+
+    def set_channel_colors(self, channel_colors):
+        """Persist the fast thumbnail grid's per-channel color/blend-mode
+        /opacity overlay settings: ``{channel_idx: (color_hex, blend_mode,
+        opacity)}``."""
+        self.channel_colors = dict(channel_colors)
         self.save()
 
     def relpath(self, abs_path):

@@ -7,14 +7,36 @@ deconvolution engine and live in `decon_common` -- re-exported here so
 mirroring `decon_nlcg.py`'s own re-export of the same names.
 
 Unlike NLCG's optional gradient/Hessian regularizer, ER-Decon's
-edge-preserving Hessian-log regularizer is intrinsic to the algorithm (it
-is not a knob that can be switched off) -- see
-`deconlib.deconvolution.erdecon_mlx` for the objective. `build_hessian`
-below always returns a `Hessian2D`/`Hessian3D` operator, weighted by the
-crop's actual (zoom-corrected) voxel spacing so the curvature threshold
+edge-preserving log(eps + curvature) regularizer is intrinsic to the
+algorithm (it is not a knob that can be switched off) -- see
+`deconlib.deconvolution.erdecon_mlx` for the objective. `build_regularizer`
+below returns the curvature operator: either the default `Hessian2D`/
+`Hessian3D` (weighted by the crop's actual, zoom-corrected voxel spacing so
 `eps_reg` means the same physical thing on every axis -- the same
-spacing-aware construction `decon_nlcg.build_regularizer` uses for its
-own optional Hessian regularizer.
+spacing-aware construction `decon_nlcg.build_regularizer` uses for its own
+optional Hessian regularizer), or -- when `regularizer_type="wavelet"` -- a
+single-scale a-trous wavelet operator (`AtrousAnalysisOperator`), which
+tests found dominates the Hessian stencil on both smoothness and accuracy
+at `levels=1` (see `erdecon_mlx` module docstring / `test_erdecon.py`
+`TestWaveletRegularizer`). The wavelet path does *not* correct for
+lateral/axial physical anisotropy the way the Hessian path does -- it
+dilates by the same pixel-index step on every axis -- so it is offered
+only at `levels<=2` (the range `calibrate_noise_weights` validates; deeper
+stacks can ring, see its docstring).
+
+A third option, `regularizer_type="combined"`, stacks both operators via
+`StackOperator` with `combine_channels=False` so each operator's channels
+are thresholded independently against the shared `eps_reg` -- a spurious
+curvature spike then has to fool the Hessian *and* the wavelet channels
+simultaneously to escape regularization, not just one. This fixed a
+real-dataset failure mode where the wavelet regularizer alone produced an
+isolated near-delta "hot pixel" spike (see
+`widefield_erdecon_realdata_demo.py`'s REGULARIZER section for the full
+writeup). Both operators' channels are normalized to ~unit noise std via
+`calibrate_operator_noise_weights` (probed on the actual padded/object
+domain, not just the wavelet's own per-scale calibration) so the one
+shared `eps_reg` reads as a comparable curvature-in-noise-sigma scale
+regardless of which operator produced a given channel.
 """
 
 from __future__ import annotations
@@ -55,6 +77,21 @@ class ERDeconDialogState:
     eps_reg: float = 1e-2
     data_term: str = "gaussian"             # "gaussian" | "poisson"
 
+    # Quadratic-in-curvature IRLS floor (0 = off). Without it, once a
+    # voxel's curvature crosses `eps_reg` the log penalty's weight keeps
+    # falling to 0 as curvature grows further, so nothing pulls flux back
+    # -- the optimizer can over-sharpen a real-but-modest bump into an
+    # isolated near-delta "hot pixel" spike. See
+    # `deconlib.deconvolution.erdecon_mlx.erdecon_with_operator`'s
+    # `floor_frac` docstring.
+    floor_frac: float = 0.0
+
+    # Regularizer operator: default spacing-weighted Hessian2D/Hessian3D, a
+    # single-scale a-trous wavelet operator, or both stacked together (see
+    # module docstring).
+    regularizer_type: str = "hessian"       # "hessian" | "wavelet" | "combined"
+    wavelet_levels: int = 1
+
     # Gauss-Newton-CG solver knobs (see
     # deconlib.deconvolution.erdecon_with_operator).
     num_iter: int = 50
@@ -81,19 +118,81 @@ class ERDeconDialogState:
 
 
 # --------------------------------------------------------------------------- #
-# Hessian regularizer (always on)
+# Regularizer operator (always on)
 
-def build_hessian(state: ERDeconDialogState, ndim: int, voxel_spacing: Tuple[float, ...]):
-    """Return a spacing-weighted deconlib `Hessian2D`/`Hessian3D` operator.
+def build_regularizer(
+    state: ERDeconDialogState, prepared: PreparedInputs
+) -> Tuple[object, bool]:
+    """Return ``(operator, combine_channels)`` for `erdecon_with_operator`.
 
-    Mirrors `decon_nlcg.build_regularizer`'s own Hessian construction
-    (``r = dy / dz``) rather than `Hessian3D.from_spacing`, which raises on
-    anisotropic lateral (Y/X) spacing -- a case this dialog otherwise
-    handles fine.
+    Default (``regularizer_type="hessian"``): a spacing-weighted deconlib
+    `Hessian2D`/`Hessian3D` operator. Mirrors `decon_nlcg.build_regularizer`'s
+    own Hessian construction (``r = dy / dz``) rather than
+    `Hessian3D.from_spacing`, which raises on anisotropic lateral (Y/X)
+    spacing -- a case this dialog otherwise handles fine. `combine_channels`
+    is True: the Hessian's stacked components are one physical tensor's
+    unique entries and share one per-pixel curvature/weight.
+
+    ``regularizer_type="wavelet"``: a single-scale (or `wavelet_levels`-scale,
+    capped at 2) a-trous wavelet operator, noise-calibrated so `eps_reg`
+    means the same curvature-in-noise-sigma at every scale. `combine_channels`
+    is False here -- the wavelet channels are decorrelated scales, not one
+    tensor's components, so each needs its own IRLS weight (see module
+    docstring).
+
+    ``regularizer_type="combined"``: both operators above, stacked via
+    `StackOperator` and each independently noise-calibrated (via
+    `calibrate_operator_noise_weights`, probed on the actual padded/object
+    domain built from `prepared`) so the shared `eps_reg` reads as a
+    comparable curvature scale on every stacked channel. `combine_channels`
+    is False, same reasoning as the wavelet-only path.
     """
-    from deconlib.deconvolution import Hessian2D, Hessian3D
+    ndim = prepared.y.ndim
+    voxel_spacing = prepared.voxel_spacing
 
-    if ndim == 3:
-        r = float(voxel_spacing[1]) / float(voxel_spacing[0])
-        return Hessian3D(r=r)
-    return Hessian2D()
+    def _hessian_operator():
+        from deconlib.deconvolution import Hessian2D, Hessian3D
+
+        if ndim == 3:
+            r = float(voxel_spacing[1]) / float(voxel_spacing[0])
+            return Hessian3D(r=r)
+        return Hessian2D()
+
+    def _wavelet_operator():
+        from deconlib.deconvolution import (
+            AtrousAnalysisOperator,
+            AtrousTransform,
+            calibrate_noise_weights,
+        )
+
+        levels = max(1, min(2, int(state.wavelet_levels)))
+        weights = calibrate_noise_weights(levels=levels, ndim=ndim, n_trials=16)
+        transform = AtrousTransform(levels=levels, weights=weights, backend="mlx")
+        return AtrousAnalysisOperator(transform)
+
+    if state.regularizer_type == "wavelet":
+        return _wavelet_operator(), False
+
+    if state.regularizer_type == "combined":
+        from deconlib.deconvolution import (
+            StackOperator,
+            calibrate_operator_noise_weights,
+        )
+
+        hessian_op = _hessian_operator()
+        wavelet_op = _wavelet_operator()
+        padded = padded_shape(
+            visible_shape(prepared.y.shape, prepared.zoom), prepared.psf.shape
+        )
+        hessian_weights = calibrate_operator_noise_weights(
+            hessian_op, padded, n_trials=8
+        )
+        wavelet_weights = calibrate_operator_noise_weights(
+            wavelet_op, padded, n_trials=8
+        )
+        regularizer = StackOperator(
+            [hessian_op, wavelet_op], weights=[hessian_weights, wavelet_weights]
+        )
+        return regularizer, False
+
+    return _hessian_operator(), True

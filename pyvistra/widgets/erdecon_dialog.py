@@ -7,8 +7,9 @@ mirroring the NLCG/Richardson-Lucy/MaxEnt dialogs:
     * Source, PSF && Model — ROI / frame / channel / PSF window picker,
       forward-model zoom (shared `SourcePSFPanelMixin`).
     * Solver — data term (Gaussian/Poisson), the (always-on) edge-preserving
-      Hessian-log regularizer's lambda/eps, Gauss-Newton-CG solver knobs,
-      output region, and optional tiling for large fields.
+      log(eps + curvature) regularizer's lambda/eps/floor and curvature
+      operator (spacing-weighted Hessian or a-trous wavelet), Gauss-Newton-CG
+      solver knobs, output region, and optional tiling for large fields.
 
 The dialog reads its widgets into a :class:`~.decon_erdecon.ERDeconDialogState`,
 builds a :class:`~.decon_erdecon.PreparedInputs`, and hands the result to
@@ -209,10 +210,76 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
             "preserved as an edge — broad, flat optimum; tune to the "
             "reconstruction's curvature, not to lambda."
         )
+        self.floor_frac_spin = ScientificDoubleSpinBox()
+        self.floor_frac_spin.setRange(0.0, 1.0)
+        self.floor_frac_spin.setValue(0.0)
+        self.floor_frac_spin.setFixedWidth(96)
+        self.floor_frac_spin.setToolTip(
+            "Quadratic-in-curvature IRLS floor (0 = off). Without it, once a "
+            "voxel's curvature crosses Eps the penalty's weight keeps falling "
+            "to 0 as curvature grows further, so nothing pulls flux back -- "
+            "the optimizer can over-sharpen a real-but-modest bump into an "
+            "isolated near-delta 'hot pixel' spike. Start small (0.01-0.05) "
+            "and raise (up to ~0.5) if spikes persist; it barely affects "
+            "genuine multi-pixel edges but costs some I-divergence fit."
+        )
         reg_grid.addWidget(QLabel("Lambda:"), 0, 0, Qt.AlignRight)
         reg_grid.addWidget(self.reg_weight_spin, 0, 1)
         reg_grid.addWidget(QLabel("Eps:"), 0, 2, Qt.AlignRight)
         reg_grid.addWidget(self.eps_reg_spin, 0, 3)
+        reg_grid.addWidget(QLabel("Floor frac:"), 1, 0, Qt.AlignRight)
+        reg_grid.addWidget(self.floor_frac_spin, 1, 1)
+
+        # Curvature operator: default Hessian2D/3D, or a single-scale a-trous
+        # wavelet operator (dominates the Hessian on smoothness/accuracy at
+        # levels=1, but doesn't correct axial/lateral anisotropy the way the
+        # Hessian path does -- see decon_erdecon.build_regularizer).
+        self.reg_hessian_radio = QRadioButton("Hessian (spacing-corrected)")
+        self.reg_hessian_radio.setChecked(True)
+        self.reg_wavelet_radio = QRadioButton("A-trous wavelet")
+        self.reg_wavelet_radio.setToolTip(
+            "Curvature measured as 'image minus one smoothed copy of itself' "
+            "at each scale, noise-calibrated per scale, instead of a fixed "
+            "second-difference stencil -- tends to dominate the Hessian on "
+            "smoothness and accuracy. Does not correct for axial/lateral "
+            "physical anisotropy (unlike the Hessian path); capped at 2 "
+            "levels, the range validated against ringing."
+        )
+        self.reg_combined_radio = QRadioButton("Combined (Hessian + wavelet)")
+        self.reg_combined_radio.setToolTip(
+            "Both operators stacked and thresholded independently -- a "
+            "spurious curvature spike has to fool the Hessian and the "
+            "wavelet channels simultaneously to escape regularization. "
+            "Fixes a real-dataset failure mode where the wavelet operator "
+            "alone produced an isolated near-delta 'hot pixel' spike. Each "
+            "operator's channels are noise-calibrated independently "
+            "(slightly more setup cost than either operator alone)."
+        )
+        self._reg_type_group = QButtonGroup(self)
+        self._reg_type_group.addButton(self.reg_hessian_radio)
+        self._reg_type_group.addButton(self.reg_wavelet_radio)
+        self._reg_type_group.addButton(self.reg_combined_radio)
+        reg_type_row = QHBoxLayout()
+        reg_type_row.setSpacing(8)
+        reg_type_row.addWidget(self.reg_hessian_radio)
+        reg_type_row.addWidget(self.reg_wavelet_radio)
+        reg_type_row.addWidget(self.reg_combined_radio)
+        reg_type_row.addStretch()
+        reg_grid.addLayout(reg_type_row, 2, 0, 1, 4)
+
+        self.wavelet_levels_spin = QSpinBox()
+        self.wavelet_levels_spin.setRange(1, 2)
+        self.wavelet_levels_spin.setValue(1)
+        self.wavelet_levels_spin.setFixedWidth(64)
+        self.wavelet_levels_spin.setToolTip(
+            "Number of wavelet scales (levels=1 is the validated/recommended "
+            "default; levels=2 can start ringing on strong edges)."
+        )
+        self._wavelet_levels_label = QLabel("Wavelet levels:")
+        reg_grid.addWidget(self._wavelet_levels_label, 3, 0, Qt.AlignRight)
+        reg_grid.addWidget(self.wavelet_levels_spin, 3, 1)
+        self._reg_type_group.buttonToggled.connect(self._on_regularizer_type_toggled)
+        self._on_regularizer_type_toggled()
         vbox.addWidget(reg_grp)
 
         # Gauss-Newton-CG solver knobs — primary fields, with an "Advanced"
@@ -462,11 +529,17 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
     # Dynamic visibility
 
     def _connect_recipe_preview_signals(self) -> None:
-        widgets = [self.data_gaussian_radio, self.data_poisson_radio]
+        widgets = [
+            self.data_gaussian_radio, self.data_poisson_radio,
+            self.reg_hessian_radio, self.reg_wavelet_radio, self.reg_combined_radio,
+        ]
         for widget in widgets:
             widget.toggled.connect(lambda *_: self._on_source_psf_changed())
+        self.wavelet_levels_spin.valueChanged.connect(
+            lambda *_: self._on_source_psf_changed()
+        )
         for spin in (
-            self.reg_weight_spin, self.eps_reg_spin,
+            self.reg_weight_spin, self.eps_reg_spin, self.floor_frac_spin,
             self.num_iter_spin, self.eval_interval_spin,
             self.newton_tol_spin, self.tol_spin, self.min_iter_spin,
             self.cg_max_steps_spin, self.cg_tol_spin,
@@ -496,6 +569,19 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
             "PSF-support margin deconlib adds automatically."
         )
         self._on_source_psf_changed()
+
+    def _on_regularizer_type_toggled(self, *_args) -> None:
+        show_levels = self.reg_wavelet_radio.isChecked() or self.reg_combined_radio.isChecked()
+        self._wavelet_levels_label.setVisible(show_levels)
+        self.wavelet_levels_spin.setVisible(show_levels)
+        self._on_source_psf_changed()
+
+    def _regularizer_type(self) -> str:
+        if self.reg_wavelet_radio.isChecked():
+            return "wavelet"
+        if self.reg_combined_radio.isChecked():
+            return "combined"
+        return "hessian"
 
     def _on_diagnostics_toggled(self, checked: bool) -> None:
         self._toggle_group_children(self._diagnostics_group, checked)
@@ -537,9 +623,19 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         )
 
         data_term = "poisson" if self.data_poisson_radio.isChecked() else "gaussian"
+        floor_frac = self.floor_frac_spin.value()
+        floor_text = f" floor={floor_frac:g}" if floor_frac > 0 else ""
+        if self.reg_wavelet_radio.isChecked():
+            reg_text = f"wavelet(levels={self.wavelet_levels_spin.value()})"
+        elif self.reg_combined_radio.isChecked():
+            reg_text = f"combined(hessian+wavelet levels={self.wavelet_levels_spin.value()})"
+        else:
+            reg_text = "hessian"
         lines = [
             f"ER-Decon ({data_term}), {self.num_iter_spin.value()} iter max, "
-            f"lambda={self.reg_weight_spin.value():g} eps={self.eps_reg_spin.value():g}",
+            f"reg={reg_text} "
+            f"lambda={self.reg_weight_spin.value():g} eps={self.eps_reg_spin.value():g}"
+            f"{floor_text}",
             f"data {self._format_shape(data_shape)} -> "
             f"visible {self._format_shape(visible)} -> "
             f"output {self._format_shape(output_spatial_shape)}",
@@ -568,6 +664,9 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
             zoom_z=self.sr_z_spin.value(),
             reg_weight=self.reg_weight_spin.value(),
             eps_reg=self.eps_reg_spin.value(),
+            floor_frac=self.floor_frac_spin.value(),
+            regularizer_type=self._regularizer_type(),
+            wavelet_levels=self.wavelet_levels_spin.value(),
             data_term=data_term,
             num_iter=self.num_iter_spin.value(),
             background=self.background_spin.value(),
@@ -673,17 +772,18 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
             if result is None:
                 return None
             frame_prepared, frame_state, _t, _c = result
-            hessian = der.build_hessian(
-                frame_state, frame_prepared.y.ndim, frame_prepared.voxel_spacing
+            regularizer, combine_channels = der.build_regularizer(
+                frame_state, frame_prepared
             )
-            return frame_prepared, frame_state, hessian
+            return frame_prepared, frame_state, regularizer, combine_channels
 
         def make_worker(frame_data, output_frame):
-            frame_prepared, frame_state, hessian = frame_data
+            frame_prepared, frame_state, regularizer, combine_channels = frame_data
             return ERDeconWorker(
                 prepared=frame_prepared,
                 state=frame_state,
-                hessian=hessian,
+                hessian=regularizer,
+                combine_channels=combine_channels,
                 buffer=self._runner.output_buffer,
                 output_channel=output_channel,
                 output_frame=output_frame,

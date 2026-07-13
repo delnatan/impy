@@ -38,6 +38,7 @@ class ERDeconWorker(QObject):
         state: ERDeconDialogState,
         hessian,
         buffer,                      # ImageBuffer for live preview / final write
+        combine_channels: bool = True,
         output_channel: int = 0,
         output_frame: int = 0,
     ):
@@ -45,6 +46,7 @@ class ERDeconWorker(QObject):
         self._p = prepared
         self._state = state
         self._hessian = hessian
+        self._combine_channels = bool(combine_channels)
         self._buffer = buffer
         self._output_channel = max(0, int(output_channel))
         self._output_frame = max(0, int(output_frame))
@@ -75,9 +77,9 @@ class ERDeconWorker(QObject):
         p, s = self._p, self._state
         log.info(
             "ER-Decon single-volume run: y=%s psf=%s zoom=%s num_iter=%d "
-            "background=%g data_term=%s reg_weight=%g eps_reg=%g",
+            "background=%g data_term=%s reg_weight=%g eps_reg=%g floor_frac=%g",
             p.y.shape, p.psf.shape, p.zoom, s.num_iter, s.background,
-            s.data_term, s.reg_weight, s.eps_reg,
+            s.data_term, s.reg_weight, s.eps_reg, s.floor_frac,
         )
         self.status.emit("Building forward model…")
         model = make_forward_model(p.psf, p.y.shape, p.zoom)
@@ -106,6 +108,8 @@ class ERDeconWorker(QObject):
             reg_weight=s.reg_weight,
             eps_reg=s.eps_reg,
             data_term=s.data_term,
+            combine_channels=self._combine_channels,
+            floor_frac=s.floor_frac,
             num_iter=s.num_iter,
             background=s.background,
             normalize=s.normalize,
@@ -172,6 +176,8 @@ class ERDeconWorker(QObject):
             hessian=self._hessian,
             newton_tol=s.newton_tol,
             data_term=s.data_term,
+            combine_channels=self._combine_channels,
+            floor_frac=s.floor_frac,
             normalize=s.normalize,
             tol=s.tol,
             min_iter=s.min_iter,

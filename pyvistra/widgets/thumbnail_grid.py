@@ -10,10 +10,12 @@ numpy-only work, never disk I/O, and safe to do inline in ``paintEvent``.
 
 from pathlib import Path
 
+import numpy as np
 from qtpy.QtCore import QRect, Qt, Signal
 from qtpy.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from qtpy.QtWidgets import QMenu, QWidget
 
+from ..data.overlay_state import ADDITIVE, DEFAULT_COLORS
 from ..data.thumbnail_cache import (
     DecodeCache,
     ThumbnailDecodeWorker,
@@ -27,6 +29,13 @@ def _readable_text_color(hex_color):
     r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
     luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
     return "black" if luminance > 0.6 else "white"
+
+
+def _hex_to_rgb01(hex_color):
+    """``"#rrggbb"`` -> ``(r, g, b)`` floats in ``[0, 1]``."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+    return (r, g, b)
 
 
 class ThumbnailGridWidget(QWidget):
@@ -66,6 +75,8 @@ class ThumbnailGridWidget(QWidget):
 
         self._display = None  # ChannelDisplayList (global settings)
         self._custom_clim = set()  # live ref to TiledVisualProxy._custom_clim
+        self._overlay_state = None  # OverlayStateList (color/blend/opacity)
+        self._overlay_unsubscribe = None
 
         self._pixmap_cache = {}  # path -> QPixmap
 
@@ -130,6 +141,23 @@ class ThumbnailGridWidget(QWidget):
         self._pixmap_cache.clear()
         self.update()
 
+    def set_overlay_state(self, overlay_state):
+        """``overlay_state``: an ``OverlayStateList`` (per-channel color /
+        blend-mode / opacity, see ``data/overlay_state.py``). Stored as a
+        live reference and subscribed to once -- unlike ``display``, this
+        list is resized/mutated in place rather than replaced, so this
+        only needs calling once."""
+        if overlay_state is self._overlay_state:
+            return
+        self._overlay_state = overlay_state
+        self._overlay_unsubscribe = overlay_state.subscribe(
+            self._on_overlay_state_changed
+        )
+        self.invalidate_pixmaps()
+
+    def _on_overlay_state_changed(self, channel_idx, field):
+        self.invalidate_pixmaps()
+
     def set_annotations(self, annotations):
         """``annotations``: ``{path: (label, color_hex)}``."""
         self._annotations = annotations
@@ -159,6 +187,32 @@ class ThumbnailGridWidget(QWidget):
             if entry is not None:
                 best = max(best, entry[0].shape[0])
         return best
+
+    def aggregate_channel_data(self, channel_idx, max_samples_per_tile=2000):
+        """Sampled raw intensity values for *channel_idx* across every
+        currently-decoded tile -- lets the lightweight Colors panel
+        suggest a plain min/max contrast range (mirrors
+        ``TiledVisualProxy.get_aggregate_data``'s per-tile sampling, but
+        reads this widget's own decode cache since fast mode has no
+        per-tile renderers)."""
+        samples = []
+        for path in self._paths:
+            entry = self._cache.get(path)
+            if entry is None:
+                continue
+            plane = entry[0]
+            if channel_idx >= plane.shape[0]:
+                continue
+            data = plane[channel_idx]
+            total = data.size
+            if total > max_samples_per_tile:
+                step = max(1, int(np.sqrt(total / max_samples_per_tile)))
+                samples.append(data[::step, ::step].ravel())
+            else:
+                samples.append(data.ravel())
+        if samples:
+            return np.concatenate(samples)
+        return None
 
     def close(self):
         self._worker.close()
@@ -314,11 +368,24 @@ class ThumbnailGridWidget(QWidget):
             if self._display is not None and c < len(self._display):
                 state = self._display[c]
                 clim = state.clim if c in self._custom_clim else default_clim
-                params.append(
-                    (clim, state.gamma, state.colormap_name, state.visible)
-                )
+                gamma = state.gamma
+                visible = state.visible
             else:
-                params.append((default_clim, 1.0, "White", True))
+                clim = default_clim
+                gamma = 1.0
+                visible = True
+
+            if self._overlay_state is not None and c < len(self._overlay_state):
+                ov = self._overlay_state[c]
+                color = _hex_to_rgb01(ov.color_hex)
+                blend_mode = ov.blend_mode
+                opacity = ov.opacity
+            else:
+                color = _hex_to_rgb01(DEFAULT_COLORS[c % len(DEFAULT_COLORS)])
+                blend_mode = ADDITIVE
+                opacity = 1.0
+
+            params.append((clim, gamma, color, visible, blend_mode, opacity))
         return params
 
     # ------------------------------------------------------------------

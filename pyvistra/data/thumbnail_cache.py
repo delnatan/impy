@@ -2,9 +2,11 @@
 
 Mirrors ``data/slice_loader.py``'s byte-budgeted LRU + background-thread
 request/callback pattern, but keyed by image path instead of ``(t, z)``,
-and it also owns the CPU-side channel compositing math (a numpy port of
-``CompositeImageVisual``'s GPU shader) since this render path has no GL
-context at all. Pure numpy: no Qt, no vispy.
+and it also owns the CPU-side channel compositing math since this render
+path has no GL context at all. Pure numpy: no Qt, no vispy -- colors are
+flat RGB (picked via a plain color dialog, see
+``widgets/thumbnail_colors_panel.py``), not gradient colormaps, so there's
+no LUT/colormap-registry lookup needed here.
 
 Delivery contract: ``callback(path)`` fires on the worker thread once
 ``path`` has been decoded into the cache -- Qt consumers must marshal to
@@ -17,48 +19,39 @@ from collections import OrderedDict
 
 import numpy as np
 
-from .. import colormaps as _colormaps
 from ..contrast import compute_percentile_clim
+from ..data.overlay_state import OVERLAY
 from ..io import load_image
-
-_LUT_SIZE = 256
-_lut_cache = {}
-
-
-def _get_lut(colormap_name):
-    """256x3 float LUT for colormap_name, cached.
-
-    CPU-side: ``vispy.color.Colormap.map()`` works on plain numpy without
-    a GL context, so this is safe to call from a background thread.
-    """
-    lut = _lut_cache.get(colormap_name)
-    if lut is None:
-        cmap, _ = _colormaps.get(colormap_name)
-        lut = cmap.map(np.linspace(0.0, 1.0, _LUT_SIZE))[:, :3].astype(
-            np.float32
-        )
-        _lut_cache[colormap_name] = lut
-    return lut
 
 
 def composite_to_rgb(plane, channel_params):
     """Composite a ``(C, H, W)`` plane into an ``(H, W, 3)`` uint8 image.
 
-    CPU port of the per-layer GPU shader chain in ``visuals/image.py``
-    (``apply_clim`` -> ``apply_gamma`` -> colormap LUT), then additive
-    blend of visible channels clipped to ``[0, 1]`` -- matching vispy's
-    ``blend_func=("one", "one")`` layers clamped by the framebuffer.
+    Each channel is normalized to ``[0, 1]`` by clim + gamma (same as the
+    vispy path's shader), then blended onto an accumulating canvas
+    (starting at black) in channel-index order:
+
+    - ``additive``: ``canvas += color * t * opacity`` (matches the vispy
+      path's default look -- channels brighten on top of each other).
+    - ``overlay``: ``alpha = t * opacity; canvas = canvas*(1-alpha) +
+      color*alpha`` -- data-driven alpha compositing, so a segmentation
+      mask channel tints over whatever's already composited instead of
+      just brightening it. Useful for eyeballing masks.
+
+    Canvas is clipped to ``[0, 1]`` after every channel so overlay math
+    never reads an out-of-range "background".
 
     Args:
         plane: ``(C, H, W)`` array.
-        channel_params: sequence of ``(clim, gamma, colormap_name,
-            visible)``, one per channel. Extra entries beyond
+        channel_params: sequence of ``(clim, gamma, color_rgb, visible,
+            blend_mode, opacity)``, one per channel. ``color_rgb`` is an
+            ``(r, g, b)`` triple in ``[0, 1]``. Extra entries beyond
             ``plane.shape[0]`` are ignored.
     """
     C, H, W = plane.shape
     rgb = np.zeros((H, W, 3), dtype=np.float32)
     for c in range(min(C, len(channel_params))):
-        clim, gamma, colormap_name, visible = channel_params[c]
+        clim, gamma, color_rgb, visible, blend_mode, opacity = channel_params[c]
         if not visible:
             continue
         vmin, vmax = clim
@@ -69,10 +62,13 @@ def composite_to_rgb(plane, channel_params):
         t = np.clip((data - vmin) / span, 0.0, 1.0)
         if gamma != 1.0:
             t = np.power(t, gamma, dtype=np.float32)
-        lut = _get_lut(colormap_name)
-        idx = np.clip((t * (_LUT_SIZE - 1)).astype(np.int32), 0, _LUT_SIZE - 1)
-        rgb += lut[idx]
-    np.clip(rgb, 0.0, 1.0, out=rgb)
+        color = np.asarray(color_rgb, dtype=np.float32)
+        weighted = (t * opacity)[..., np.newaxis]
+        if blend_mode == OVERLAY:
+            rgb = rgb * (1.0 - weighted) + color * weighted
+        else:
+            rgb = rgb + color * weighted
+        np.clip(rgb, 0.0, 1.0, out=rgb)
     return (rgb * 255.0).astype(np.uint8)
 
 

@@ -1,8 +1,14 @@
 """Read-only per-category population stats for a folder's tile annotations."""
 
 from qtpy.QtCore import Qt
+from qtpy.QtGui import QKeySequence
 from qtpy.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QHBoxLayout,
     QHeaderView,
+    QPushButton,
+    QShortcut,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -23,11 +29,51 @@ class AnnotationStatsPanel(QWidget):
         self.table.setHorizontalHeaderLabels(["Category", "Count", "%"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setSelectionMode(QTableWidget.NoSelection)
+        # Selectable (not the prior NoSelection) so a user can grab just
+        # the rows they want; copy-all button covers the common case.
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Stretch
         )
         layout.addWidget(self.table)
+
+        QShortcut(QKeySequence.Copy, self.table, self._copy_selection)
+
+        copy_button = QPushButton("Copy to Clipboard")
+        copy_button.clicked.connect(self._copy_all)
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        button_row.addWidget(copy_button)
+        layout.addLayout(button_row)
+
+    def _table_text(self, rows):
+        """Tab-separated text (header + rows) for the given row indices --
+        pastes cleanly into a spreadsheet or text editor."""
+        headers = [
+            self.table.horizontalHeaderItem(c).text()
+            for c in range(self.table.columnCount())
+        ]
+        lines = ["\t".join(headers)]
+        for r in rows:
+            cells = [
+                self.table.item(r, c).text()
+                for c in range(self.table.columnCount())
+            ]
+            lines.append("\t".join(cells))
+        return "\n".join(lines)
+
+    def _copy_all(self):
+        QApplication.clipboard().setText(
+            self._table_text(range(self.table.rowCount()))
+        )
+
+    def _copy_selection(self):
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()})
+        if not rows:
+            self._copy_all()
+            return
+        QApplication.clipboard().setText(self._table_text(rows))
 
     def refresh(self, annotations, total_count):
         """Rebuild the table from `annotations` (a TileAnnotations) against

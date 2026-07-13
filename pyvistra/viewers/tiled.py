@@ -41,6 +41,7 @@ from ..contrast import compute_percentile_clim
 from ..data.annotations import TileAnnotations
 from ..data.channel_state import ChannelDisplayList
 from ..data.colors import get_distinct_color, rgb_to_hex
+from ..data.overlay_state import ADDITIVE, DEFAULT_COLORS, OverlayStateList
 from ..io import load_image
 from ..visuals.image import (
     DEFAULT_CHANNEL_COLORMAPS,
@@ -51,6 +52,7 @@ from ..widgets import ChannelPanel, ChannelRow, show_channel_dock
 from ..widgets.annotation_stats_panel import AnnotationStatsPanel
 from ..widgets.axes_dialog import AxesDialog
 from ..widgets.manage_categories_dialog import ManageCategoriesDialog
+from ..widgets.thumbnail_colors_panel import ThumbnailColorsPanel
 from ..widgets.thumbnail_grid import ThumbnailGridWidget
 
 
@@ -980,6 +982,7 @@ class TiledViewer(QMainWindow):
     MENU_SPEC = [
         ("Adjust", [
             {"label": "Channels...", "shortcut": "Shift+H", "method": "show_channel_panel"},
+            {"label": "Colors...", "method": "show_colors_panel"},
             None,
             {"label": "Auto Contrast All", "shortcut": "C", "method": "_auto_contrast_all"},
             {"label": "Reset All Views", "shortcut": "A", "method": "_reset_all_views"},
@@ -1054,8 +1057,30 @@ class TiledViewer(QMainWindow):
         # Visual proxy for global channel settings
         self.visual_proxy = TiledVisualProxy(self)
 
+        # Fast-mode-only per-channel color/blend-mode/opacity overlay
+        # state (see data/overlay_state.py). Persisted to the annotation
+        # sidecar file on every change; seeded from it in
+        # _update_fast_dimension_controls once channels are known.
+        #
+        # Channels are discovered incrementally as background decoding
+        # progresses (see _update_fast_dimension_controls), so seeding
+        # happens over several calls, not all at once -- but persisting
+        # writes out *all currently-known* channels on every change.
+        # Seeding from the live, mutating self.annotations.channel_colors
+        # would race: persisting channel 0 before channels 1/2 are known
+        # overwrites their not-yet-seeded entries in the file. Seed from
+        # this frozen snapshot instead.
+        self._pending_channel_colors = dict(self.annotations.channel_colors)
+        self.overlay_state = OverlayStateList(0)
+        self.overlay_state.subscribe(self._on_overlay_state_changed)
+        self._colors_seeded_channels = set()
+
         # Channel panel (created lazily)
         self.channel_panel = None
+
+        # Colors panel (created lazily)
+        self.colors_panel = None
+        self._colors_dock = None
 
         # Annotation stats dock (created lazily)
         self.annotation_stats_panel = None
@@ -1135,8 +1160,72 @@ class TiledViewer(QMainWindow):
         self.thumbnail_grid.set_channel_display(
             self.visual_proxy.display, self.visual_proxy.custom_clim
         )
+
+        self.overlay_state.resize(self.max_C)
+        self._seed_channel_colors()
+        self.thumbnail_grid.set_overlay_state(self.overlay_state)
+
         if self.channel_panel is not None and self.channel_panel.isVisible():
             self.channel_panel.refresh_ui()
+        if self.colors_panel is not None and self._colors_dock.isVisible():
+            self.colors_panel.refresh_ui()
+
+    def _seed_channel_colors(self):
+        """Apply any persisted per-channel color/blend-mode/opacity
+        overrides (from the annotation sidecar's #channel_colors line,
+        snapshotted at open time into _pending_channel_colors) to
+        newly-available channel indices, once each -- channels without a
+        persisted entry are left at their defaults."""
+        for idx, (color_hex, blend_mode, opacity) in self._pending_channel_colors.items():
+            if idx in self._colors_seeded_channels or idx >= len(self.overlay_state):
+                continue
+            self.overlay_state.set_color(idx, color_hex)
+            self.overlay_state.set_blend_mode(idx, blend_mode)
+            self.overlay_state.set_opacity(idx, opacity)
+            self._colors_seeded_channels.add(idx)
+
+    def _on_overlay_state_changed(self, channel_idx, field):
+        # Sparse: only channels that differ from their default get an
+        # entry. Without this, merely *opening* a folder in fast mode
+        # (which resizes overlay_state to defaults as channels are
+        # discovered) would create/touch the annotation sidecar file
+        # even if the user never annotates or touches colors.
+        colors = {}
+        for c in range(len(self.overlay_state)):
+            state = self.overlay_state[c]
+            default_color = DEFAULT_COLORS[c % len(DEFAULT_COLORS)]
+            if (state.color_hex, state.blend_mode, state.opacity) != (
+                default_color,
+                ADDITIVE,
+                1.0,
+            ):
+                colors[c] = (state.color_hex, state.blend_mode, state.opacity)
+        if colors == self.annotations.channel_colors:
+            return
+        self.annotations.set_channel_colors(colors)
+
+    def show_colors_panel(self):
+        """Show (creating on first use) the fast-mode-only per-channel
+        color/blend-mode/opacity panel."""
+        if not self._fast_mode:
+            QMessageBox.information(
+                self,
+                "Colors",
+                "The Colors panel is only available for the fast "
+                "thumbnail grid (folders of small images).",
+            )
+            return
+        if self.colors_panel is None:
+            panel = ThumbnailColorsPanel(self)
+            dock = QDockWidget("Tile Colors", self)
+            dock.setObjectName("colors_dock")
+            dock.setWidget(panel)
+            self.addDockWidget(Qt.RightDockWidgetArea, dock)
+            self.colors_panel = panel
+            self._colors_dock = dock
+        self._colors_dock.show()
+        self._colors_dock.raise_()
+        self.colors_panel.refresh_ui()
 
     def _on_fast_selection_changed(self, paths):
         self._update_status()
@@ -1306,7 +1395,10 @@ class TiledViewer(QMainWindow):
         self.flow_container.adjustSize()
 
     def _setup_ui(self):
-        self.setWindowTitle(f"Tiled Viewer - {len(self.image_paths)} images")
+        folder_name = os.path.basename(self.annotations.root_dir)
+        self.setWindowTitle(
+            f"Tiled Viewer - {folder_name} - {len(self.image_paths)} images"
+        )
         self.resize(1000, 800)
 
         # Central widget
@@ -1536,9 +1628,12 @@ class TiledViewer(QMainWindow):
 
         main_layout.addWidget(self.scroll_area, 1)
 
-        # Status bar
+        # Status bar. Full folder path lives here as a tooltip -- the
+        # window title already carries the short name, so this stays out
+        # of the way while still being one hover away.
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #888; padding: 5px;")
+        self.status_label.setToolTip(self.annotations.root_dir)
         main_layout.addWidget(self.status_label)
 
         self._update_page_controls()
@@ -1554,7 +1649,25 @@ class TiledViewer(QMainWindow):
         )
 
     def show_channel_panel(self):
-        """Show the global channel control panel."""
+        """Show the global channel control panel.
+
+        Not offered in fast mode: the full colormap/gamma/histogram
+        panel is overkill for a flat thumbnail grid, and its aggregate
+        histogram has no per-tile data to draw from there anyway (see
+        ``TiledVisualProxy.get_aggregate_data``, which only reads
+        ``tile_widgets`` -- empty in fast mode). Use the lightweight
+        Colors panel instead (color, opacity, visibility, min/max).
+        """
+        if self._fast_mode:
+            QMessageBox.information(
+                self,
+                "Channels",
+                "The fast thumbnail grid uses the lightweight Colors "
+                "panel for contrast, visibility, and color instead of "
+                "the full Channels && Contrast panel. Use "
+                "Adjust > Colors... instead.",
+            )
+            return
         show_channel_dock(
             self,
             panel_factory=TiledChannelPanel,
@@ -2033,6 +2146,8 @@ class TiledViewer(QMainWindow):
         if self._fast_mode:
             self.visual_proxy.custom_clim.clear()
             self.thumbnail_grid.invalidate_pixmaps()
+            if self.colors_panel is not None and self._colors_dock.isVisible():
+                self.colors_panel.refresh_ui()
             return
         for tile in self.tile_widgets:
             tile._auto_contrast()
