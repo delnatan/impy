@@ -54,6 +54,7 @@ from ..widgets.axes_dialog import AxesDialog
 from ..widgets.manage_categories_dialog import ManageCategoriesDialog
 from ..widgets.thumbnail_colors_panel import ThumbnailColorsPanel
 from ..widgets.thumbnail_grid import ThumbnailGridWidget
+from ..widgets.tiled_display_settings_dialog import TiledDisplaySettingsDialog
 
 
 def _readable_text_color(hex_color):
@@ -988,6 +989,7 @@ class TiledViewer(QMainWindow):
             {"label": "Reset All Views", "shortcut": "A", "method": "_reset_all_views"},
             None,
             {"label": "Reorder Axes...", "method": "show_axes_dialog"},
+            {"label": "Tile Size / Page Limits...", "method": "show_display_limits_dialog"},
         ]),
         ("Annotate", [
             {"label": "Annotate Selected...", "shortcut": "T", "method": "annotate_selected_tiles"},
@@ -1007,6 +1009,20 @@ class TiledViewer(QMainWindow):
         self.tiles_per_page = tiles_per_page
         self.current_page = 0
         self.tile_size = 200  # Default tile size in pixels
+
+        # Per-window (not persisted) limits for the tile-size slider and
+        # tiles-per-page spinbox -- see show_display_limits_dialog. Kept
+        # as plain instance attributes rather than app-wide settings so
+        # each window can be tuned to whatever monitor/machine it's on,
+        # on a per-use basis.
+        self._tile_size_min = 100
+        self._tile_size_max = 400
+        self._tiles_per_page_min = 1
+        self._tiles_per_page_max = 100
+
+        # Category filter for the gallery: None = show all, "" = show
+        # only un-annotated, otherwise the exact category name to show.
+        self._category_filter = None
 
         # Decided once, up front: every downstream method branches on
         # this instead of inspecting file sizes again.
@@ -1264,6 +1280,14 @@ class TiledViewer(QMainWindow):
             self._refresh_tile_badge(tile)
         self._refresh_annotation_stats()
 
+        filter_before = self._category_filter
+        self._refresh_category_filter_combo()
+        if filter_before is not None and self._category_filter is None:
+            # The active filter category was renamed/removed and the
+            # combo fell back to "All" -- reload so the page reflects
+            # that instead of showing a stale filtered subset.
+            self._load_current_page()
+
     def show_annotation_stats(self):
         """Show (creating on first use) the per-category population stats
         dock: count and percentage of the whole annotated folder, not just
@@ -1341,13 +1365,49 @@ class TiledViewer(QMainWindow):
         self.annotations.update(
             (self.annotations.relpath(p), category) for p in paths
         )
-        if self._fast_mode:
+        if self._category_filter is not None:
+            # An active filter means tagging can move tiles in or out of
+            # the visible set -- reload the page rather than patching
+            # badges in place.
+            self._load_current_page()
+        elif self._fast_mode:
             self._refresh_fast_badges()
         else:
             for tile in self.selected_tiles:
                 self._refresh_tile_badge(tile)
         self._update_status()
         self._refresh_annotation_stats()
+        self._refresh_category_filter_combo()
+
+    def _refresh_category_filter_combo(self):
+        """Repopulate the category filter dropdown from the current
+        annotation vocabulary (plus any category actually in use but no
+        longer in the vocabulary), preserving the active selection if it
+        still exists."""
+        current = self._category_filter
+        combo = self.category_filter_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("All", None)
+        combo.addItem("Un-annotated", "")
+        names = list(self.annotations.categories())
+        for name in sorted(set(self.annotations.values())):
+            if name not in names:
+                names.append(name)
+        for name in names:
+            combo.addItem(name, name)
+        idx = combo.findData(current)
+        if idx < 0:
+            idx = 0
+            self._category_filter = None
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _on_category_filter_changed(self, index):
+        """Handle category filter dropdown change."""
+        self._category_filter = self.category_filter_combo.itemData(index)
+        self.current_page = 0
+        self._load_current_page()
 
     def sort_by_annotation(self):
         """Rearrange the current page's tiles so tiles sharing the same
@@ -1434,7 +1494,7 @@ class TiledViewer(QMainWindow):
         # Tiles per page
         toolbar1_layout.addWidget(QLabel("Tiles/page:"))
         self.per_page_spin = QSpinBox()
-        self.per_page_spin.setRange(1, 100)
+        self.per_page_spin.setRange(self._tiles_per_page_min, self._tiles_per_page_max)
         self.per_page_spin.setValue(self.tiles_per_page)
         self.per_page_spin.setFixedWidth(70)
         # Don't reload on every keystroke while typing a number — only on
@@ -1449,7 +1509,7 @@ class TiledViewer(QMainWindow):
         # Tile size slider
         toolbar1_layout.addWidget(QLabel("Tile size:"))
         self.size_slider = QSlider(Qt.Horizontal)
-        self.size_slider.setRange(100, 400)
+        self.size_slider.setRange(self._tile_size_min, self._tile_size_max)
         self.size_slider.setValue(self.tile_size)
         self.size_slider.setFixedWidth(150)
         self.size_slider.valueChanged.connect(self._on_tile_size_changed)
@@ -1466,6 +1526,19 @@ class TiledViewer(QMainWindow):
         self.show_info_check.setChecked(True)
         self.show_info_check.toggled.connect(self._on_show_info_toggled)
         toolbar1_layout.addWidget(self.show_info_check)
+
+        toolbar1_layout.addSpacing(20)
+
+        # Category filter: restricts the gallery to one category (or
+        # un-annotated) instead of showing every image in the folder.
+        toolbar1_layout.addWidget(QLabel("Filter:"))
+        self.category_filter_combo = QComboBox()
+        self.category_filter_combo.setMinimumWidth(120)
+        self._refresh_category_filter_combo()
+        self.category_filter_combo.currentIndexChanged.connect(
+            self._on_category_filter_changed
+        )
+        toolbar1_layout.addWidget(self.category_filter_combo)
 
         toolbar1_layout.addStretch()
 
@@ -1702,6 +1775,39 @@ class TiledViewer(QMainWindow):
             dims = dlg.get_dims_string()
             self.reorder_axes(dims)
 
+    def show_display_limits_dialog(self):
+        """Adjust this window's tile-size and tiles-per-page limits.
+
+        Per-window only, not persisted -- lets the gallery be tuned to
+        whatever monitor/machine it's currently on, on a per-use basis.
+        """
+        dlg = TiledDisplaySettingsDialog(
+            {
+                "tile_size_min": self._tile_size_min,
+                "tile_size_max": self._tile_size_max,
+                "tiles_per_page_min": self._tiles_per_page_min,
+                "tiles_per_page_max": self._tiles_per_page_max,
+            },
+            parent=self,
+        )
+        if not dlg.exec_():
+            return
+
+        cfg = dlg.get_config()
+        self._tile_size_min = cfg["tile_size_min"]
+        self._tile_size_max = cfg["tile_size_max"]
+        self._tiles_per_page_min = cfg["tiles_per_page_min"]
+        self._tiles_per_page_max = cfg["tiles_per_page_max"]
+
+        # Qt clamps the slider/spinbox's current value into the new range
+        # automatically and emits valueChanged, so _on_tile_size_changed
+        # and _on_per_page_changed pick up any resulting change on their
+        # own -- no manual clamping needed here.
+        self.size_slider.setRange(self._tile_size_min, self._tile_size_max)
+        self.per_page_spin.setRange(
+            self._tiles_per_page_min, self._tiles_per_page_max
+        )
+
     def reorder_axes(self, dims):
         """
         Reorder axes for all tiles using a new dimension string.
@@ -1745,10 +1851,22 @@ class TiledViewer(QMainWindow):
         if self.channel_panel is not None and self.channel_panel.isVisible():
             self.channel_panel.refresh_ui()
 
+    def _visible_paths(self):
+        """image_paths after the active category filter (None = show all,
+        "" = un-annotated only, else the exact category name)."""
+        if self._category_filter is None:
+            return self.image_paths
+        target = self._category_filter
+        return [
+            p
+            for p in self.image_paths
+            if (self.annotations.get(self.annotations.relpath(p)) or "") == target
+        ]
+
     def _total_pages(self):
         return max(
             1,
-            (len(self.image_paths) + self.tiles_per_page - 1)
+            (len(self._visible_paths()) + self.tiles_per_page - 1)
             // self.tiles_per_page,
         )
 
@@ -1761,11 +1879,17 @@ class TiledViewer(QMainWindow):
 
     def _update_status(self):
         """Update status bar."""
+        visible = self._visible_paths()
         start = self.current_page * self.tiles_per_page + 1
+        filter_suffix = ""
+        if self._category_filter is not None:
+            label = "Un-annotated" if self._category_filter == "" else self._category_filter
+            filter_suffix = f"   |   Filter: {label}"
+
         if self._fast_mode:
             n_shown = len(self.thumbnail_grid.paths)
-            end = min(start + n_shown - 1, len(self.image_paths))
-            text = f"Showing {start}-{end} of {len(self.image_paths)} images"
+            end = min(start + n_shown - 1, len(visible))
+            text = f"Showing {start}-{end} of {len(visible)} images{filter_suffix}"
             selected = self.thumbnail_grid.selected_paths
             if len(selected) == 1:
                 text += f"   |   Selected: {Path(selected[0]).name}"
@@ -1774,8 +1898,8 @@ class TiledViewer(QMainWindow):
             self.status_label.setText(text)
             return
 
-        end = min(start + len(self.tile_widgets) - 1, len(self.image_paths))
-        text = f"Showing {start}-{end} of {len(self.image_paths)} images"
+        end = min(start + len(self.tile_widgets) - 1, len(visible))
+        text = f"Showing {start}-{end} of {len(visible)} images{filter_suffix}"
         if len(self.selected_tiles) == 1 and self.selected_tiles[0].file_path:
             text += f"   |   Selected: {Path(self.selected_tiles[0].file_path).name}"
         elif len(self.selected_tiles) > 1:
@@ -1935,9 +2059,16 @@ class TiledViewer(QMainWindow):
         wherever possible instead of destroying and recreating them —
         see ``_resize_tile_pool`` for why that matters.
         """
+        visible = self._visible_paths()
+        total_pages = max(
+            1, (len(visible) + self.tiles_per_page - 1) // self.tiles_per_page
+        )
+        if self.current_page >= total_pages:
+            self.current_page = total_pages - 1
+
         start = self.current_page * self.tiles_per_page
-        end = min(start + self.tiles_per_page, len(self.image_paths))
-        page_paths = self.image_paths[start:end]
+        end = min(start + self.tiles_per_page, len(visible))
+        page_paths = visible[start:end]
 
         if self._fast_mode:
             self._load_current_page_fast(page_paths)
@@ -1989,11 +2120,12 @@ class TiledViewer(QMainWindow):
         """
         self.thumbnail_grid.set_items(page_paths, dims=self._current_dims)
 
-        # Decode the current page first, then the rest of the folder in
-        # the background so paging around later tends to already be warm.
+        # Decode the current page first, then the rest of the *visible*
+        # (filtered) set in the background so paging around later tends
+        # to already be warm. Filtered-out images are never decoded here.
         page_set = set(page_paths)
         priority = page_paths + [
-            p for p in self.image_paths if p not in page_set
+            p for p in self._visible_paths() if p not in page_set
         ]
         self.thumbnail_grid.set_priority(priority)
 
@@ -2217,11 +2349,11 @@ class TiledViewer(QMainWindow):
             self._toggle_show_info()
         elif key == Qt.Key_Plus or key == Qt.Key_Equal:
             # Increase tile size
-            new_size = min(400, self.tile_size + 25)
+            new_size = min(self._tile_size_max, self.tile_size + 25)
             self.size_slider.setValue(new_size)
         elif key == Qt.Key_Minus:
             # Decrease tile size
-            new_size = max(100, self.tile_size - 25)
+            new_size = max(self._tile_size_min, self.tile_size - 25)
             self.size_slider.setValue(new_size)
         elif key == Qt.Key_Up:
             # Next Z slice

@@ -302,6 +302,19 @@ class Workspace(QMainWindow):
         # top-of-screen menu bar as the workspace's own and hijack it
         # permanently (tab switches never re-evaluate native menu bar
         # ownership within one top-level window).
+        # Set before _mirror_spec: the first time a given MENU_SPEC is
+        # mirrored, _mirror_spec's own _refresh_mirrored_menus() call (see
+        # below) needs this window's spec to already read as active, or it
+        # adds the just-built top-level actions and immediately removes
+        # them again (stale active tab), relying on the second
+        # _refresh_mirrored_menus() call at the end of this method to
+        # re-add them. Harmless in practice since both calls converge to
+        # the same end state, but pointlessly churns the native menu bar
+        # on the exact "first viewer of this class, single tab, right as
+        # it opens" path -- avoid the churn instead of relying on it
+        # resolving itself.
+        self._active_tab_widget = window
+
         spec = getattr(type(window), "MENU_SPEC", None)
         if spec is not None:
             self._mirror_spec(spec)
@@ -327,7 +340,6 @@ class Workspace(QMainWindow):
         group = self._active_group()
         group.addTab(window, title or window.windowTitle() or "Image")
         group.setCurrentWidget(window)
-        self._active_tab_widget = window
         manager.set_active_window(window)
         self._refresh_mirrored_menus()
 

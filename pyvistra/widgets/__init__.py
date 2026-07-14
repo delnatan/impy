@@ -55,6 +55,7 @@ from .psf_distillation_worker import PSFDistillationWorker
 from .processing_helper import BufferProcessingRunner
 from .overlay_settings import OverlaySettingsDialog
 from .zmontage_settings import ZMontageSettingsDialog
+from .tiled_display_settings_dialog import TiledDisplaySettingsDialog
 
 __all__ = [
     # Theme constants
@@ -97,6 +98,7 @@ __all__ = [
     "PSFDistillationWorker",
     "OverlaySettingsDialog",
     "ZMontageSettingsDialog",
+    "TiledDisplaySettingsDialog",
     "BufferProcessingRunner",
     "LineProfileDialog",
     "get_line_profile_dialog",
