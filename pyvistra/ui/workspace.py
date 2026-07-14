@@ -66,6 +66,14 @@ def _build_proxy_menu_items(menu, items, get_target, leaf_actions):
             action.setShortcut(item["shortcut"])
         if "tooltip" in item:
             action.setToolTip(item["tooltip"])
+        enabled = item.get("enabled", True)
+        # Cached on the action itself so _refresh_mirrored_menus can AND
+        # it with tab-match -- that method unconditionally re-enables
+        # every leaf action of the active spec, which would otherwise
+        # clobber an item disabled here (e.g. an optional dependency
+        # that isn't installed) the next time its tab becomes active.
+        action._pv_enabled = enabled() if callable(enabled) else enabled
+        action.setEnabled(action._pv_enabled)
         method_name = item["method"]
 
         def _dispatch(checked=False, method_name=method_name):
@@ -352,6 +360,14 @@ class Workspace(QMainWindow):
         if menu_bar is not None:
             menu_bar.setVisible(True)
         window.setParent(None)
+        # ImageWindow owns a live vispy QOpenGLWidget canvas; reparenting
+        # it from being a tab's child to a top-level window corrupts its
+        # GL context on this platform (GL errors, then a hard crash) --
+        # rebuild the canvas fresh instead of letting show() paint the
+        # reparented one. Other docked viewer types don't have this
+        # method and keep today's (unfixed) behavior.
+        if hasattr(window, "_rebuild_canvas_for_float"):
+            window._rebuild_canvas_for_float()
         window.show()
         window.raise_()
         # Reparenting out of the tab group back to a real top-level window
@@ -459,7 +475,7 @@ class Workspace(QMainWindow):
                 # (e.g. Shift+C) mirrored for the viewer class whose
                 # tab actually is active, making both ambiguous so
                 # neither fires.
-                action.setEnabled(match)
+                action.setEnabled(match and getattr(action, "_pv_enabled", True))
 
     def _show_layer_manager(self):
         from .layer_manager import show_layer_manager

@@ -101,14 +101,30 @@ except Exception:
     app.use_app("pyqt5")
 
 
+def _memsolve_available() -> bool:
+    """Whether the optional MaxEnt engine (the `memsolve` package, import
+    name `mem`) is installed. memsolve is being sunset -- pyvistra never
+    depends on it at the package level (see the `memsolve` extra in
+    pyproject.toml), so its menu entry is disabled rather than crashing
+    when the user actually opens the dialog."""
+    try:
+        import mem  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 # Declarative menu structure for ImageWindow's File/Adjust/Image/View
 # menus: (menu_title, [item, ...]) where each item is either None (a
 # separator) or a dict with "label", "method" (name looked up on the
-# target at trigger time), and optional "shortcut"/"tooltip". Single
-# source of truth for both ImageWindow's own embedded menu bar
-# (build_menus(..., target=self)) and the Workspace shell's persistent
-# mirrored bar (build_menus(..., target=get_active_window) — see
-# ui/workspace.py), so the two never drift apart.
+# target at trigger time), and optional "shortcut"/"tooltip"/"enabled".
+# "enabled" may be a bool or a zero-arg callable evaluated once when the
+# action is built; a falsy result disables (greys out) the action -- see
+# _memsolve_available for the one current use. Single source of truth
+# for both ImageWindow's own embedded menu bar (build_menus(...,
+# target=self)) and the Workspace shell's persistent mirrored bar
+# (build_menus(..., target=get_active_window) — see ui/workspace.py), so
+# the two never drift apart.
 MENU_SPEC = [
     ("File", [
         {"label": "Save as TIFF...", "shortcut": "Ctrl+S", "method": "save_as_tiff"},
@@ -151,8 +167,13 @@ MENU_SPEC = [
         {"label": "Deconvolution", "submenu": [
             {"label": "NLCG (default)...", "method": "show_deconvolution_dialog"},
             {"label": "Richardson-Lucy...", "method": "show_rl_deconvolution_dialog"},
-            {"label": "MaxEnt (memsolve)...", "method": "show_memsolve_deconvolution_dialog"},
-            {"label": "ER-Decon (edge-preserving)...", "method": "show_erdecon_dialog"},
+            {
+                "label": "MaxEnt (memsolve)...",
+                "method": "show_memsolve_deconvolution_dialog",
+                "enabled": _memsolve_available,
+                "tooltip": "Requires the optional 'memsolve' package (pip install memsolve)",
+            },
+            {"label": "jetnewton (log-penalty)...", "method": "show_jetnewton_dialog"},
         ]},
         {"label": "PSF Distillation (NLCG)...", "method": "show_psf_distillation_dialog"},
         None,
@@ -180,6 +201,8 @@ def _build_menu_items(menu, items, target, actions):
             action.setShortcut(item["shortcut"])
         if "tooltip" in item:
             action.setToolTip(item["tooltip"])
+        enabled = item.get("enabled", True)
+        action.setEnabled(enabled() if callable(enabled) else enabled)
         action.triggered.connect(getattr(target, item["method"]))
         menu.addAction(action)
         actions.append(action)
@@ -307,12 +330,7 @@ class ImageWindow(QMainWindow):
         self.layout.setSpacing(0)
 
         # 3. Vispy Canvas
-        self.canvas = scene.SceneCanvas(keys=None, bgcolor="black", show=False)
-        self.view = self.canvas.central_widget.add_view()
-        self.view.camera = "panzoom"
-        self.view.camera.aspect = 1
-
-        self.layout.addWidget(self.canvas.native, 1)
+        self._build_canvas()
 
         # 4. Info Bar
         self.info_label = QLabel("Hover over image")
@@ -377,7 +395,7 @@ class ImageWindow(QMainWindow):
         self._deconvolution_dialog = None
         self._rl_deconvolution_dialog = None
         self._memsolve_deconvolution_dialog = None
-        self._erdecon_dialog = None
+        self._jetnewton_dialog = None
         self._psf_distillation_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
@@ -472,33 +490,11 @@ class ImageWindow(QMainWindow):
         self._replace_slice_loader(self.img_data)
 
         # 13. Events
-        self.canvas.events.mouse_move.connect(self.on_mouse_move)
-        self.canvas.events.mouse_press.connect(self.on_mouse_press)
-        self.canvas.events.mouse_release.connect(self.on_mouse_release)
-        self.canvas.events.key_press.connect(self._on_vispy_key_press)
-        self.canvas.events.mouse_release.connect(self._on_view_transform_event)
-        self.canvas.events.mouse_wheel.connect(self._on_view_transform_event)
-        self.canvas.events.resize.connect(self._on_view_transform_event)
+        self._connect_canvas_events()
         manager.tool_changed.connect(self._on_active_tool_changed)
 
         # 14. Hover tooltip (on-canvas Text visual for point info)
-        self._hover_label = scene.visuals.Text(
-            text="",
-            pos=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
-            color=(1.0, 1.0, 1.0, 0.95),
-            font_size=9,
-            anchor_x="left",
-            anchor_y="bottom",
-            parent=self.view.scene,
-        )
-        self._hover_label.order = 10_100
-        self._hover_label.set_gl_state(
-            preset="translucent",
-            blend=True,
-            blend_func=("src_alpha", "one_minus_src_alpha"),
-            depth_test=False,
-        )
-        self._hover_label.visible = False
+        self._build_hover_label()
 
         # Focus policy
         self.setFocusPolicy(Qt.StrongFocus)
@@ -756,6 +752,164 @@ class ImageWindow(QMainWindow):
                 self.update_cursor()
         else:
             super().keyReleaseEvent(event)
+
+    def _build_canvas(self):
+        """(Re)build the vispy canvas/view/camera and add it to the layout.
+
+        Split out of __init__ so `_rebuild_canvas_for_float` can build a
+        brand-new canvas (fresh GL context) rather than reparenting the
+        live one -- reparenting a QOpenGLWidget from an embedded tab to a
+        top-level window corrupts its GL context on this platform and
+        crashes (see Workspace.float_window).
+        """
+        self.canvas = scene.SceneCanvas(keys=None, bgcolor="black", show=False)
+        self.view = self.canvas.central_widget.add_view()
+        self.view.camera = "panzoom"
+        self.view.camera.aspect = 1
+        self.layout.addWidget(self.canvas.native, 1)
+
+    def _connect_canvas_events(self):
+        self.canvas.events.mouse_move.connect(self.on_mouse_move)
+        self.canvas.events.mouse_press.connect(self.on_mouse_press)
+        self.canvas.events.mouse_release.connect(self.on_mouse_release)
+        self.canvas.events.key_press.connect(self._on_vispy_key_press)
+        self.canvas.events.mouse_release.connect(self._on_view_transform_event)
+        self.canvas.events.mouse_wheel.connect(self._on_view_transform_event)
+        self.canvas.events.resize.connect(self._on_view_transform_event)
+
+    def _build_hover_label(self):
+        self._hover_label = scene.visuals.Text(
+            text="",
+            pos=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+            color=(1.0, 1.0, 1.0, 0.95),
+            font_size=9,
+            anchor_x="left",
+            anchor_y="bottom",
+            parent=self.view.scene,
+        )
+        self._hover_label.order = 10_100
+        self._hover_label.set_gl_state(
+            preset="translucent",
+            blend=True,
+            blend_func=("src_alpha", "one_minus_src_alpha"),
+            depth_test=False,
+        )
+        self._hover_label.visible = False
+
+    def _rebuild_canvas_for_float(self):
+        """Tear down the live GL canvas and build a fresh one in place.
+
+        Reparenting a QOpenGLWidget from being a workspace tab's child to
+        a top-level window corrupts its GL context on this platform (GL
+        errors followed by a hard crash) -- see Workspace.float_window.
+        The only reliable fix is to never move the live canvas: discard
+        it and rebuild every visual from its underlying data (data/ and
+        visuals/ are already kept separate for exactly this reason).
+        """
+        saved_rect = self.view.camera.rect
+        overlay_config = self.overlay.get_config()
+
+        # Transient/interactive visuals: drop them, they lazily recreate
+        # themselves on next use (focused-point editing, contour drawing,
+        # cross-window line-profile overlays).
+        self.clear_focused_point()
+        self._contour_marker = None
+        self._external_overlays.clear()
+
+        # Persistent, data-backed visuals: dispose the GL objects but
+        # keep the data (dicts/Layer entries) so they can be rebuilt.
+        self.overlay.remove()
+        for entry in self._track_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.remove()
+        for entry in self._point_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.remove()
+        for entry in self._mask_layers.values():
+            visual = entry.get("visual")
+            if visual is not None:
+                visual.remove()
+        for layer in self.layers.by_type("shapes"):
+            if layer.visual is not None:
+                layer.visual.remove()
+        for layer_visual in self.renderer.layers:
+            layer_visual.parent = None
+
+        self.layout.removeWidget(self.canvas.native)
+        self.canvas.close()
+
+        # Fresh GL context, then rebuild everything that renders into it.
+        self._build_canvas()
+        self._connect_canvas_events()
+
+        is_rgb = self.meta.get("is_rgb", False)
+        self.renderer = CompositeImageVisual(
+            self.view,
+            self.img_data,
+            is_rgb=is_rgb,
+            channels_meta=self.meta.get("channels"),
+        )
+        if saved_rect is not None:
+            self.view.camera.rect = saved_rect
+        else:
+            self.renderer.reset_camera(self.img_data.shape)
+
+        self._build_hover_label()
+
+        self._init_overlay()
+        self.overlay.set_config(overlay_config)
+
+        for name, entry in self._mask_layers.items():
+            visual = LabelOverlayVisual(
+                self.view,
+                shape_yx=(self.Y, self.X),
+                scale=self.renderer.scale,
+            )
+            entry["visual"] = visual
+            if entry["labels"] is not None:
+                visual.set_labels(entry["labels"])
+                if entry["labels"].ndim == 3:
+                    visual.update_slice(self.z_idx)
+            visual.visible = entry["visible"]
+            if name in self.layers:
+                self.layers[name].visual = visual
+
+        for name, entry in self._point_layers.items():
+            visual = PointLayerVisual(self.view, **entry["style"])
+            entry["visual"] = visual
+            visual.set_points(entry["points"])
+            visual.set_time_z(self.t_idx, self.z_idx)
+            visual.set_selected_point_ids(entry["selected_ids"])
+            visual.visible = entry["visible"]
+            if name in self.layers:
+                self.layers[name].visual = visual
+
+        for name, entry in self._track_layers.items():
+            old_visual = entry["visual"]
+            trail_window = getattr(old_visual, "_trail_window", 30)
+            line_width = getattr(old_visual, "_line_width", 2.0)
+            opacity = getattr(old_visual, "_opacity", 0.9)
+            visual = TrackLayerVisual(
+                self.view,
+                trail_window=trail_window,
+                line_width=line_width,
+                opacity=opacity,
+            )
+            entry["visual"] = visual
+            visual.set_tracks(entry["tracks"])
+            visual.set_time_z(self.t_idx, self.z_idx)
+            visual.visible = entry["visible"]
+            if name in self.layers:
+                self.layers[name].visual = visual
+
+        for layer in self.layers.by_type("shapes"):
+            visual = ShapeLayerVisual(self.view.scene)
+            visual.update(layer.data, layer.selected_ids, self.t_idx, self.z_idx)
+            layer.visual = visual
+
+        self.canvas.update()
 
     def get_data(self):
         """Return the current image data."""
@@ -2898,12 +3052,12 @@ class ImageWindow(QMainWindow):
         self._memsolve_deconvolution_dialog.show()
         self._memsolve_deconvolution_dialog.raise_()
 
-    def show_erdecon_dialog(self):
-        from pyvistra.widgets.erdecon_dialog import ERDeconDialog
-        if self._erdecon_dialog is None:
-            self._erdecon_dialog = ERDeconDialog(self, parent=self)
-        self._erdecon_dialog.show()
-        self._erdecon_dialog.raise_()
+    def show_jetnewton_dialog(self):
+        from pyvistra.widgets.jetnewton_dialog import JetNewtonDialog
+        if self._jetnewton_dialog is None:
+            self._jetnewton_dialog = JetNewtonDialog(self, parent=self)
+        self._jetnewton_dialog.show()
+        self._jetnewton_dialog.raise_()
 
     def show_psf_distillation_dialog(self):
         from pyvistra.widgets.psf_distillation_dialog import PSFDistillationDialog

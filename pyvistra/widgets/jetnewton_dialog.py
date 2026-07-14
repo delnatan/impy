@@ -1,33 +1,52 @@
-"""Deconvolution dialog — ER-Decon engine (deconlib.deconvolution.erdecon_*).
+"""Deconvolution dialog — jetnewton engine (deconlib.deconvolution.jetnewton_mlx).
 
-Edge-preserving Hessian-log deconvolution by Gauss-Newton-CG (Arigovindan,
-Fung, Elnatan et al. 2013, simplified — see
-`deconlib.deconvolution.erdecon_mlx` module docstring). Two-tab layout,
-mirroring the NLCG/Richardson-Lucy/MaxEnt dialogs:
+Non-dimensional log-penalty deconvolution solved by an *exact*-Hessian
+active-set projected Newton method (Arigovindan/Elnatan-style log-curvature
+regularizer, but no Gauss-Newton surrogate) -- the successor to, and full
+replacement for, ER-Decon. See `deconlib.deconvolution.jetnewton_mlx`'s
+module docstring and `deconlib/scripts/widefield_jetnewton_realdata_demo.py`
+for the algorithm and its "UI design notes".
+
+The parameter surface is deliberately narrow (see that docstring):
+    * `beta` (regularization strength) is the *only* free knob -- a
+      log-scale slider, ~1e-4 to 1e-1.
+    * `s0` (intensity scale), `ell`/`kappa` (PSF length scale), and `eta`
+      (penalty saturation threshold) are always auto-calibrated from
+      required acquisition inputs (noise sigma, PSF, pixel spacing) --
+      never typed in. The "Calibration (auto)" group shows the derived
+      values read-only, for transparency, not as editable fields.
+    * Optimizer knobs (CG steps, Newton/tol thresholds, active-set
+      parameters) are advanced/hidden with sane fixed defaults.
+    * No wavelet/combined regularizer, no missing-cone/OTF term -- jetnewton
+      is curvature-only by design (see module docstring for why both were
+      tried and dropped).
+
+Two-tab layout, mirroring the ER-Decon dialog it replaces:
     * Source, PSF && Model — ROI / frame / channel / PSF window picker,
       forward-model zoom (shared `SourcePSFPanelMixin`).
-    * Solver — data term (Gaussian/Poisson), the (always-on) edge-preserving
-      log(eps + curvature) regularizer's lambda/eps/floor and curvature
-      operator (spacing-weighted Hessian or a-trous wavelet), Gauss-Newton-CG
-      solver knobs, output region, and optional tiling for large fields.
+    * Solver — data term, required noise-sigma input, the beta slider, the
+      read-only auto-calibration panel, advanced optimizer knobs, output
+      region, and optional tiling for large fields.
 
-The dialog reads its widgets into a :class:`~.decon_erdecon.ERDeconDialogState`,
-builds a :class:`~.decon_erdecon.PreparedInputs`, and hands the result to
-:class:`~.erdecon_worker.ERDeconWorker`.
+The dialog reads its widgets into a
+:class:`~.decon_jetnewton.JetNewtonDialogState`, builds a
+:class:`~.decon_jetnewton.PreparedInputs` plus a
+:class:`~.decon_jetnewton.Calibration`, and hands the result to
+:class:`~.jetnewton_worker.JetNewtonWorker`.
 """
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Optional
 
 import numpy as np
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QDialog,
-    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -39,6 +58,7 @@ from qtpy.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -49,20 +69,96 @@ from .decon_source_panel import SourcePSFPanelMixin
 from .deconvolution_dialog import ScientificDoubleSpinBox
 from .output_selector import ImageOutputSelector
 from .processing_helper import BufferProcessingRunner
-from . import decon_erdecon as der
-from .erdecon_worker import ERDeconWorker
+from . import decon_jetnewton as jn
+from .jetnewton_worker import JetNewtonWorker
 
 
-class ERDeconDialog(SourcePSFPanelMixin, QDialog):
-    """Single-channel 2D/3D deconvolution dialog (ER-Decon)."""
+class _LogSlider(QWidget):
+    """Log-scale slider + exact-value spinbox, kept in sync both ways.
+
+    `beta` is the one genuine UI knob for jetnewton (see module docstring)
+    -- a plain linear slider would waste almost all its travel above 1e-2
+    and give no useful resolution below it, so the slider position maps to
+    `log10(value)` instead.
+    """
+
+    valueChanged = Signal(float)
+
+    def __init__(
+        self,
+        minimum: float = 1e-4,
+        maximum: float = 1e-1,
+        value: float = 1e-2,
+        steps: int = 300,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._log_min = math.log10(minimum)
+        self._log_max = math.log10(maximum)
+        self._steps = steps
+        self._updating = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self._slider = QSlider(Qt.Horizontal)
+        self._slider.setRange(0, steps)
+        layout.addWidget(self._slider, 1)
+
+        self._spin = ScientificDoubleSpinBox()
+        self._spin.setRange(minimum, maximum)
+        self._spin.setFixedWidth(96)
+        layout.addWidget(self._spin)
+
+        self._slider.valueChanged.connect(self._on_slider_changed)
+        self._spin.valueChanged.connect(self._on_spin_changed)
+        self.setValue(value)
+
+    def _pos_from_value(self, value: float) -> int:
+        value = min(max(value, 10**self._log_min), 10**self._log_max)
+        frac = (math.log10(value) - self._log_min) / (self._log_max - self._log_min)
+        return round(frac * self._steps)
+
+    def _value_from_pos(self, pos: int) -> float:
+        frac = pos / self._steps
+        return 10 ** (self._log_min + frac * (self._log_max - self._log_min))
+
+    def _on_slider_changed(self, pos: int) -> None:
+        if self._updating:
+            return
+        self._updating = True
+        value = self._value_from_pos(pos)
+        self._spin.setValue(value)
+        self._updating = False
+        self.valueChanged.emit(value)
+
+    def _on_spin_changed(self, value: float) -> None:
+        if self._updating:
+            return
+        self._updating = True
+        self._slider.setValue(self._pos_from_value(value))
+        self._updating = False
+        self.valueChanged.emit(value)
+
+    def value(self) -> float:
+        return self._spin.value()
+
+    def setValue(self, value: float) -> None:
+        self._spin.setValue(value)
+        self._slider.setValue(self._pos_from_value(value))
+
+
+class JetNewtonDialog(SourcePSFPanelMixin, QDialog):
+    """Single-channel 2D/3D deconvolution dialog (jetnewton)."""
 
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
-        self.setWindowTitle("ER-Decon (Edge-Preserving)")
+        self.setWindowTitle("jetnewton (Active-Set Projected Newton)")
         self.setWindowFlags(Qt.Tool)
-        self.resize(600, 680)
-        self.setMinimumSize(540, 460)
+        self.resize(600, 720)
+        self.setMinimumSize(540, 480)
 
         self._runner = None
         self._running_status_base: Optional[str] = None
@@ -70,6 +166,11 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(1000)
         self._status_timer.timeout.connect(self._refresh_running_status)
+
+        self._calib_timer = QTimer(self)
+        self._calib_timer.setSingleShot(True)
+        self._calib_timer.setInterval(600)
+        self._calib_timer.timeout.connect(self._refresh_calibration)
 
         self._init_source_psf_panel()
 
@@ -88,7 +189,7 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         output_v.setSpacing(6)
 
         self.output_selector = ImageOutputSelector(
-            default_title="Deconvolved (ER-Decon)",
+            default_title="Deconvolved (jetnewton)",
             formats=[".tif", ".ims"],
         )
         output_v.addWidget(self.output_selector)
@@ -130,6 +231,7 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         self._on_tiling_toggled(self.tiled_check.isChecked())
         self._refresh_compute_target_hint()
         self._refresh_recipe_preview()
+        self._refresh_calibration()
 
     # ------------------------------------------------------------------ #
     # Solver tab
@@ -152,145 +254,147 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         vbox.setContentsMargins(8, 8, 8, 8)
         vbox.setSpacing(6)
 
-        # Data term — Gaussian LS (default, cheaper) or Poisson I-divergence.
+        # Data term.
         data_grp = QGroupBox("Data term")
         data_layout = QHBoxLayout(data_grp)
         data_layout.setContentsMargins(8, 6, 8, 6)
         data_layout.setSpacing(8)
-        self.data_gaussian_radio = QRadioButton("Gaussian (least-squares)")
-        self.data_gaussian_radio.setChecked(True)
-        self.data_gaussian_radio.setToolTip(
-            "||K g - f||^2 — read-noise-limited or well-exposed data; cheaper."
-        )
         self.data_poisson_radio = QRadioButton("Poisson (shot-noise)")
+        self.data_poisson_radio.setChecked(True)
         self.data_poisson_radio.setToolTip(
             "Shot-noise I-divergence, the statistically correct term for "
             "photon-limited data. Model the pedestal via Background rather "
             "than pre-subtracting it."
         )
-        data_layout.addWidget(self.data_gaussian_radio)
+        self.data_gaussian_radio = QRadioButton("Gaussian (least-squares)")
+        self.data_gaussian_radio.setToolTip(
+            "Variance-normalized least-squares (uses Noise sigma below as "
+            "the Gaussian sigma) — read-noise-limited data."
+        )
         data_layout.addWidget(self.data_poisson_radio)
+        data_layout.addWidget(self.data_gaussian_radio)
         data_layout.addStretch()
         self._data_term_group = QButtonGroup(self)
-        self._data_term_group.addButton(self.data_gaussian_radio)
         self._data_term_group.addButton(self.data_poisson_radio)
+        self._data_term_group.addButton(self.data_gaussian_radio)
         vbox.addWidget(data_grp)
 
-        # Edge-preserving Hessian-log regularizer — always on (intrinsic to
-        # the algorithm, unlike NLCG's optional gradient/Hessian term).
-        reg_grp = QGroupBox("Edge-preserving regularizer")
-        reg_grp.setToolTip(
-            "log(eps + |Hg|^2) curvature penalty — smooths noise, preserves "
-            "edges. Not optional; this is what distinguishes ER-Decon from "
-            "plain NLCG/RL."
+        # Required acquisition input — noise sigma. Background lives on the
+        # Source/PSF tab (shared `background_spin`).
+        acq_grp = QGroupBox("Acquisition input")
+        acq_form = QFormLayout(acq_grp)
+        acq_form.setLabelAlignment(Qt.AlignRight)
+        acq_form.setVerticalSpacing(4)
+        acq_form.setContentsMargins(8, 6, 8, 6)
+        self.noise_sigma_spin = ScientificDoubleSpinBox()
+        self.noise_sigma_spin.setRange(1e-6, 1e6)
+        self.noise_sigma_spin.setValue(15.0)
+        self.noise_sigma_spin.setFixedWidth(96)
+        self.noise_sigma_spin.setToolTip(
+            "Measured data-space noise sigma (e.g. from camera calibration) "
+            "— NOT derived from Background, which is just the camera's "
+            "baseline clamp, a DC offset unrelated to noise. Required, "
+            "explicit input; sets the intensity scale s0 below."
         )
-        reg_grid = QGridLayout(reg_grp)
-        reg_grid.setContentsMargins(8, 6, 8, 6)
-        reg_grid.setHorizontalSpacing(10)
-        reg_grid.setVerticalSpacing(4)
-        reg_grid.setColumnStretch(1, 1)
-        reg_grid.setColumnStretch(3, 1)
+        acq_form.addRow("Noise sigma (data):", self.noise_sigma_spin)
+        vbox.addWidget(acq_grp)
 
-        self.reg_weight_spin = ScientificDoubleSpinBox()
-        self.reg_weight_spin.setRange(0.0, 1e6)
-        self.reg_weight_spin.setValue(0.05)
-        self.reg_weight_spin.setFixedWidth(96)
-        self.reg_weight_spin.setToolTip(
-            "Smoothness weight lambda. Scene/SNR/scale dependent — start at "
-            "the default and increase to control noise amplification."
+        # The one genuine knob.
+        reg_grp = QGroupBox("Regularization")
+        reg_v = QVBoxLayout(reg_grp)
+        reg_v.setContentsMargins(8, 6, 8, 6)
+        reg_v.setSpacing(4)
+        reg_hint = QLabel(
+            "Beta is the only free parameter — everything else below is "
+            "either a required input or auto-calibrated."
         )
-        self.eps_reg_spin = ScientificDoubleSpinBox()
-        self.eps_reg_spin.setRange(1e-12, 1e6)
-        self.eps_reg_spin.setValue(1e-2)
-        self.eps_reg_spin.setFixedWidth(96)
-        self.eps_reg_spin.setToolTip(
-            "Curvature threshold eps, in units of |Hg|^2 (an absolute "
-            "curvature scale on the normalized [0, 1] data, not a fraction "
-            "of lambda). Curvature below it is smoothed as noise, above it "
-            "preserved as an edge — broad, flat optimum; tune to the "
-            "reconstruction's curvature, not to lambda."
+        reg_hint.setStyleSheet("color: #888; font-size: 10px;")
+        reg_hint.setWordWrap(True)
+        reg_v.addWidget(reg_hint)
+        beta_row = QHBoxLayout()
+        beta_row.setSpacing(8)
+        beta_row.addWidget(QLabel("Beta:"))
+        self.beta_slider = _LogSlider(
+            minimum=1e-6, maximum=1e3, value=1e-2, steps=900
         )
-        self.floor_frac_spin = ScientificDoubleSpinBox()
-        self.floor_frac_spin.setRange(0.0, 1.0)
-        self.floor_frac_spin.setValue(0.0)
-        self.floor_frac_spin.setFixedWidth(96)
-        self.floor_frac_spin.setToolTip(
-            "Quadratic-in-curvature IRLS floor (0 = off). Without it, once a "
-            "voxel's curvature crosses Eps the penalty's weight keeps falling "
-            "to 0 as curvature grows further, so nothing pulls flux back -- "
-            "the optimizer can over-sharpen a real-but-modest bump into an "
-            "isolated near-delta 'hot pixel' spike. Start small (0.01-0.05) "
-            "and raise (up to ~0.5) if spikes persist; it barely affects "
-            "genuine multi-pixel edges but costs some I-divergence fit."
+        self.beta_slider.setToolTip(
+            "Overall regularization weight (log scale). Lower idiv (better "
+            "fit) trades off against axial/structural collapse as beta "
+            "shrinks — sweep and watch both together; real data typically "
+            "plateaus in idiv well above the idealized Poisson floor, so "
+            "don't chase it past that plateau."
         )
-        reg_grid.addWidget(QLabel("Lambda:"), 0, 0, Qt.AlignRight)
-        reg_grid.addWidget(self.reg_weight_spin, 0, 1)
-        reg_grid.addWidget(QLabel("Eps:"), 0, 2, Qt.AlignRight)
-        reg_grid.addWidget(self.eps_reg_spin, 0, 3)
-        reg_grid.addWidget(QLabel("Floor frac:"), 1, 0, Qt.AlignRight)
-        reg_grid.addWidget(self.floor_frac_spin, 1, 1)
-
-        # Curvature operator: default Hessian2D/3D, or a single-scale a-trous
-        # wavelet operator (dominates the Hessian on smoothness/accuracy at
-        # levels=1, but doesn't correct axial/lateral anisotropy the way the
-        # Hessian path does -- see decon_erdecon.build_regularizer).
-        self.reg_hessian_radio = QRadioButton("Hessian (spacing-corrected)")
-        self.reg_hessian_radio.setChecked(True)
-        self.reg_wavelet_radio = QRadioButton("A-trous wavelet")
-        self.reg_wavelet_radio.setToolTip(
-            "Curvature measured as 'image minus one smoothed copy of itself' "
-            "at each scale, noise-calibrated per scale, instead of a fixed "
-            "second-difference stencil -- tends to dominate the Hessian on "
-            "smoothness and accuracy. Does not correct for axial/lateral "
-            "physical anisotropy (unlike the Hessian path); capped at 2 "
-            "levels, the range validated against ringing."
-        )
-        self.reg_combined_radio = QRadioButton("Combined (Hessian + wavelet)")
-        self.reg_combined_radio.setToolTip(
-            "Both operators stacked and thresholded independently -- a "
-            "spurious curvature spike has to fool the Hessian and the "
-            "wavelet channels simultaneously to escape regularization. "
-            "Fixes a real-dataset failure mode where the wavelet operator "
-            "alone produced an isolated near-delta 'hot pixel' spike. Each "
-            "operator's channels are noise-calibrated independently "
-            "(slightly more setup cost than either operator alone)."
-        )
-        self._reg_type_group = QButtonGroup(self)
-        self._reg_type_group.addButton(self.reg_hessian_radio)
-        self._reg_type_group.addButton(self.reg_wavelet_radio)
-        self._reg_type_group.addButton(self.reg_combined_radio)
-        reg_type_row = QHBoxLayout()
-        reg_type_row.setSpacing(8)
-        reg_type_row.addWidget(self.reg_hessian_radio)
-        reg_type_row.addWidget(self.reg_wavelet_radio)
-        reg_type_row.addWidget(self.reg_combined_radio)
-        reg_type_row.addStretch()
-        reg_grid.addLayout(reg_type_row, 2, 0, 1, 4)
-
-        self.wavelet_levels_spin = QSpinBox()
-        self.wavelet_levels_spin.setRange(1, 2)
-        self.wavelet_levels_spin.setValue(1)
-        self.wavelet_levels_spin.setFixedWidth(64)
-        self.wavelet_levels_spin.setToolTip(
-            "Number of wavelet scales (levels=1 is the validated/recommended "
-            "default; levels=2 can start ringing on strong edges)."
-        )
-        self._wavelet_levels_label = QLabel("Wavelet levels:")
-        reg_grid.addWidget(self._wavelet_levels_label, 3, 0, Qt.AlignRight)
-        reg_grid.addWidget(self.wavelet_levels_spin, 3, 1)
-        self._reg_type_group.buttonToggled.connect(self._on_regularizer_type_toggled)
-        self._on_regularizer_type_toggled()
+        beta_row.addWidget(self.beta_slider, 1)
+        reg_v.addLayout(beta_row)
         vbox.addWidget(reg_grp)
 
-        # Gauss-Newton-CG solver knobs — primary fields, with an "Advanced"
-        # collapsible group for knobs that rarely need tuning.
-        self._erdecon_box = self._build_erdecon_knobs()
-        vbox.addWidget(self._erdecon_box)
-        self._erdecon_advanced_box = self._build_erdecon_advanced_knobs()
-        vbox.addWidget(self._erdecon_advanced_box)
+        # Auto-calibrated, read-only.
+        calib_grp = QGroupBox("Calibration (auto)")
+        calib_grp.setToolTip(
+            "Derived from the inputs above — PSF optics, pixel spacing, "
+            "Noise sigma — never guessed or hand-tuned. Recomputes shortly "
+            "after any relevant change; use Recalculate to force it now."
+        )
+        calib_form = QFormLayout(calib_grp)
+        calib_form.setLabelAlignment(Qt.AlignRight)
+        calib_form.setVerticalSpacing(4)
+        calib_form.setContentsMargins(8, 6, 8, 6)
+        self.calib_s0_label = QLabel("—")
+        self.calib_eta_label = QLabel("—")
+        self.calib_ell_label = QLabel("—")
+        self.calib_kappa_label = QLabel("—")
+        for lbl in (
+            self.calib_s0_label, self.calib_eta_label,
+            self.calib_ell_label, self.calib_kappa_label,
+        ):
+            lbl.setStyleSheet("font-size: 10px;")
+            lbl.setWordWrap(True)
+        calib_form.addRow("s0 (intensity scale):", self.calib_s0_label)
+        calib_form.addRow("eta (penalty threshold):", self.calib_eta_label)
+        calib_form.addRow("ell (PSF length scale):", self.calib_ell_label)
+        calib_form.addRow("kappa (ell / spacing):", self.calib_kappa_label)
+        recalc_btn = QPushButton("Recalculate now")
+        recalc_btn.clicked.connect(self._refresh_calibration)
+        calib_form.addRow("", recalc_btn)
+        vbox.addWidget(calib_grp)
 
-        # Output region + tiling — one group: tiling forces the cropped
-        # region, so they're presented together instead of as two boxes.
+        # Solver knobs — primary.
+        solver_grp = QGroupBox("Solver")
+        solver_grid = QGridLayout(solver_grp)
+        solver_grid.setContentsMargins(8, 6, 8, 6)
+        solver_grid.setHorizontalSpacing(10)
+        solver_grid.setVerticalSpacing(4)
+        solver_grid.setColumnStretch(1, 1)
+        solver_grid.setColumnStretch(3, 1)
+
+        def _ispin(lo, hi, val, w=64):
+            s = QSpinBox(); s.setRange(lo, hi); s.setValue(val); s.setFixedWidth(w); return s
+
+        self.num_iter_spin = _ispin(1, 5000, 60)
+        self.num_iter_spin.setToolTip(
+            "Maximum outer Newton iterations — headroom only; Newton tol "
+            "(Advanced) is what actually stops the solve."
+        )
+        self.eval_interval_spin = _ispin(1, 500, 5)
+        self.eval_interval_spin.setToolTip(
+            "Interval (iterations) for live-preview writes and objective logging."
+        )
+        self.verbose_check = QCheckBox("Verbose")
+        self.verbose_check.setToolTip(
+            "Print per-iteration diagnostics (I-divergence, Newton decrement, "
+            "active-set size, CG steps) to stdout."
+        )
+        solver_grid.addWidget(QLabel("Max iterations:"), 0, 0, Qt.AlignRight)
+        solver_grid.addWidget(self.num_iter_spin, 0, 1)
+        solver_grid.addWidget(QLabel("Eval interval:"), 0, 2, Qt.AlignRight)
+        solver_grid.addWidget(self.eval_interval_spin, 0, 3)
+        solver_grid.addWidget(self.verbose_check, 1, 0, 1, 4)
+        vbox.addWidget(solver_grp)
+
+        self._jetnewton_advanced_box = self._build_advanced_knobs()
+        vbox.addWidget(self._jetnewton_advanced_box)
+
+        # Output region + tiling.
         out_grp = QGroupBox("Output")
         out_v = QVBoxLayout(out_grp)
         out_v.setContentsMargins(8, 6, 8, 6)
@@ -329,8 +433,8 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         self.tiled_check = QCheckBox("Process in tiles (large field)")
         self.tiled_check.setToolTip(
             "Split the field into overlap-save tiles sharing one forward "
-            "model, stitching owned cores back together. Tiled output is "
-            "always cropped to the visible field."
+            "model and one calibration (s0/eta), stitching owned cores back "
+            "together. Tiled output is always cropped to the visible field."
         )
         self.tiled_check.toggled.connect(self._on_tiling_toggled)
         out_v.addWidget(self.tiled_check)
@@ -411,39 +515,8 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         self._on_diagnostics_toggled(False)
         return tab
 
-    def _build_erdecon_knobs(self) -> QGroupBox:
-        grp = QGroupBox("Gauss-Newton-CG solver")
-        grid = QGridLayout(grp)
-        grid.setContentsMargins(8, 6, 8, 6)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(4)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
-
-        def _ispin(lo, hi, val, w=64):
-            s = QSpinBox(); s.setRange(lo, hi); s.setValue(val); s.setFixedWidth(w); return s
-
-        self.num_iter_spin = _ispin(1, 5000, 50)
-        self.num_iter_spin.setToolTip("Maximum outer Newton iterations.")
-        self.eval_interval_spin = _ispin(1, 500, 5)
-        self.eval_interval_spin.setToolTip(
-            "Interval (iterations) for live-preview writes and objective logging."
-        )
-        self.verbose_check = QCheckBox("Verbose")
-        self.verbose_check.setToolTip(
-            "Print per-iteration diagnostics (I-divergence, phi, step length, "
-            "Newton decrement) to stdout."
-        )
-
-        grid.addWidget(QLabel("Iterations:"), 0, 0, Qt.AlignRight)
-        grid.addWidget(self.num_iter_spin, 0, 1)
-        grid.addWidget(QLabel("Eval interval:"), 0, 2, Qt.AlignRight)
-        grid.addWidget(self.eval_interval_spin, 0, 3)
-        grid.addWidget(self.verbose_check, 1, 0, 1, 4)
-        return grp
-
-    def _build_erdecon_advanced_knobs(self) -> QGroupBox:
-        grp = QGroupBox("Advanced solver knobs")
+    def _build_advanced_knobs(self) -> QGroupBox:
+        grp = QGroupBox("Advanced optimizer knobs")
         grp.setCheckable(True)
         grp.setChecked(False)
         grid = QGridLayout(grp)
@@ -456,20 +529,14 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         def _ispin(lo, hi, val, w=64):
             s = QSpinBox(); s.setRange(lo, hi); s.setValue(val); s.setFixedWidth(w); return s
 
-        def _dspin(lo, hi, val, dec=3, step=None, w=72):
-            s = QDoubleSpinBox(); s.setRange(lo, hi); s.setDecimals(dec)
-            s.setValue(val); s.setFixedWidth(w)
-            if step is not None: s.setSingleStep(step)
-            return s
-
         self.newton_tol_spin = ScientificDoubleSpinBox()
         self.newton_tol_spin.setRange(0.0, 1.0)
-        self.newton_tol_spin.setValue(1e-3)
+        self.newton_tol_spin.setValue(1e-4)
         self.newton_tol_spin.setFixedWidth(80)
         self.newton_tol_spin.setToolTip(
             "Primary convergence test. Stops once the Newton decrement "
-            "(predicted decrease in phi) drops below this fraction of its "
-            "first-iteration value. 0 disables it."
+            "(predicted decrease in F this step) drops below this fraction "
+            "of its first-iteration value. 0 disables it."
         )
         self.tol_spin = ScientificDoubleSpinBox()
         self.tol_spin.setRange(0.0, 1.0)
@@ -477,36 +544,51 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         self.tol_spin.setFixedWidth(80)
         self.tol_spin.setToolTip(
             "Secondary convergence test, off by default (0). When positive, "
-            "also stops once the relative change in the (regularizer-free) "
-            "data misfit falls below this."
+            "also stops once the projected-gradient inf-norm (relative to "
+            "its first-iteration value) drops below this."
         )
-        self.min_iter_spin = _ispin(0, 500, 5)
+        self.min_iter_spin = _ispin(0, 500, 3)
         self.min_iter_spin.setToolTip(
             "Minimum outer iterations before either convergence test fires."
         )
-        self.cg_max_steps_spin = _ispin(1, 500, 25)
-        self.cg_max_steps_spin.setToolTip("Max inner CG steps per Newton solve.")
-        self.cg_tol_spin = _dspin(0.0, 1.0, 0.1, dec=3, step=0.01)
-        self.cg_tol_spin.setToolTip(
-            "Inner CG relative-residual tolerance. A loose default gives an "
-            "inexact/truncated Newton step, cheaper and usually as good."
+        self.cg_max_steps_spin = _ispin(1, 1000, 150)
+        self.cg_max_steps_spin.setToolTip(
+            "Max inner (masked, unpreconditioned) CG steps per Newton solve."
         )
         self.ls_max_backtracks_spin = _ispin(1, 200, 30)
         self.ls_max_backtracks_spin.setToolTip(
-            "Max Armijo halvings before declaring the line search stuck."
+            "Max Armijo halvings before declaring the projected line search stuck."
         )
-        self.ls_c1_spin = ScientificDoubleSpinBox()
-        self.ls_c1_spin.setRange(1e-12, 1.0)
-        self.ls_c1_spin.setValue(1e-4)
-        self.ls_c1_spin.setFixedWidth(80)
-        self.ls_c1_spin.setToolTip("Armijo sufficient-decrease constant.")
-        self.normalize_check = QCheckBox("Normalize data amplitude")
-        self.normalize_check.setChecked(True)
-        self.normalize_check.setToolTip(
-            "Divide the data by its max before solving so Lambda/Eps refer "
-            "to a fixed [0, 1] amplitude; the result is scaled back to "
-            "original units. Uncheck only if Lambda/Eps are already tuned "
-            "to this data's raw amplitude."
+        self.ls_sigma_spin = ScientificDoubleSpinBox()
+        self.ls_sigma_spin.setRange(1e-12, 1.0)
+        self.ls_sigma_spin.setValue(1e-4)
+        self.ls_sigma_spin.setFixedWidth(80)
+        self.ls_sigma_spin.setToolTip("Armijo sufficient-decrease constant.")
+
+        self.eps_bar_spin = ScientificDoubleSpinBox()
+        self.eps_bar_spin.setRange(1e-8, 1.0)
+        self.eps_bar_spin.setValue(1e-2)
+        self.eps_bar_spin.setFixedWidth(80)
+        self.eps_bar_spin.setToolTip(
+            "Active-set identification cap (Bertsekas rule) — shrinks as the "
+            "iterate converges, capped here."
+        )
+        self.freeze_tau_spin = ScientificDoubleSpinBox()
+        self.freeze_tau_spin.setRange(1e-8, 1.0)
+        self.freeze_tau_spin.setValue(1e-3)
+        self.freeze_tau_spin.setFixedWidth(80)
+        self.freeze_tau_spin.setToolTip(
+            "Voxel value below this, with a sufficiently positive gradient "
+            "(Freeze delta), gets permanently pinned at zero for the rest "
+            "of the run."
+        )
+        self.freeze_delta_spin = ScientificDoubleSpinBox()
+        self.freeze_delta_spin.setRange(1e-12, 1.0)
+        self.freeze_delta_spin.setValue(1e-6)
+        self.freeze_delta_spin.setFixedWidth(80)
+        self.freeze_delta_spin.setToolTip(
+            "Gradient threshold for permanently freezing a near-zero voxel "
+            "(see Freeze tau)."
         )
 
         def _row(r, la, wa, lb, wb):
@@ -517,10 +599,10 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
 
         _row(0, "Newton tol:", self.newton_tol_spin, "Convergence tol:", self.tol_spin)
         _row(1, "Min iter:", self.min_iter_spin, "CG max steps:", self.cg_max_steps_spin)
-        _row(2, "CG tol:", self.cg_tol_spin, "Line search max:", self.ls_max_backtracks_spin)
-        grid.addWidget(QLabel("Armijo c1:"), 3, 0, Qt.AlignRight)
-        grid.addWidget(self.ls_c1_spin, 3, 1)
-        grid.addWidget(self.normalize_check, 3, 2, 1, 2)
+        _row(2, "Line search max:", self.ls_max_backtracks_spin, "Armijo sigma:", self.ls_sigma_spin)
+        _row(3, "Active-set eps:", self.eps_bar_spin, "Freeze tau:", self.freeze_tau_spin)
+        grid.addWidget(QLabel("Freeze delta:"), 4, 0, Qt.AlignRight)
+        grid.addWidget(self.freeze_delta_spin, 4, 1)
         grp.toggled.connect(lambda checked: self._toggle_group_children(grp, checked))
         self._toggle_group_children(grp, False)
         return grp
@@ -529,24 +611,20 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
     # Dynamic visibility
 
     def _connect_recipe_preview_signals(self) -> None:
-        widgets = [
-            self.data_gaussian_radio, self.data_poisson_radio,
-            self.reg_hessian_radio, self.reg_wavelet_radio, self.reg_combined_radio,
-        ]
+        widgets = [self.data_poisson_radio, self.data_gaussian_radio]
         for widget in widgets:
             widget.toggled.connect(lambda *_: self._on_source_psf_changed())
-        self.wavelet_levels_spin.valueChanged.connect(
+        self.beta_slider.valueChanged.connect(lambda *_: self._on_source_psf_changed())
+        self.noise_sigma_spin.valueChanged.connect(
             lambda *_: self._on_source_psf_changed()
         )
         for spin in (
-            self.reg_weight_spin, self.eps_reg_spin, self.floor_frac_spin,
             self.num_iter_spin, self.eval_interval_spin,
             self.newton_tol_spin, self.tol_spin, self.min_iter_spin,
-            self.cg_max_steps_spin, self.cg_tol_spin,
-            self.ls_max_backtracks_spin, self.ls_c1_spin,
+            self.cg_max_steps_spin, self.ls_max_backtracks_spin, self.ls_sigma_spin,
+            self.eps_bar_spin, self.freeze_tau_spin, self.freeze_delta_spin,
         ):
             spin.valueChanged.connect(lambda *_: self._on_source_psf_changed())
-        self.normalize_check.toggled.connect(lambda *_: self._on_source_psf_changed())
 
     # ------------------------------------------------------------------ #
     # Mixin hooks
@@ -556,6 +634,8 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
             self._refresh_compute_target_hint()
         if hasattr(self, "recipe_preview"):
             self._refresh_recipe_preview()
+        if hasattr(self, "_calib_timer"):
+            self._calib_timer.start()
 
     def _on_tiling_toggled(self, checked: bool) -> None:
         self._tile_row_widget.setVisible(bool(checked))
@@ -570,26 +650,13 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         )
         self._on_source_psf_changed()
 
-    def _on_regularizer_type_toggled(self, *_args) -> None:
-        show_levels = self.reg_wavelet_radio.isChecked() or self.reg_combined_radio.isChecked()
-        self._wavelet_levels_label.setVisible(show_levels)
-        self.wavelet_levels_spin.setVisible(show_levels)
-        self._on_source_psf_changed()
-
-    def _regularizer_type(self) -> str:
-        if self.reg_wavelet_radio.isChecked():
-            return "wavelet"
-        if self.reg_combined_radio.isChecked():
-            return "combined"
-        return "hessian"
-
     def _on_diagnostics_toggled(self, checked: bool) -> None:
         self._toggle_group_children(self._diagnostics_group, checked)
 
-    def _current_state_for_shape(self) -> der.ERDeconDialogState:
+    def _current_state_for_shape(self) -> jn.JetNewtonDialogState:
         # A lightweight state good enough for shape math (zoom + region
         # knobs only); the full state is built in _read_state().
-        return der.ERDeconDialogState(
+        return jn.JetNewtonDialogState(
             zoom_xy=self.sr_xy_spin.value(),
             zoom_z=self.sr_z_spin.value(),
             crop_to_visible=self.region_valid_radio.isChecked(),
@@ -610,32 +677,22 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
             return
         state = self._current_state_for_shape()
         ndim = len(data_shape)
-        zoom = der.per_axis_zoom(state, ndim)
-        visible = der.visible_shape(data_shape, zoom)
+        zoom = jn.per_axis_zoom(state, ndim)
+        visible = jn.visible_shape(data_shape, zoom)
         kernel = self._current_psf_kernel_shape()
         padded = (
-            der.padded_shape(visible, kernel)
+            jn.padded_shape(visible, kernel)
             if kernel is not None and len(kernel) == ndim
             else visible
         )
-        output_spatial_shape = der.output_shape(
+        output_spatial_shape = jn.output_shape(
             state, data_shape, kernel or tuple(1 for _ in range(ndim))
         )
 
         data_term = "poisson" if self.data_poisson_radio.isChecked() else "gaussian"
-        floor_frac = self.floor_frac_spin.value()
-        floor_text = f" floor={floor_frac:g}" if floor_frac > 0 else ""
-        if self.reg_wavelet_radio.isChecked():
-            reg_text = f"wavelet(levels={self.wavelet_levels_spin.value()})"
-        elif self.reg_combined_radio.isChecked():
-            reg_text = f"combined(hessian+wavelet levels={self.wavelet_levels_spin.value()})"
-        else:
-            reg_text = "hessian"
         lines = [
-            f"ER-Decon ({data_term}), {self.num_iter_spin.value()} iter max, "
-            f"reg={reg_text} "
-            f"lambda={self.reg_weight_spin.value():g} eps={self.eps_reg_spin.value():g}"
-            f"{floor_text}",
+            f"jetnewton ({data_term}), {self.num_iter_spin.value()} iter max, "
+            f"beta={self.beta_slider.value():.3g}",
             f"data {self._format_shape(data_shape)} -> "
             f"visible {self._format_shape(visible)} -> "
             f"output {self._format_shape(output_spatial_shape)}",
@@ -643,7 +700,7 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         sr_text = " × ".join(f"{float(v):g}" for v in zoom)
         lines.append(f"zoom {sr_text}; object/padded shape {self._format_shape(padded)}")
         if self.tiled_check.isChecked():
-            n_tiles, tile_shape = der.estimate_tile_plan(state, data_shape)
+            n_tiles, tile_shape = jn.estimate_tile_plan(state, data_shape)
             lines.append(
                 f"tiled: ~{n_tiles} tile(s) of shape {self._format_shape(tile_shape)}"
             )
@@ -655,31 +712,66 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         self.object_domain_label.setText(self._format_shape(padded))
 
     # ------------------------------------------------------------------ #
+    # Calibration preview (auto s0/eta/ell/kappa)
+
+    def _refresh_calibration(self) -> None:
+        if not hasattr(self, "calib_s0_label"):
+            return
+        if self.psf_combo.currentData() is None or self._current_data_shape() is None:
+            self._set_calibration_labels(None)
+            return
+        result = self._prepare(self.t_start_spin.value())
+        if result is None:
+            self._set_calibration_labels(None)
+            return
+        _prepared, _state, _hessian, calib, _t, _c = result
+        self._set_calibration_labels(calib)
+
+    def _set_calibration_labels(self, calib: Optional[jn.Calibration]) -> None:
+        if calib is None:
+            for lbl in (
+                self.calib_s0_label, self.calib_eta_label,
+                self.calib_ell_label, self.calib_kappa_label,
+            ):
+                lbl.setText("—")
+            return
+        self.calib_s0_label.setText(f"{calib.s0:.4g}")
+        nf = calib.noise_floor
+        self.calib_eta_label.setText(
+            f"{calib.eta:.4g}  (noise-floor median; p1={nf['p1']:.3g}, "
+            f"p99={nf['p99']:.3g})"
+        )
+        self.calib_ell_label.setText(
+            " × ".join(f"{v:.4g}" for v in calib.ell) + " μm"
+        )
+        self.calib_kappa_label.setText(
+            " × ".join(f"{v:.4g}" for v in calib.kappa)
+        )
+
+    # ------------------------------------------------------------------ #
     # State / inputs
 
-    def _read_state(self) -> der.ERDeconDialogState:
+    def _read_state(self) -> jn.JetNewtonDialogState:
         data_term = "poisson" if self.data_poisson_radio.isChecked() else "gaussian"
-        return der.ERDeconDialogState(
+        return jn.JetNewtonDialogState(
             zoom_xy=self.sr_xy_spin.value(),
             zoom_z=self.sr_z_spin.value(),
-            reg_weight=self.reg_weight_spin.value(),
-            eps_reg=self.eps_reg_spin.value(),
-            floor_frac=self.floor_frac_spin.value(),
-            regularizer_type=self._regularizer_type(),
-            wavelet_levels=self.wavelet_levels_spin.value(),
             data_term=data_term,
-            num_iter=self.num_iter_spin.value(),
             background=self.background_spin.value(),
-            normalize=self.normalize_check.isChecked(),
+            noise_sigma=self.noise_sigma_spin.value(),
+            beta=self.beta_slider.value(),
+            num_iter=self.num_iter_spin.value(),
             eval_interval=self.eval_interval_spin.value(),
+            verbose=self.verbose_check.isChecked(),
+            cg_max_steps=self.cg_max_steps_spin.value(),
             newton_tol=self.newton_tol_spin.value(),
             tol=self.tol_spin.value(),
             min_iter=self.min_iter_spin.value(),
-            cg_max_steps=self.cg_max_steps_spin.value(),
-            cg_tol=self.cg_tol_spin.value(),
+            eps_bar=self.eps_bar_spin.value(),
+            freeze_tau=self.freeze_tau_spin.value(),
+            freeze_delta=self.freeze_delta_spin.value(),
             ls_max_backtracks=self.ls_max_backtracks_spin.value(),
-            ls_c1=self.ls_c1_spin.value(),
-            verbose=self.verbose_check.isChecked(),
+            ls_sigma=self.ls_sigma_spin.value(),
             crop_to_visible=self.region_valid_radio.isChecked(),
             tiled=self.tiled_check.isChecked(),
             tile_size=self.tile_size_spin.value(),
@@ -694,17 +786,18 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
 
         state = self._read_state()
         try:
-            prepared = der.prepare_inputs(
+            prepared = jn.prepare_inputs(
                 state=state,
                 y_obs=cropped.y_obs,
                 psf_array=cropped.psf_data,
                 psf_pixel_size_um=cropped.psf_pixel_size,
             )
+            hessian, calib = jn.calibrate(state, prepared)
         except Exception as exc:
             self._set_status(f"{type(exc).__name__}: {exc}", error=True)
             return None
 
-        return prepared, state, cropped.t, cropped.c
+        return prepared, state, hessian, calib, cropped.t, cropped.c
 
     # ------------------------------------------------------------------ #
     # Run / cancel
@@ -716,26 +809,23 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         first = self._prepare(frame_ts[0])
         if first is None:
             return
-        prepared, state, t, c = first
+        prepared, state, _hessian, calib, t, c = first
 
         stack_channels = self.stack_channels_check.isChecked()
         output_channels = self.viewer.C if stack_channels else 1
         output_channel = c if stack_channels else 0
-        output_shape = der.output_5d_shape(
+        output_shape = jn.output_5d_shape(
             state, prepared.y.shape, prepared.psf.shape,
             n_channels=output_channels, n_frames=len(frame_ts),
         )
-        der.log.info(
+        jn.log.info(
             "output buffer shape=%s channel=%d (tiled=%s crop_to_visible=%s "
-            "frames=%s)",
+            "frames=%s) s0=%g eta=%g",
             output_shape, output_channel, state.tiled, state.crop_to_visible,
-            frame_ts,
+            frame_ts, calib.s0, calib.eta,
         )
 
-        # Output spacing = fine-grid spacing (data spacing ÷ zoom), corrected
-        # for the rounding `visible_shape` applies when data_shape * zoom
-        # isn't an exact integer.
-        vs = der.effective_voxel_spacing(
+        vs = jn.effective_voxel_spacing(
             prepared.voxel_spacing, prepared.zoom, prepared.y.shape
         )
         if len(vs) == 2:
@@ -758,32 +848,30 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
             ]
 
         output_meta = {
-            "filename": "Deconvolved (ER-Decon)",
+            "filename": "Deconvolved (jetnewton)",
             "scale": out_scale,
             "is_rgb": False,
             "channels": channels,
             "source_channel": c,
             "source_frame": frame_ts[0] if len(frame_ts) == 1 else list(frame_ts),
-            "algorithm": "erdecon",
+            "algorithm": "jetnewton",
         }
 
         def prepare_for_t(frame_t):
             result = self._prepare(frame_t)
             if result is None:
                 return None
-            frame_prepared, frame_state, _t, _c = result
-            regularizer, combine_channels = der.build_regularizer(
-                frame_state, frame_prepared
-            )
-            return frame_prepared, frame_state, regularizer, combine_channels
+            frame_prepared, frame_state, frame_hessian, frame_calib, _t, _c = result
+            return frame_prepared, frame_state, frame_hessian, frame_calib
 
         def make_worker(frame_data, output_frame):
-            frame_prepared, frame_state, regularizer, combine_channels = frame_data
-            return ERDeconWorker(
+            frame_prepared, frame_state, frame_hessian, frame_calib = frame_data
+            return JetNewtonWorker(
                 prepared=frame_prepared,
                 state=frame_state,
-                hessian=regularizer,
-                combine_channels=combine_channels,
+                hessian=frame_hessian,
+                s0=frame_calib.s0,
+                eta=frame_calib.eta,
                 buffer=self._runner.output_buffer,
                 output_channel=output_channel,
                 output_frame=output_frame,
@@ -795,7 +883,7 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
             self.progress_bar.setRange(0, max(1, state.num_iter))
 
         self.progress_bar.setValue(0)
-        self._begin_run_status(self._describe_run(state))
+        self._begin_run_status(self._describe_run(state, calib))
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
@@ -886,10 +974,13 @@ class ERDeconDialog(SourcePSFPanelMixin, QDialog):
         )
         self.status_label.setStyleSheet("color: #888;")
 
-    def _describe_run(self, state: der.ERDeconDialogState) -> str:
-        if state.tiled:
-            return f"Running tiled ER-Decon for up to {state.num_iter} iterations per tile."
-        return f"Running ER-Decon for up to {state.num_iter} iterations."
+    def _describe_run(self, state: jn.JetNewtonDialogState, calib: jn.Calibration) -> str:
+        base = (
+            f"Running tiled jetnewton for up to {state.num_iter} iterations per tile."
+            if state.tiled else
+            f"Running jetnewton for up to {state.num_iter} iterations."
+        )
+        return f"{base} (beta={state.beta:.3g}, eta={calib.eta:.3g}, s0={calib.s0:.3g})"
 
     def showEvent(self, event):
         super().showEvent(event)
