@@ -195,6 +195,11 @@ class Workspace(QMainWindow):
         # lazily by _mirror_spec the first time a viewer class with
         # that MENU_SPEC is docked.
         self._mirrored = {}
+        # Single shared Channels & Contrast popup for every docked tab,
+        # created lazily by show_channel_panel() and retargeted across
+        # tabs via ChannelPopup.rebind_viewer -- see that function's
+        # docstring.
+        self._channel_popup = None
         self._add_group()
 
         # A viewer that closes itself (or is closed via its tab) must
@@ -279,6 +284,15 @@ class Workspace(QMainWindow):
             group = self._group_of(window)
             group.setCurrentWidget(window)
             return
+        # A previously-floated window (re-adopted via present_window, per
+        # the module docstring) is a live top-level QMainWindow; addTab()
+        # below reparents it under the workspace, which is the same
+        # cross-top-level reparent that corrupts a vispy QOpenGLWidget's
+        # GL context in float_window() -- see _rebuild_canvas_for_float.
+        # A window that has never been shown (the common case, fresh from
+        # ImageWindow()) is not yet a live top-level window, so no rebuild
+        # is needed for it.
+        was_shown = window.isVisible()
         # Embedded viewers share one top-level window, so their QAction
         # shortcuts must be focus-scoped or every second tab makes
         # Ctrl+S & co. ambiguous. WidgetWithChildrenShortcut context
@@ -340,6 +354,8 @@ class Workspace(QMainWindow):
         group = self._active_group()
         group.addTab(window, title or window.windowTitle() or "Image")
         group.setCurrentWidget(window)
+        if was_shown and hasattr(window, "_rebuild_canvas_for_float"):
+            window._rebuild_canvas_for_float()
         manager.set_active_window(window)
         self._refresh_mirrored_menus()
 
@@ -501,6 +517,9 @@ class Workspace(QMainWindow):
 
     def closeEvent(self, event):
         global _workspace
+        if self._channel_popup is not None:
+            self._channel_popup.close()
+            self._channel_popup = None
         # Close every hosted viewer so their closeEvents run.
         for group in self._groups():
             while group.count():
@@ -534,3 +553,31 @@ def present_window(window, floating=False, title=None):
     ws.show()
     ws.raise_()
     return window
+
+
+def show_channel_panel(viewer):
+    """Show *viewer*'s Channels & Contrast control as a compact popup.
+
+    A docked tab (``not viewer.isWindow()``) shares the workspace's
+    single ``ChannelPopup`` instance, retargeted via ``rebind_viewer`` --
+    switching tabs and reopening it never accumulates extra windows, the
+    same reasoning that motivated putting every viewer in one workspace
+    to begin with. A floating window (``floating=True``, no workspace to
+    share one with) gets its own private popup instead, created once and
+    reused on every subsequent open.
+    """
+    from ..widgets.channel_panel import ChannelPopup
+
+    if not viewer.isWindow():
+        ws = get_workspace()
+        if ws._channel_popup is None:
+            ws._channel_popup = ChannelPopup(viewer, parent=ws)
+        else:
+            ws._channel_popup.rebind_viewer(viewer)
+        popup = ws._channel_popup
+    else:
+        if getattr(viewer, "_channel_popup", None) is None:
+            viewer._channel_popup = ChannelPopup(viewer, parent=viewer)
+        popup = viewer._channel_popup
+    popup.show()
+    popup.raise_()

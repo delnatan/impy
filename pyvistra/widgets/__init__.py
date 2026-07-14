@@ -18,7 +18,7 @@ from .histogram import (
 )
 
 # Dialog widgets
-from .channel_panel import ChannelPanel, ChannelRow, show_channel_dock
+from .channel_panel import ChannelPanel, ChannelPopup, ChannelRow, show_channel_dock
 from .metadata import MetadataDialog
 from .transform import TransformDialog
 from .alignment import AlignmentDialog
@@ -73,6 +73,7 @@ __all__ = [
     # Dialog widgets
     "ChannelRow",
     "ChannelPanel",
+    "ChannelPopup",
     "show_channel_dock",
     "MetadataDialog",
     "TransformDialog",

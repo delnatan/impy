@@ -289,9 +289,6 @@ class VolumeViewer(QMainWindow):
         self.scale = self.meta.get("scale", (1.0, 1.0, 1.0))
         sz, sy, sx = self.scale
 
-        # Dialogs
-        self.channel_panel = None
-
         # Layout
         central = QWidget()
         self.setCentralWidget(central)
@@ -489,10 +486,10 @@ class VolumeViewer(QMainWindow):
         self.view_changed.emit(self)
 
     def show_channel_panel(self):
-        """Show the Channels panel."""
-        from ..widgets import show_channel_dock
+        """Show the Channels & Contrast popup."""
+        from ..ui.workspace import show_channel_panel as _show_channel_panel
 
-        show_channel_dock(self)
+        _show_channel_panel(self)
 
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts."""

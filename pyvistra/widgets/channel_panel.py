@@ -20,6 +20,7 @@ from qtpy.QtCore import QSize, Qt, QTimer, Signal
 from qtpy.QtGui import QColor, QIcon, QImage, QPixmap
 from qtpy.QtWidgets import (
     QCheckBox,
+    QDialog,
     QDockWidget,
     QDoubleSpinBox,
     QFrame,
@@ -348,6 +349,13 @@ class ChannelPanel(QWidget):
 
         self.refresh_ui()
 
+        # Lets a viewer that rebuilds its renderer in place (e.g.
+        # ImageWindow._rebuild_canvas_for_float) find "whichever panel is
+        # currently showing me" and call rebind_renderer() on it, without
+        # needing to know whether that panel lives in a dock, this
+        # viewer's own private popup, or the workspace's shared popup.
+        viewer._active_channel_panel = self
+
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
@@ -490,6 +498,26 @@ class ChannelPanel(QWidget):
     # Refresh
     # ------------------------------------------------------------------
 
+    def rebind_renderer(self):
+        """Resubscribe to ``viewer.renderer.display`` after the viewer
+        rebuilds its renderer in place (e.g.
+        ``ImageWindow._rebuild_canvas_for_float``). Row click handlers
+        already look up ``self.viewer.renderer`` fresh on every call, so
+        this only needs to fix ``_display_unsubscribe``, which is bound
+        to the specific (now-orphaned) ``ChannelDisplayList`` instance
+        that existed when the panel was constructed -- left unfixed, the
+        panel keeps listening to a dead object and stops auto-refreshing
+        on out-of-band contrast changes."""
+        if self._display_unsubscribe is not None:
+            self._display_unsubscribe()
+            self._display_unsubscribe = None
+        display = getattr(self.viewer.renderer, "display", None)
+        if display is not None:
+            self._display_unsubscribe = display.subscribe(
+                self._on_display_changed
+            )
+        self.refresh_ui()
+
     def refresh_ui(self):
         """Refresh all rows from current renderer state. Kept for callers
         that explicitly invalidate the panel (e.g. after a data swap)."""
@@ -525,6 +553,8 @@ class ChannelPanel(QWidget):
                 self.viewer.view_changed.disconnect(self._on_view_changed)
             except (TypeError, RuntimeError):
                 pass
+        if getattr(self.viewer, "_active_channel_panel", None) is self:
+            self.viewer._active_channel_panel = None
         super().closeEvent(event)
 
 
@@ -555,3 +585,43 @@ def show_channel_dock(
     window._channel_dock.show()
     window._channel_dock.raise_()
     window.channel_panel.refresh_ui()
+
+
+class ChannelPopup(QDialog):
+    """Compact, non-modal popup wrapping one viewer's :class:`ChannelPanel`.
+
+    Unlike the dock (``show_channel_dock``), this doesn't claim
+    permanent space in a viewer's own layout -- it's a separate small
+    top-level window (``Qt.Tool``, so it stays above its parent without
+    grabbing focus like a normal dialog would), sized to its content
+    rather than squeezed into a fixed dock-area width. Used both as a
+    floating window's own private popup and as the workspace's single
+    shared popup, retargeted across tabs via :meth:`rebind_viewer` --
+    see ``ui.workspace.show_channel_panel``.
+    """
+
+    def __init__(self, viewer, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() | Qt.Tool)
+        self.setModal(False)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self.panel = None
+        self.rebind_viewer(viewer)
+
+    def rebind_viewer(self, viewer):
+        """Retarget this popup at *viewer*, which may have a different
+        channel count/metadata than whatever it showed before. Rebuilding
+        a fresh ChannelPanel is simpler and more robust than patching an
+        existing panel's rows in place, and reuses ChannelPanel's own
+        closeEvent cleanup (unsubscribe, _active_channel_panel) instead
+        of duplicating it here."""
+        if self.panel is not None:
+            self._layout.removeWidget(self.panel)
+            self.panel.close()
+            self.panel.deleteLater()
+        self.panel = ChannelPanel(viewer, parent=self)
+        self._layout.addWidget(self.panel)
+        title = getattr(viewer, "window_id", None) or viewer.windowTitle()
+        self.setWindowTitle(f"Channels & Contrast — {title}")
+        self.adjustSize()

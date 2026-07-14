@@ -28,7 +28,6 @@ from ..visuals.image import CompositeImageVisual, MultiViewChannelProxy
 from ..widgets import (
     MetadataDialog,
     ZMontageSettingsDialog,
-    show_channel_dock,
 )
 
 
@@ -92,8 +91,6 @@ class ZMontageViewer(QMainWindow):
         self._gap = 0.0
         self._cols = max(1, math.ceil(math.sqrt(self.Z)))
         self._rows = max(1, math.ceil(self.Z / self._cols))
-
-        self.channel_panel = None
 
         # -- Layout --
         central = QWidget()
@@ -298,7 +295,9 @@ class ZMontageViewer(QMainWindow):
             self._reset_view()
 
     def show_channel_panel(self):
-        show_channel_dock(self)
+        from ..ui.workspace import show_channel_panel as _show_channel_panel
+
+        _show_channel_panel(self)
 
     def show_metadata_dialog(self):
         dlg = MetadataDialog(self.meta, parent=self)

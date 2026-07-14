@@ -257,24 +257,56 @@ The panel:
 
 There is no separate "ContrastDialog" — it was folded in. The panel is the single entry point for all visual adjustments and is wired to the "Channels && Contrast..." menu action (Shift+C) on every viewer.
 
-`ChannelPanel` is a plain `QWidget` shown as a **dock** (right area) via
-`show_channel_dock(window)` in every `QMainWindow` viewer — closing the
-dock hides it; the menu action re-shows the same instance. Histogram
-refresh is debounced (150 ms) and skipped entirely while the dock is
-hidden. Rule of thumb: persistent live-updating *panels* become docks;
-one-shot *parameter forms* (transform, FFT, deconvolution setup, …) stay
-dialogs.
+`ChannelPanel` itself is a plain `QWidget`; how it's *shown* differs by
+viewer:
+
+- **ImageWindow, OrthoViewer, VolumeViewer, ZMontageViewer** — via
+  `ui.workspace.show_channel_panel(viewer)`, a compact non-modal
+  `ChannelPopup` (`widgets/channel_panel.py`, a `Qt.Tool`-flagged
+  `QDialog` sized to its content, not squeezed into a fixed dock-area
+  width). A docked tab (`not viewer.isWindow()`) shares the
+  **workspace's single `ChannelPopup` instance**
+  (`Workspace._channel_popup`), retargeted across tabs via
+  `ChannelPopup.rebind_viewer()` — the same "one shared instance,
+  mirrored to whatever's active" reasoning as the mirrored menu bar
+  (`build_proxy_menus`), so opening it on tab after tab never
+  accumulates popups. A floating window (`floating=True`, no workspace
+  to share one with) gets its own private popup instead, cached at
+  `viewer._channel_popup` and reused on every subsequent open.
+  `rebind_viewer()` discards and rebuilds the inner `ChannelPanel`
+  wholesale rather than patching rows in place — simpler, and reuses
+  `ChannelPanel.closeEvent`'s existing unsubscribe cleanup instead of
+  duplicating it.
+- **TiledViewer** — still uses the older `show_channel_dock(window)`
+  pattern (a `QDockWidget`, right area) for its per-window global
+  controls (`TiledChannelPanel`); this viewer's UI is due a separate
+  pass (it's currently scoped to a specific small-image annotation
+  workflow) so it wasn't moved to the popup pattern.
+
+Every `ChannelPanel` sets `viewer._active_channel_panel = self` at
+construction and clears it in `closeEvent` — this lets a viewer that
+rebuilds its renderer in place (`ImageWindow._rebuild_canvas_for_float`,
+used by `Workspace.float_window`/`add_window` to survive the GL-context
+corruption from reparenting a live `QOpenGLWidget` across a top-level
+boundary) find "whichever panel currently displays me" and call
+`rebind_renderer()` on it, without caring whether that panel lives in a
+dock, a private popup, or the workspace's shared popup. Without this,
+float/redock would either revert contrast/gamma/colormap/visibility to
+renderer defaults or leave an open panel's live-update subscription
+pointed at an orphaned `ChannelDisplayList`.
+
+Histogram refresh is debounced (150 ms) and skipped while the panel is
+hidden. Rule of thumb from the dock era, still worth knowing: a
+`QMainWindow`'s dock area imposes a much narrower width than a
+standalone popup/dialog, which is why `CompactHistogramWidget`
+(`widgets/histogram.py`) sets a minimum width (110px) on itself — as the
+`stretch=1` item in `ChannelRow`'s `QHBoxLayout`, nothing else stops the
+layout from shrinking it to nothing once the row narrows enough for the
+fixed-width siblings (checkbox, swatch button, spinboxes) to dominate.
+Still load-bearing for `TiledViewer`'s dock; moot for the popup-based
+viewers since a `QDialog` sizes to its content instead.
 
 The shared `ChannelRow` widget is the unit of UI per channel and is reused by `TiledChannelPanel` for the tiled viewer's global controls.
-
-`CompactHistogramWidget` (`widgets/histogram.py`) sets a minimum width
-(110px), not just height: as the `stretch=1` item in `ChannelRow`'s
-`QHBoxLayout`, nothing else stops the layout from shrinking it to
-nothing once the row narrows enough for the fixed-width siblings
-(checkbox, swatch button, spinboxes) to dominate. This was invisible
-while `ChannelPanel` was a floating `QDialog` with a generous default
-width; docked into a `QMainWindow`'s side area, Qt's default dock width
-is much narrower and the histogram collapses without this floor.
 
 ### Layer System
 
@@ -465,4 +497,4 @@ Place in `apps/` — not in core. Apps can import from core freely; core must no
 
 ---
 
-*Last Updated: 2026-07-04 (per-viewer MENU_SPEC mirroring: workspace menu bar tracks the active tab)*
+*Last Updated: 2026-07-14 (Channels & Contrast moved from a per-window dock to a compact popup, shared across docked tabs and private per floating window)*

@@ -18,7 +18,6 @@ from ..visuals.image import CompositeImageVisual, MultiViewChannelProxy
 from ..widgets import (
     MetadataDialog,
     OverlaySettingsDialog,
-    show_channel_dock,
 )
 
 
@@ -806,7 +805,9 @@ class OrthoViewer(QMainWindow):
         self.canvas_zx.update()
 
     def show_channel_panel(self):
-        show_channel_dock(self)
+        from ..ui.workspace import show_channel_panel as _show_channel_panel
+
+        _show_channel_panel(self)
 
     @property
     def renderer(self):

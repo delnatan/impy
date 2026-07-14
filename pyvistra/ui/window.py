@@ -85,7 +85,6 @@ from ..visuals.image import CompositeImageVisual
 from ..widgets import (
     AlignmentDialog,
     AxesDialog,
-    show_channel_dock,
     CombineImagesDialog,
     FFTDialog,
     ImageMathDialog,
@@ -386,7 +385,6 @@ class ImageWindow(QMainWindow):
         self._setup_controls()
 
         # 7. Menu & Dialogs
-        self.channel_panel = None
         self.transform_dialog = None
         self.z_projection_dialog = None
         self._image_math_dialog = None
@@ -761,12 +759,18 @@ class ImageWindow(QMainWindow):
         live one -- reparenting a QOpenGLWidget from an embedded tab to a
         top-level window corrupts its GL context on this platform and
         crashes (see Workspace.float_window).
+
+        Inserted at index 0 rather than appended: at __init__ time the
+        layout is empty so the two are equivalent, but
+        `_rebuild_canvas_for_float` calls this after info_label and
+        controls_widget are already in the layout, and an append would
+        land the canvas below them instead of restoring it to the top.
         """
         self.canvas = scene.SceneCanvas(keys=None, bgcolor="black", show=False)
         self.view = self.canvas.central_widget.add_view()
         self.view.camera = "panzoom"
         self.view.camera.aspect = 1
-        self.layout.addWidget(self.canvas.native, 1)
+        self.layout.insertWidget(0, self.canvas.native, 1)
 
     def _connect_canvas_events(self):
         self.canvas.events.mouse_move.connect(self.on_mouse_move)
@@ -799,15 +803,26 @@ class ImageWindow(QMainWindow):
     def _rebuild_canvas_for_float(self):
         """Tear down the live GL canvas and build a fresh one in place.
 
-        Reparenting a QOpenGLWidget from being a workspace tab's child to
-        a top-level window corrupts its GL context on this platform (GL
-        errors followed by a hard crash) -- see Workspace.float_window.
+        Reparenting a QOpenGLWidget across a top-level-window boundary
+        (workspace tab <-> floating window, either direction) corrupts
+        its GL context on this platform (GL errors followed by a hard
+        crash) -- see Workspace.float_window and Workspace.add_window.
         The only reliable fix is to never move the live canvas: discard
         it and rebuild every visual from its underlying data (data/ and
         visuals/ are already kept separate for exactly this reason).
         """
         saved_rect = self.view.camera.rect
         overlay_config = self.overlay.get_config()
+        # CompositeImageVisual.__init__ always seeds self.display with
+        # fresh defaults (default clim for the dtype, default per-channel
+        # colormap) -- it has no way to be constructed with existing
+        # state. Save the user's current clim/gamma/colormap/visibility
+        # per channel here and reapply after rebuilding below, or a
+        # float/redock silently reverts any contrast adjustment the user
+        # made via the Channels && Contrast panel.
+        saved_channel_states = [
+            self.renderer.display[c] for c in range(len(self.renderer.display))
+        ]
 
         # Transient/interactive visuals: drop them, they lazily recreate
         # themselves on next use (focused-point editing, contour drawing,
@@ -851,10 +866,22 @@ class ImageWindow(QMainWindow):
             is_rgb=is_rgb,
             channels_meta=self.meta.get("channels"),
         )
+        for c, state in enumerate(saved_channel_states):
+            if c >= self.renderer.num_channels:
+                break
+            self.renderer.set_clim(c, *state.clim)
+            self.renderer.set_gamma(c, state.gamma)
+            self.renderer.set_colormap(c, state.colormap_name)
+            self.renderer.set_channel_visible(c, state.visible)
+        # reset_camera() also sets camera.flip -- the fresh PanZoomCamera
+        # built in _build_canvas() defaults to no flip, so this must run
+        # unconditionally or the Y axis renders un-flipped (image appears
+        # upside-down / lateral coords inverted) whenever a saved_rect
+        # exists, which is the common case (any window that was already
+        # showing something before it floated).
+        self.renderer.reset_camera(self.img_data.shape)
         if saved_rect is not None:
             self.view.camera.rect = saved_rect
-        else:
-            self.renderer.reset_camera(self.img_data.shape)
 
         self._build_hover_label()
 
@@ -908,6 +935,15 @@ class ImageWindow(QMainWindow):
             visual = ShapeLayerVisual(self.view.scene)
             visual.update(layer.data, layer.selected_ids, self.t_idx, self.z_idx)
             layer.visual = visual
+
+        # Whichever ChannelPanel currently displays this window's state --
+        # its own private popup, or the workspace's shared popup if that's
+        # what's targeting it right now -- needs to resubscribe to the
+        # just-rebuilt renderer's display, or it keeps listening to the
+        # orphaned old one.
+        active_panel = getattr(self, "_active_channel_panel", None)
+        if active_panel is not None:
+            active_panel.rebind_renderer()
 
         self.canvas.update()
 
@@ -2992,7 +3028,9 @@ class ImageWindow(QMainWindow):
             self.view.camera.interactive = False
 
     def show_channel_panel(self):
-        show_channel_dock(self)
+        from .workspace import show_channel_panel as _show_channel_panel
+
+        _show_channel_panel(self)
 
     def show_transform_dialog(self):
         if self.transform_dialog is None:
