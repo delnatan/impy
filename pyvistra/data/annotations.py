@@ -23,6 +23,15 @@ The category vocabulary is optional — if absent, `categories()` falls
 back to whatever category names are actually in use (the original
 behavior), so old annotation files without a header still round-trip.
 
+A ``#categories`` line can be pre-written by hand for a folder that has
+never been opened/annotated yet, to seed it with the same preset list
+used elsewhere (e.g. copy another folder's category vocabulary into a
+new sibling file before opening that folder in the tiled viewer).
+`save()` always writes the canonical tab-delimited form above, but a
+hand-typed header doesn't need literal tab characters — a comma- or
+space-separated list works too, e.g. ``#categories: CategoryA,
+CategoryB, CategoryC``. See `_parse_categories_header`.
+
 `TileAnnotations` is a `MutableMapping` of relpath -> category, so
 editing/replacing entries uses plain dict idiom: `annotations[relpath]`,
 `annotations[relpath] = category`, `del annotations[relpath]`,
@@ -66,11 +75,14 @@ class TileAnnotations(MutableMapping):
         if not os.path.exists(self.file_path):
             return
         with open(self.file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.rstrip("\n").split("\t")
-                if parts[0] == "#categories":
-                    self._category_vocab = [p for p in parts[1:] if p]
+            for raw_line in f:
+                line = raw_line.rstrip("\n")
+                if self._is_categories_header(line):
+                    self._category_vocab = self._parse_categories_header(
+                        line[len("#categories") :]
+                    )
                     continue
+                parts = line.split("\t")
                 if parts[0] == "#dims":
                     if len(parts) == 2 and parts[1]:
                         self.dims = parts[1]
@@ -82,6 +94,37 @@ class TileAnnotations(MutableMapping):
                     continue
                 relpath, category = parts
                 self._categories[relpath] = category
+
+    @staticmethod
+    def _is_categories_header(line):
+        """True if line is a ``#categories`` header, canonical or
+        hand-typed (``#categories``, ``#categories\t...``,
+        ``#categories: ...``, ``#categories ...``) — but not some
+        unrelated ``#categoriesX`` line."""
+        prefix = "#categories"
+        if not line.startswith(prefix):
+            return False
+        return len(line) == len(prefix) or not line[len(prefix)].isalnum()
+
+    @staticmethod
+    def _parse_categories_header(rest):
+        """Parse the remainder of a ``#categories`` header line (after
+        the ``#categories`` prefix) into a list of category names.
+
+        Accepts the canonical tab-delimited form written by `save()` as
+        well as a comma- or space-separated form, so a preset list can
+        be hand-typed into a sibling file for a folder that hasn't been
+        opened/annotated yet without needing literal tab characters."""
+        rest = rest.lstrip(":").strip()
+        if not rest:
+            return []
+        if "\t" in rest:
+            delimiter = "\t"
+        elif "," in rest:
+            delimiter = ","
+        else:
+            delimiter = " "
+        return [name.strip() for name in rest.split(delimiter) if name.strip()]
 
     @staticmethod
     def _parse_channel_colors(entries):
