@@ -30,8 +30,6 @@ class Toolbar(QMainWindow):
         self.setGeometry(100, 100, 600, 100)  # Wider
         self.setAcceptDrops(True)
         self.open_windows = []
-        self._psf_dialog = None  # Lazy singleton for PSF dialog
-        self._pupil_dialog = None  # Lazy singleton for Pupil dialog
 
         # Central Widget with Layout
         central = QWidget()
@@ -205,16 +203,6 @@ class Toolbar(QMainWindow):
 
         file_menu.addSeparator()
 
-        compute_psf_action = QAction("Compute PSF...", self)
-        compute_psf_action.triggered.connect(self._show_psf_dialog)
-        file_menu.addAction(compute_psf_action)
-
-        compute_pupil_action = QAction("Compute Pupil...", self)
-        compute_pupil_action.triggered.connect(self._show_pupil_dialog)
-        file_menu.addAction(compute_pupil_action)
-
-        file_menu.addSeparator()
-
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
@@ -276,24 +264,6 @@ class Toolbar(QMainWindow):
         console.show()
         console.raise_()
 
-    def _show_psf_dialog(self):
-        """Show the PSF computation dialog."""
-        from ..widgets import PSFComputeDialog
-
-        if self._psf_dialog is None:
-            self._psf_dialog = PSFComputeDialog(parent=self)
-        self._psf_dialog.show()
-        self._psf_dialog.raise_()
-
-    def _show_pupil_dialog(self):
-        """Show the Pupil computation dialog."""
-        from ..widgets import PupilComputeDialog
-
-        if self._pupil_dialog is None:
-            self._pupil_dialog = PupilComputeDialog(parent=self)
-        self._pupil_dialog.show()
-        self._pupil_dialog.raise_()
-
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.accept()
@@ -303,29 +273,17 @@ class Toolbar(QMainWindow):
     def dropEvent(self, event: QDropEvent):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
 
-        # Collect supported image files.
-        #
-        # Single extensions (matched via splitext) and compound suffixes
-        # (matched via name.endswith) are kept separate because deconlib
-        # artifacts use two-dot suffixes (``.psf.h5``, ``.pupil.h5``) that
-        # splitext would collapse to a generic ``.h5``.
-        supported_ext = {
-            ".ims",
-            ".czi",
-            ".nd2",
-            ".tif",
-            ".tiff",
-            ".png",
-            ".jpg",
-            ".jpeg",
-        }
-        supported_suffixes = (".psf.h5", ".pupil.h5")
+        # Collect supported image files, driven by the same input-format
+        # registry load_image() itself dispatches through (see io.py) --
+        # matched via suffix rather than splitext so a plugin-registered
+        # multi-dot extension (e.g. ".psf.h5") works without special-casing
+        # here.
+        from ..io import available_input_formats
+
+        supported_ext = tuple(available_input_formats())
 
         def is_supported(name):
-            lower = name.lower()
-            if lower.endswith(supported_suffixes):
-                return True
-            return os.path.splitext(lower)[1] in supported_ext
+            return name.lower().endswith(supported_ext)
 
         image_files = []
 

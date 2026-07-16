@@ -32,7 +32,6 @@ dependencies = [
 [project.optional-dependencies]
 czi = ["aicspylibczi"]
 nd2 = ["nd2"]
-memsolve = ["memsolve"]
 
 [project.scripts]
 pyvistra = "pyvistra.__main__:main"

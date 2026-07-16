@@ -810,14 +810,12 @@ def load_image(filepath, use_memmap=True, dims=None):
         dims: Optional dimension string for TIFF files (e.g., 'tyx', 'zyx', 'tzyx').
               If None, heuristics are used. Only applies to TIFF/PNG/JPEG formats.
 
-    Supported formats:
-        - .ims (Imaris)
-        - .nd2 (Nikon ND2)
-        - .czi (Zeiss CZI)
-        - .tif, .tiff (TIFF)
-        - .png, .jpg, .jpeg (standard images via Pillow)
-        - .zarr (Zarr arrays, including OME-Zarr)
-        - .psf.h5, .pupil.h5 (deconlib PSF / pupil files)
+    Supported formats are whatever's registered via ``register_input_format``
+    (see ``available_input_formats()``). Built in: .ims (Imaris), .czi (Zeiss
+    CZI), .nd2 (Nikon ND2), .png/.jpg/.jpeg (via Pillow), .zarr (Zarr arrays,
+    including OME-Zarr), and .tif/.tiff -- the last of which also serves as
+    the fallback for any unrecognized extension, matching tifffile's own
+    permissiveness about what counts as a TIFF.
     """
     data, meta = _load_image_raw(filepath, use_memmap=use_memmap, dims=dims)
     _normalize_channels_metadata(meta)
@@ -832,77 +830,84 @@ def _load_image_raw(filepath, use_memmap=True, dims=None):
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    # Handle deconlib PSF / pupil files (HDF5-backed).
-    if filepath.endswith(".psf.h5"):
-        return _load_psf_h5(filepath)
-    if filepath.endswith(".pupil.h5"):
-        return _load_pupil_h5(filepath)
-
-    # Handle general zarr directories
+    # General zarr directories aren't suffix-loadable files (need an isdir
+    # check first), so they stay a pre-registry special case.
     if filepath.endswith(".zarr/") and os.path.isdir(filepath):
         return load_zarr(filepath)
 
-    ext = os.path.splitext(filepath)[1].lower()
+    # Longest-suffix-match first, so a future plugin registering a
+    # multi-dot extension (e.g. ".psf.h5") isn't shadowed by a shorter
+    # registered suffix (e.g. ".h5").
+    lower = filepath.lower()
+    for ext in sorted(_INPUT_FORMATS, key=len, reverse=True):
+        if lower.endswith(ext):
+            return _INPUT_FORMATS[ext](filepath, use_memmap, dims)
 
-    # --- IMARIS PATH ---
-    if ext == ".ims":
-        reader = ImarisReader(filepath)
-        data = Imaris5DProxy(reader)
+    # No registered loader matched -- fall back to TIFF, matching the
+    # historical behavior of treating any unrecognized extension as a
+    # tifffile-readable file.
+    return _load_tiff_format(filepath, use_memmap, dims)
 
-        meta = {
-            "filename": os.path.basename(filepath),
-            "shape": data.shape,
-            "scale": reader.voxel_size,  # (Z, Y, X)
-            "channels": reader.channels_info,
-            "is_rgb": False,
-            "timestamps": reader.timestamps,
-        }
-        return data, meta
 
-    # --- CZI PATH ---
-    if ext == ".czi":
-        try:
-            from .readers.czi import CZIReader
-        except ImportError:
-            raise ImportError(
-                "CZI support requires aicspylibczi. "
-                "Install with: pip install pyvistra[czi]"
-            )
+def _load_ims_format(filepath, use_memmap=True, dims=None):
+    reader = ImarisReader(filepath)
+    data = Imaris5DProxy(reader)
 
-        reader = CZIReader(filepath)
-        data = CZI5DProxy(reader)
+    meta = {
+        "filename": os.path.basename(filepath),
+        "shape": data.shape,
+        "scale": reader.voxel_size,  # (Z, Y, X)
+        "channels": reader.channels_info,
+        "is_rgb": False,
+        "timestamps": reader.timestamps,
+    }
+    return data, meta
 
-        meta = {
-            "filename": os.path.basename(filepath),
-            "shape": data.shape,
-            "scale": reader.voxel_size,  # (Z, Y, X)
-            "channels": reader.channels_info,
-            "is_rgb": False,
-            "timestamps": reader.timestamps,
-        }
-        return data, meta
 
-    # --- ND2 PATH ---
-    if ext == ".nd2":
-        return load_nd2(filepath)
+def _load_czi_format(filepath, use_memmap=True, dims=None):
+    try:
+        from .readers.czi import CZIReader
+    except ImportError:
+        raise ImportError(
+            "CZI support requires aicspylibczi. "
+            "Install with: pip install pyvistra[czi]"
+        )
 
-    # --- STANDARD IMAGE PATH (PNG, JPEG) ---
-    if ext in (".png", ".jpg", ".jpeg"):
-        img, detected_rgb = load_standard_image(filepath)
+    reader = CZIReader(filepath)
+    data = CZI5DProxy(reader)
 
-        # Normalize to 5D
-        final_img = normalize_to_5d(img, rgb=detected_rgb).array
+    meta = {
+        "filename": os.path.basename(filepath),
+        "shape": data.shape,
+        "scale": reader.voxel_size,  # (Z, Y, X)
+        "channels": reader.channels_info,
+        "is_rgb": False,
+        "timestamps": reader.timestamps,
+    }
+    return data, meta
 
-        data_proxy = Numpy5DProxy(final_img)
 
-        return data_proxy, {
-            "filename": os.path.basename(filepath),
-            "shape": final_img.shape,
-            "scale": (1.0, 1.0, 1.0),  # No physical scale for standard images
-            "is_rgb": detected_rgb,
-        }
+def _load_nd2_format(filepath, use_memmap=True, dims=None):
+    return load_nd2(filepath)
 
-    # --- TIFF PATH ---
+
+def _load_standard_image_format(filepath, use_memmap=True, dims=None):
+    img, detected_rgb = load_standard_image(filepath)
+
+    # Normalize to 5D
+    final_img = normalize_to_5d(img, rgb=detected_rgb).array
+
+    data_proxy = Numpy5DProxy(final_img)
+
+    return data_proxy, {
+        "filename": os.path.basename(filepath),
+        "shape": final_img.shape,
+        "scale": (1.0, 1.0, 1.0),  # No physical scale for standard images
+        "is_rgb": detected_rgb,
+    }
+
+
+def _load_tiff_format(filepath, use_memmap=True, dims=None):
     scale = (1.0, 1.0, 1.0)
 
     if use_memmap:
@@ -1211,103 +1216,6 @@ def save_imaris(
     )
 
 
-def _build_psf_from_pyvistra_meta(data, metadata):
-    """Translate the pyvistra 5D + metadata convention into a deconlib ``Psf``.
-
-    pyvistra dialogs hand savers ``data`` as 5D ``(T, Z, C, Y, X)`` and a
-    metadata dict shaped like ``psf_dialog._build_metadata`` produces
-    (``parameters.{wavelength|wavelength_em, na, ni, ns}``, ``spacing``).
-    Squeezes T/C to yield the 3D PSF deconlib expects.
-    """
-    from deconlib import Optics, Psf
-
-    arr = np.asarray(data[:] if hasattr(data, "__getitem__") else data)
-    if arr.ndim == 5:
-        if arr.shape[0] != 1 or arr.shape[2] != 1:
-            raise ValueError(
-                f"PSF must have singleton T and C axes, got shape {arr.shape}"
-            )
-        arr = arr[0, :, 0, :, :]
-    elif arr.ndim != 3:
-        raise ValueError(f"PSF data must be 3D or 5D, got {arr.ndim}D")
-
-    params = (metadata or {}).get("parameters", {})
-    wavelength = params.get("wavelength") or params.get("wavelength_em")
-    if wavelength is None:
-        raise ValueError("PSF metadata missing wavelength")
-
-    optics = Optics(
-        wavelength=float(wavelength),
-        na=float(params["na"]),
-        ni=float(params["ni"]),
-        ns=float(params.get("ns", params["ni"])),
-    )
-    spacing = tuple(float(s) for s in metadata["spacing"])
-    return Psf(
-        psf=arr.astype(np.float32, copy=False),
-        optics=optics,
-        pixel_size=spacing,
-        source=metadata.get("psf_source", "theoretical"),
-    )
-
-
-def _load_psf_h5(filepath):
-    """Load a ``.psf.h5`` artifact as a (Numpy5DProxy, metadata) pair."""
-    from deconlib import load_psf as _decon_load_psf
-
-    psf_obj = _decon_load_psf(filepath)
-    arr5d = psf_obj.psf[np.newaxis, :, np.newaxis, :, :] if psf_obj.psf.ndim == 3 \
-        else psf_obj.psf[np.newaxis, np.newaxis, np.newaxis, :, :]
-    proxy = Numpy5DProxy(arr5d)
-    meta = {
-        "filename": os.path.basename(filepath),
-        "shape": arr5d.shape,
-        "is_rgb": False,
-        "scale": tuple(psf_obj.pixel_size),
-        "spacing": list(psf_obj.pixel_size),
-        "parameters": {
-            "wavelength": psf_obj.optics.wavelength,
-            "na": psf_obj.optics.na,
-            "ni": psf_obj.optics.ni,
-            "ns": psf_obj.optics.ns,
-        },
-        "psf_source": psf_obj.source,
-    }
-    if psf_obj.pupil_ref:
-        meta["pupil_ref"] = psf_obj.pupil_ref
-    return proxy, meta
-
-
-def _load_pupil_h5(filepath):
-    """Load a ``.pupil.h5`` artifact for image-viewer display.
-
-    Returns the complex pupil amplitude as a single-channel 5D float32
-    image plus a metadata dict that retains the Pupil dataclass under
-    ``"pupil"`` for downstream consumers.
-    """
-    from deconlib import load_pupil as _decon_load_pupil
-
-    pupil_obj = _decon_load_pupil(filepath)
-    amp = np.abs(pupil_obj.pupil).astype(np.float32)
-    arr5d = amp[np.newaxis, np.newaxis, np.newaxis, :, :]
-    proxy = Numpy5DProxy(arr5d)
-    meta = {
-        "filename": os.path.basename(filepath),
-        "shape": arr5d.shape,
-        "is_rgb": False,
-        "scale": (1.0, 1.0, 1.0),
-        "pupil": pupil_obj,
-        "pupil_source": pupil_obj.source,
-        "parameters": {
-            "wavelength": pupil_obj.optics.wavelength,
-            "na": pupil_obj.optics.na,
-            "ni": pupil_obj.optics.ni,
-            "ns": pupil_obj.optics.ns,
-        },
-    }
-    return proxy, meta
-
-
 # ---- Sparse Labels I/O ----
 
 
@@ -1335,6 +1243,54 @@ def save_sparse_labels(path, labels):
         labels: SparseLabels instance
     """
     labels.save(path)
+
+
+# ---------------------------------------------------------------------------
+# Input format registry
+# ---------------------------------------------------------------------------
+#
+# Maps extension → loader. Loaders must accept the uniform signature
+# ``(filepath: str, use_memmap: bool, dims: str | None) -> (data, meta)``
+# where *data* is a 5D-proxy-like object and *meta* a plain dict (before
+# ``load_image``'s channel-metadata normalization pass).
+#
+# ``load_image`` looks up loaders here (longest-suffix-match first), so
+# adding a new input format is one ``register_input_format(...)`` call from
+# anywhere -- the read-side mirror of the output registry below.
+
+_INPUT_FORMATS: "dict[str, callable]" = {}
+
+
+def register_input_format(extension, loader):
+    """Register an input format for :func:`load_image`.
+
+    Args:
+        extension: File extension including leading dot (e.g. ``".tif"``,
+            ``".psf.h5"``). Matched via suffix, longest first.
+        loader: Callable ``(filepath, use_memmap, dims) -> (data, meta)``.
+            *data* is a 5D-proxy-like object; *meta* is a plain dict.
+    """
+    _INPUT_FORMATS[extension] = loader
+
+
+def get_input_format(extension):
+    """Look up a registered loader. Returns the callable or ``None``."""
+    return _INPUT_FORMATS.get(extension)
+
+
+def available_input_formats():
+    """All registered input extensions."""
+    return list(_INPUT_FORMATS)
+
+
+register_input_format(".ims", _load_ims_format)
+register_input_format(".czi", _load_czi_format)
+register_input_format(".nd2", _load_nd2_format)
+register_input_format(".png", _load_standard_image_format)
+register_input_format(".jpg", _load_standard_image_format)
+register_input_format(".jpeg", _load_standard_image_format)
+register_input_format(".tif", _load_tiff_format)
+register_input_format(".tiff", _load_tiff_format)
 
 
 # ---------------------------------------------------------------------------
@@ -1384,37 +1340,5 @@ def _save_imaris_default(filepath, data, metadata):
     save_imaris(filepath, data, metadata=metadata)
 
 
-def _save_psf_h5_default(filepath, data, metadata):
-    """Saver for ``.psf.h5`` — wraps deconlib's :func:`save_psf`.
-
-    Translates pyvistra's 5D-array + dict-metadata convention into a
-    :class:`deconlib.Psf` and writes via deconlib's HDF5 I/O.
-    """
-    from deconlib import save_psf as _decon_save_psf
-
-    psf = _build_psf_from_pyvistra_meta(data, metadata)
-    _decon_save_psf(filepath, psf, metadata=metadata)
-
-
-def _save_pupil_h5_default(filepath, data, metadata):
-    """Saver for ``.pupil.h5`` — expects a :class:`deconlib.Pupil` in metadata.
-
-    The streaming/buffer-routing convention can't construct a Pupil from a
-    5D array alone (it's complex and carries optics). Dialogs that want to
-    save a pupil pass the ``Pupil`` instance under ``metadata["pupil"]``.
-    """
-    from deconlib import save_pupil as _decon_save_pupil
-
-    pupil = (metadata or {}).get("pupil")
-    if pupil is None:
-        raise ValueError(
-            "save .pupil.h5: metadata must include a 'pupil' key holding a "
-            "deconlib.Pupil instance"
-        )
-    _decon_save_pupil(filepath, pupil, metadata=metadata)
-
-
 register_output_format(".tif", "TIFF", _save_tiff_default)
 register_output_format(".ims", "Imaris", _save_imaris_default)
-register_output_format(".psf.h5", "PSF (HDF5)", _save_psf_h5_default)
-register_output_format(".pupil.h5", "Pupil (HDF5)", _save_pupil_h5_default)

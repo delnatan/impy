@@ -90,8 +90,8 @@ def build_proxy_menus(menubar, spec, get_target):
     """Populate *menubar* from *spec* (see ``window.MENU_SPEC``), where
     each action dispatches to ``getattr(get_target(), item["method"])``
     at trigger time rather than a fixed bound method. Items may nest a
-    ``"submenu"`` list instead of a ``"method"`` (e.g. the "Deconvolution"
-    submenu) -- their leaves are folded into the same flat ``leaf_actions``.
+    ``"submenu"`` list instead of a ``"method"`` -- their leaves are
+    folded into the same flat ``leaf_actions``.
 
     Returns ``(top_level_actions, leaf_actions)``. When ``get_target()``
     has nothing sensible to act on, hiding the top-level menu actions
@@ -103,6 +103,10 @@ def build_proxy_menus(menubar, spec, get_target):
     and making *both* ambiguous, so *neither* fires. See
     ``Workspace._refresh_mirrored_menus``.
     """
+    from .. import plugins
+
+    plugins.discover_plugins()
+
     top_level_actions = []
     leaf_actions = []
     for menu_title, items in spec:

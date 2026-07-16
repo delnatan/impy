@@ -24,8 +24,6 @@ from .transform import TransformDialog
 from .alignment import AlignmentDialog
 from .output_selector import ImageOutputSelector
 from .region_selector import RegionSelector
-from .psf_dialog import PSFComputeDialog
-from .pupil_dialog import PupilComputeDialog
 from .axes_dialog import AxesDialog
 from .line_profile import LineProfileDialog, get_line_profile_dialog, line_profile_dialog_exists
 from .radial_profile_dialog import (
@@ -42,16 +40,6 @@ from .z_projection_dialog import ZProjectionDialog
 from .image_math_dialog import ImageMathDialog
 from .combine_images_dialog import CombineImagesDialog
 from .fft_dialog import FFTDialog
-from .deconvolution_dialog import DeconvolutionDialog
-from .deconvolution_worker import NLCGDeconvolutionWorker
-from .richardson_lucy_dialog import RichardsonLucyDialog
-from .richardson_lucy_worker import RLDeconvolutionWorker
-from .memsolve_dialog import MemsolveDeconvolutionDialog
-from .memsolve_worker import MemsolveDeconvolutionWorker
-from .jetnewton_dialog import JetNewtonDialog
-from .jetnewton_worker import JetNewtonWorker
-from .psf_distillation_dialog import PSFDistillationDialog
-from .psf_distillation_worker import PSFDistillationWorker
 from .processing_helper import BufferProcessingRunner
 from .overlay_settings import OverlaySettingsDialog
 from .zmontage_settings import ZMontageSettingsDialog
@@ -80,23 +68,11 @@ __all__ = [
     "AlignmentDialog",
     "ImageOutputSelector",
     "RegionSelector",
-    "PSFComputeDialog",
-    "PupilComputeDialog",
     "AxesDialog",
     "ZProjectionDialog",
     "ImageMathDialog",
     "CombineImagesDialog",
     "FFTDialog",
-    "DeconvolutionDialog",
-    "NLCGDeconvolutionWorker",
-    "RichardsonLucyDialog",
-    "RLDeconvolutionWorker",
-    "MemsolveDeconvolutionDialog",
-    "MemsolveDeconvolutionWorker",
-    "JetNewtonDialog",
-    "JetNewtonWorker",
-    "PSFDistillationDialog",
-    "PSFDistillationWorker",
     "OverlaySettingsDialog",
     "ZMontageSettingsDialog",
     "TiledDisplaySettingsDialog",

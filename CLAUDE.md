@@ -174,7 +174,7 @@ Pass an `ImageBuffer` to `imshow()` to watch computation in real time.
 - **`Writable5D`** — adds `__setitem__`. Implemented by `ImageBuffer`.
 - **`ObservableBuffer`** — adds `subscribe(callback) -> unsubscribe`. Implemented by `ImageBuffer`.
 
-These are `typing.Protocol` classes (runtime-checkable, no inheritance required). They exist so external libraries (e.g. `deconlib`, `memsolve`) can type-annotate against pyvistra without importing concrete classes:
+These are `typing.Protocol` classes (runtime-checkable, no inheritance required). They exist so external libraries (e.g. a pyvistra plugin — see [Adding a pip-installable Plugin](#adding-a-pip-installable-plugin)) can type-annotate against pyvistra without importing concrete classes:
 
 ```python
 def deconvolve(src: Readable5D, dst: Writable5D, psf, params): ...
@@ -445,14 +445,22 @@ colormaps.register('MyGradient', my_256x4_array)
 ### Adding File Format Support
 1. Create reader class in `readers/` (follow `ImarisReader` pattern)
 2. Add proxy class in `data/proxies.py` extending `File5DProxy` if lazy loading needed
-3. Update `load_image()` in `io.py` with extension detection
-4. Ensure output is 5D `(T, Z, C, Y, X)`
-5. For *write* support: define `save_myformat(filepath, data, metadata)` and register it once at module load:
+3. Ensure output is 5D `(T, Z, C, Y, X)`
+4. For *read* support: define `load_myformat(filepath, use_memmap, dims) -> (data, meta)` and register it once at module load:
+   ```python
+   from pyvistra.io import register_input_format
+   register_input_format(".myext", load_myformat)
+   ```
+   `load_image()` dispatches to registered loaders by longest-suffix match — no edits to `io.py` itself required.
+5. For *write* support: define `save_myformat(filepath, data, metadata)` and register it the same way:
    ```python
    from pyvistra.io import register_output_format
    register_output_format(".myext", "MyFormat", save_myformat)
    ```
    Every dialog that lists `".myext"` in its `ImageOutputSelector(formats=...)` picks it up automatically. No widget code edits required.
+
+Both registries are keyed by extension and consulted by suffix match, so a
+single format can register a reader, a writer, or both independently.
 
 ### I/O Routing Contract
 
@@ -462,12 +470,12 @@ All processor results — whether streamed, one-shot, or saved — flow through 
 - **New window**: constructs and shows an `ImageWindow`.
 - **File**: looks up the saver in the format registry (`pyvistra.io.register_output_format`) and writes it.
 
-This means dialogs do **not** decide where their output goes — the user does, via the selector combo. Adding new formats is a one-line `register_output_format(...)` call from anywhere (including downstream libraries like deconlib).
+This means dialogs do **not** decide where their output goes — the user does, via the selector combo. Adding new formats is a one-line `register_output_format(...)` call from anywhere (including from a pip-installable plugin — see below).
 
 Two upstream paths reach the selector:
 
 - **Streaming** (long-running, threaded): use `BufferProcessingRunner` — it owns the worker thread, source/buffer refcounts, and routes via `output_selector.send(buffer.acquire(), metadata)` automatically.
-- **Synchronous** (one-shot, GUI-thread compute): construct an `ImageBuffer`, fill it, and call `output_selector.send(buffer, metadata)` directly. PSF computation (`widgets/psf_dialog.py`) is the canonical example.
+- **Synchronous** (one-shot, GUI-thread compute): construct an `ImageBuffer`, fill it, and call `output_selector.send(buffer, metadata)` directly. `widgets/fft_dialog.py` is the canonical example.
 
 ### Adding a Streaming Image Processor
 Follow the pattern in `widgets/z_projection_dialog.py` + `widgets/processing_helper.py`:
@@ -477,11 +485,32 @@ Follow the pattern in `widgets/z_projection_dialog.py` + `widgets/processing_hel
 3. In the dialog, instantiate `ImageOutputSelector` + `BufferProcessingRunner`; call `runner.prepare_output(...)` to get `(source, buffer)`, then `runner.start_worker(...)`.
 4. The same dialog works for "reuse window / new window / save to file" — that's the `ImageOutputSelector` contract.
 
-### PSF Picker Convention
-Dialogs that let the user pick an existing window as a PSF (`DeconvolutionDialog`, `PSFDistillationDialog`) list **every** open window (excluding `self.viewer`), not just ones flagged `is_psf=True`. A PSF loaded from disk into a plain window is just as valid an input as one computed via `PSFComputeDialog` — restricting the combo to `is_psf`-flagged windows only blocks that. Windows that *are* flagged get a `"  (PSF)"` label suffix so they're still easy to spot; see `_refresh_psf_combo()` in either dialog for the canonical implementation. `ImageWindow.is_psf` (default `False`, set `True` by `PSFComputeDialog`/`PSFDistillationDialog` on publish) exists purely for this annotation — never use it as a hard filter.
-
 ### Adding a Standalone Application
 Place in `apps/` — not in core. Apps can import from core freely; core must not import from apps.
+
+### Adding a pip-installable Plugin
+
+pyvistra has no built-in PSF/deconvolution UI (that lived in `deconlib`,
+now split into `psfkit`/`resolvde`) — the intended way for a downstream
+package to add dialogs, menu items, or file formats back is a lightweight
+`importlib.metadata` entry-points plugin, not a fork or a core PR.
+
+A plugin package declares itself in its own `pyproject.toml`:
+```toml
+[project.entry-points."pyvistra.plugins"]
+mypackage = "mypackage._pyvistra_plugin:register"
+```
+and exposes a zero-arg `register()` in that module. `register()` can call:
+
+- `pyvistra.plugins.add_menu_item(target_cls, menu_title, item, submenu=None)` — append a `MENU_SPEC`-shaped item into any viewer class's menu (`ImageWindow`, `OrthoViewer`, `TiledViewer`, ...), creating the named menu/submenu if absent.
+- `pyvistra.plugins.register_output_format` / `register_input_format` — same registries as [Adding File Format Support](#adding-file-format-support).
+- `pyvistra.plugins.register_colormap` — same registry as [Adding a Custom Colormap](#adding-a-custom-colormap-programmatic).
+
+**Discovery timing**: `discover_plugins()` fires lazily, the first time any viewer actually builds a menu bar (`build_menus`/`build_proxy_menus`), not at `import pyvistra` — every viewer module is already loaded by then, so `register()` can safely import target classes, and a plugin's own Qt/vispy/numeric dependencies never load until the GUI is actually starting. It's idempotent and per-plugin failures only `warnings.warn` — one broken plugin never blocks pyvistra or other plugins from starting.
+
+**Gating an optional backend**: give a `MENU_SPEC` item an `"enabled"` key set to a zero-arg callable (evaluated once, when the action is built) that returns whether the plugin's own optional dependency is importable — greys out the item instead of crashing when the user opens it. `RegionSelector` and `ConvergencePlotWidget` (`widgets/region_selector.py`, `widgets/convergence_plot.py`) are general-purpose, deconlib-free Qt widgets kept in core specifically as reusable building blocks for this kind of plugin dialog.
+
+`ImageWindow.is_psf` (a plain `bool`, default `False`) is a generic hook a PSF-producing plugin can set on a window it publishes, so a PSF-picker widget it also provides can flag/sort real PSF windows — it isn't tied to any specific dialog class and should never be used as a hard filter (a PSF loaded from disk into a plain window is just as valid an input as a computed one).
 
 ## Critical Gotchas
 
@@ -497,4 +526,4 @@ Place in `apps/` — not in core. Apps can import from core freely; core must no
 
 ---
 
-*Last Updated: 2026-07-14 (Channels & Contrast moved from a per-window dock to a compact popup, shared across docked tabs and private per floating window)*
+*Last Updated: 2026-07-16 (deconlib PSF/deconvolution dialogs removed following its deconlib → psfkit/resolvde split; added the pyvistra.plugins entry-points protocol and a symmetric register_input_format reader registry)*

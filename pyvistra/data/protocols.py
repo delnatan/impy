@@ -3,9 +3,9 @@ Structural typing contracts for 5D image data.
 
 These Protocols describe the *minimum* interface that any pyvistra-aware
 producer or consumer of 5D image data should rely on. They exist so that
-external libraries (e.g. deconlib, memsolve) can type-annotate their
-inputs/outputs against pyvistra without importing concrete proxy classes
-or otherwise coupling to its implementation.
+external libraries (e.g. a pyvistra plugin, see :mod:`pyvistra.plugins`)
+can type-annotate their inputs/outputs against pyvistra without importing
+concrete proxy classes or otherwise coupling to its implementation.
 
 All 5D data uses the canonical ``(T, Z, C, Y, X)`` axis order.
 """

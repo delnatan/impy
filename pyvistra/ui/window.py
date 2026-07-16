@@ -100,30 +100,18 @@ except Exception:
     app.use_app("pyqt5")
 
 
-def _memsolve_available() -> bool:
-    """Whether the optional MaxEnt engine (the `memsolve` package, import
-    name `mem`) is installed. memsolve is being sunset -- pyvistra never
-    depends on it at the package level (see the `memsolve` extra in
-    pyproject.toml), so its menu entry is disabled rather than crashing
-    when the user actually opens the dialog."""
-    try:
-        import mem  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
 # Declarative menu structure for ImageWindow's File/Adjust/Image/View
 # menus: (menu_title, [item, ...]) where each item is either None (a
 # separator) or a dict with "label", "method" (name looked up on the
 # target at trigger time), and optional "shortcut"/"tooltip"/"enabled".
 # "enabled" may be a bool or a zero-arg callable evaluated once when the
-# action is built; a falsy result disables (greys out) the action -- see
-# _memsolve_available for the one current use. Single source of truth
-# for both ImageWindow's own embedded menu bar (build_menus(...,
-# target=self)) and the Workspace shell's persistent mirrored bar
-# (build_menus(..., target=get_active_window) — see ui/workspace.py), so
-# the two never drift apart.
+# action is built; a falsy result disables (greys out) the action -- the
+# documented convention for a plugin to grey out its own menu item when
+# its optional backend isn't installed (see pyvistra/plugins.py). Single
+# source of truth for both ImageWindow's own embedded menu bar
+# (build_menus(..., target=self)) and the Workspace shell's persistent
+# mirrored bar (build_menus(..., target=get_active_window) — see
+# ui/workspace.py), so the two never drift apart.
 MENU_SPEC = [
     ("File", [
         {"label": "Save as TIFF...", "shortcut": "Ctrl+S", "method": "save_as_tiff"},
@@ -163,18 +151,6 @@ MENU_SPEC = [
         {"label": "Image Math...", "method": "show_image_math_dialog"},
         {"label": "Combine Images...", "method": "show_combine_images_dialog"},
         {"label": "FFT...", "method": "show_fft_dialog"},
-        {"label": "Deconvolution", "submenu": [
-            {"label": "NLCG (default)...", "method": "show_deconvolution_dialog"},
-            {"label": "Richardson-Lucy...", "method": "show_rl_deconvolution_dialog"},
-            {
-                "label": "MaxEnt (memsolve)...",
-                "method": "show_memsolve_deconvolution_dialog",
-                "enabled": _memsolve_available,
-                "tooltip": "Requires the optional 'memsolve' package (pip install memsolve)",
-            },
-            {"label": "jetnewton (log-penalty)...", "method": "show_jetnewton_dialog"},
-        ]},
-        {"label": "PSF Distillation (NLCG)...", "method": "show_psf_distillation_dialog"},
         None,
         {"label": "Reorder Axes...", "method": "show_axes_dialog"},
     ]),
@@ -212,8 +188,7 @@ def build_menus(menubar, spec, target):
     ``getattr(target, item["method"])``. Returns the flat list of leaf
     (non-separator) QActions created, in spec order. Items may nest a
     ``"submenu"`` list instead of a ``"method"`` to group related actions
-    (e.g. the "Deconvolution" submenu) -- their leaves are folded into
-    the same flat list.
+    -- their leaves are folded into the same flat list.
 
     Used for ImageWindow's own embedded menu bar (``target=self``,
     bound once at construction). The Workspace shell's persistent
@@ -221,6 +196,10 @@ def build_menus(menubar, spec, target):
     instead, which retargets dynamically rather than binding to a
     single fixed object.
     """
+    from ..plugins import discover_plugins
+
+    discover_plugins()
+
     actions = []
     for menu_title, items in spec:
         menu = menubar.addMenu(menu_title)
@@ -299,10 +278,10 @@ class ImageWindow(QMainWindow):
         # Register with Manager
         self.window_id = manager.register(self)
 
-        # Set True by PSFComputeDialog/PSFDistillationDialog so the PSF
-        # picker in deconvolution/distillation dialogs can annotate windows
-        # that are actually PSFs (the picker itself lists every open window,
-        # not just these -- a PSF loaded from disk is just as valid).
+        # Generic flag a PSF-producing plugin can set so a PSF-picker it
+        # provides can annotate windows that are actually PSFs (such a
+        # picker should still list every open window, not just
+        # is_psf-flagged ones -- a PSF loaded from disk is just as valid).
         self.is_psf = False
 
         # "real" (default) or "frequency" -- set on FFT output metadata
@@ -390,11 +369,6 @@ class ImageWindow(QMainWindow):
         self._image_math_dialog = None
         self._combine_images_dialog = None
         self._fft_dialog = None
-        self._deconvolution_dialog = None
-        self._rl_deconvolution_dialog = None
-        self._memsolve_deconvolution_dialog = None
-        self._jetnewton_dialog = None
-        self._psf_distillation_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
 
@@ -3068,41 +3042,6 @@ class ImageWindow(QMainWindow):
             self._fft_dialog = FFTDialog(self, parent=self)
         self._fft_dialog.show()
         self._fft_dialog.raise_()
-
-    def show_deconvolution_dialog(self):
-        from pyvistra.widgets.deconvolution_dialog import DeconvolutionDialog
-        if self._deconvolution_dialog is None:
-            self._deconvolution_dialog = DeconvolutionDialog(self, parent=self)
-        self._deconvolution_dialog.show()
-        self._deconvolution_dialog.raise_()
-
-    def show_rl_deconvolution_dialog(self):
-        from pyvistra.widgets.richardson_lucy_dialog import RichardsonLucyDialog
-        if self._rl_deconvolution_dialog is None:
-            self._rl_deconvolution_dialog = RichardsonLucyDialog(self, parent=self)
-        self._rl_deconvolution_dialog.show()
-        self._rl_deconvolution_dialog.raise_()
-
-    def show_memsolve_deconvolution_dialog(self):
-        from pyvistra.widgets.memsolve_dialog import MemsolveDeconvolutionDialog
-        if self._memsolve_deconvolution_dialog is None:
-            self._memsolve_deconvolution_dialog = MemsolveDeconvolutionDialog(self, parent=self)
-        self._memsolve_deconvolution_dialog.show()
-        self._memsolve_deconvolution_dialog.raise_()
-
-    def show_jetnewton_dialog(self):
-        from pyvistra.widgets.jetnewton_dialog import JetNewtonDialog
-        if self._jetnewton_dialog is None:
-            self._jetnewton_dialog = JetNewtonDialog(self, parent=self)
-        self._jetnewton_dialog.show()
-        self._jetnewton_dialog.raise_()
-
-    def show_psf_distillation_dialog(self):
-        from pyvistra.widgets.psf_distillation_dialog import PSFDistillationDialog
-        if self._psf_distillation_dialog is None:
-            self._psf_distillation_dialog = PSFDistillationDialog(self, parent=self)
-        self._psf_distillation_dialog.show()
-        self._psf_distillation_dialog.raise_()
 
     def show_line_profile(self):
         """Show the line profile dialog."""

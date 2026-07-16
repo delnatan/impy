@@ -27,6 +27,12 @@ _LAZY_IMPORTS = {
     "Numpy5DProxy": (".io", "Numpy5DProxy"),
     "CZI5DProxy": (".io", "CZI5DProxy"),
     "ImageBuffer": (".io", "ImageBuffer"),
+    "register_output_format": (".io", "register_output_format"),
+    "register_input_format": (".io", "register_input_format"),
+    # plugins
+    "plugins": (".plugins", None),
+    "discover_plugins": (".plugins", "discover_plugins"),
+    "add_menu_item": (".plugins", "add_menu_item"),
     # ui
     "ImageWindow": (".ui.window", "ImageWindow"),
     "Toolbar": (".ui.toolbar", "Toolbar"),
@@ -37,8 +43,6 @@ _LAZY_IMPORTS = {
     "present_window": (".ui.workspace", "present_window"),
     # widgets
     "ImageOutputSelector": (".widgets", "ImageOutputSelector"),
-    "PSFComputeDialog": (".widgets", "PSFComputeDialog"),
-    "PupilComputeDialog": (".widgets", "PupilComputeDialog"),
     "ZProjectionDialog": (".widgets", "ZProjectionDialog"),
     # rois (legacy)
     "ROI": (".rois", "ROI"),
