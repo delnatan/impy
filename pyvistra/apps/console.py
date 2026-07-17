@@ -366,7 +366,7 @@ Prototyping:
 Example:
   >>> w = aw()          # Get active window
   >>> data = w.img_data # Access 5D data (T,Z,C,Y,X)
-  >>> w.rois            # List of ROIs
+  >>> w.layers          # Shapes/points/tracks/labels layers
   >>> reload('my_module')
 """
         self.output.append_text(welcome, "#888888")

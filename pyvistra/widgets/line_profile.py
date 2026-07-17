@@ -1,5 +1,5 @@
 """
-Line Profile Dialog - Displays and compares intensity profiles along LineROIs.
+Line Profile Dialog - Displays and compares intensity profiles along line/polyline shapes.
 
 Supports multi-window overlay plotting and CSV/TSV export.
 """
@@ -27,7 +27,6 @@ from qtpy.QtWidgets import (
 
 from .histogram import WIDGET_BG, TEXT_COLOR
 from ..ui.manager import manager
-from ..rois import LineROI
 
 # Singleton instance
 _line_profile_dialog = None
@@ -123,7 +122,7 @@ class LineProfileWidget(QWidget):
             painter.drawText(
                 self.rect(),
                 Qt.AlignCenter,
-                "Select a LineROI and add one or more windows to compare",
+                "Select a line/polyline shape and add one or more windows to compare",
             )
             return
 
@@ -371,9 +370,9 @@ class LineProfileWidget(QWidget):
 
 class LineProfileDialog(QDialog):
     """
-    Floating dialog that displays and compares intensity profiles along LineROIs.
+    Floating dialog that displays and compares intensity profiles along line/polyline shapes.
 
-    Use the selected LineROI as source geometry, then add target windows to
+    Use the selected line/polyline shape as source geometry, then add target windows to
     overlay profiles in one plot.
     """
 
@@ -385,7 +384,6 @@ class LineProfileDialog(QDialog):
 
         self.active_window = None
         self.source_window = None
-        self.current_roi = None
         self.current_line_data = None  # {p1: (x,y), p2: (x,y)}
 
         # When the profile source is a shape-layer record, we subscribe to
@@ -401,7 +399,7 @@ class LineProfileDialog(QDialog):
         # Key used with ImageWindow.show_line_overlay/hide_line_overlay to
         # draw a read-only indicator of the profile path on compared
         # windows (the source window already shows its own editable
-        # LineROI/shape, so it never gets one of these).
+        # shape, so it never gets one of these).
         self._overlay_key = "line_profile"
 
         self._connected_windows = set()
@@ -467,7 +465,7 @@ class LineProfileDialog(QDialog):
         self.profile_widget = LineProfileWidget()
         layout.addWidget(self.profile_widget, 1)
 
-        self.status_label = QLabel("Select a LineROI to start")
+        self.status_label = QLabel("Select a line/polyline shape to start")
         self.status_label.setStyleSheet("color: #AAA; font-size: 10px;")
         layout.addWidget(self.status_label)
 
@@ -483,8 +481,6 @@ class LineProfileDialog(QDialog):
         window.window_activated.connect(self._on_window_activated)
         window.window_closing.connect(self._on_window_closing)
         window.roi_selection_changed.connect(self._on_roi_selection_changed)
-        if hasattr(window, "roi_modified"):
-            window.roi_modified.connect(self._on_roi_modified)
         if hasattr(window, "view_changed"):
             window.view_changed.connect(self._on_view_changed)
 
@@ -498,8 +494,6 @@ class LineProfileDialog(QDialog):
             window.window_activated.disconnect(self._on_window_activated)
             window.window_closing.disconnect(self._on_window_closing)
             window.roi_selection_changed.disconnect(self._on_roi_selection_changed)
-            if hasattr(window, "roi_modified"):
-                window.roi_modified.disconnect(self._on_roi_modified)
             if hasattr(window, "view_changed"):
                 window.view_changed.disconnect(self._on_view_changed)
         except (TypeError, RuntimeError):
@@ -511,11 +505,6 @@ class LineProfileDialog(QDialog):
         if self._is_shutting_down:
             return
         self.active_window = window
-
-        for roi in window.rois:
-            if roi.selected and isinstance(roi, LineROI):
-                self._update_profile(roi)
-                return
 
         if self.current_line_data is not None:
             self._refresh_profiles()
@@ -533,29 +522,23 @@ class LineProfileDialog(QDialog):
             self.active_window = None
         if window == self.source_window:
             self.source_window = None
-            self.current_roi = None
             self._unsubscribe_from_shape_source()
 
     def _on_roi_selection_changed(self, roi):
         if self._is_shutting_down:
             return
 
-        if roi is None or not isinstance(roi, LineROI):
-            if self.current_line_data is None:
-                self.profile_widget.clear()
-                self.status_label.setText("Select a LineROI to start")
-            return
-
-        self._update_profile(roi)
+        if self.current_line_data is None:
+            self.profile_widget.clear()
+            self.status_label.setText("Select a line/polyline shape to start")
 
     def set_shape_source(self, window, layer, shape_id):
         """Use a shape-layer LINE/POLYLINE record as the profile source.
 
-        Equivalent to selecting a legacy ``LineROI`` in the source window,
-        but driven by the unified shape layer system. The dialog refreshes
-        immediately and adds the source window's series if not present, and
-        subscribes to the layer so the profile updates live as the shape is
-        edited (handle drag, body move, vertex insert/remove).
+        The dialog refreshes immediately and adds the source window's series
+        if not present, and subscribes to the layer so the profile updates
+        live as the shape is edited (handle drag, body move, vertex
+        insert/remove).
         """
         if shape_id not in layer.data:
             return
@@ -564,7 +547,6 @@ class LineProfileDialog(QDialog):
 
         self.source_window = window
         self.active_window = window
-        self.current_roi = None
 
         self._subscribe_to_shape_source(layer, shape_id)
         self._ensure_source_series()
@@ -619,7 +601,7 @@ class LineProfileDialog(QDialog):
                 self._unsubscribe_from_shape_source()
                 self.current_line_data = None
                 self.profile_widget.clear()
-                self.status_label.setText("Select a LineROI to start")
+                self.status_label.setText("Select a line/polyline shape to start")
                 return
             if event_kind in (EVT_EDITED, EVT_BULK):
                 if self._extract_shape_line_data(
@@ -639,13 +621,6 @@ class LineProfileDialog(QDialog):
         self._source_shape_layer = None
         self._source_shape_id = None
 
-    def _on_roi_modified(self, roi):
-        if self._is_shutting_down:
-            return
-
-        if roi == self.current_roi and isinstance(roi, LineROI):
-            self._update_profile(roi)
-
     def _on_view_changed(self, window):
         if self._is_shutting_down or self.current_line_data is None:
             return
@@ -654,26 +629,6 @@ class LineProfileDialog(QDialog):
         source_wid = getattr(self.source_window, "window_id", None)
         if wid in self.series_config or wid == source_wid:
             self._refresh_profiles()
-
-    def _update_profile(self, roi):
-        self.current_roi = roi
-        if self.active_window is not None:
-            self.source_window = self.active_window
-
-        # A legacy LineROI took over as the source; drop any shape-layer
-        # subscription so its edits don't fight ours.
-        self._unsubscribe_from_shape_source()
-
-        p1 = roi.data.get("p1", (0, 0))
-        p2 = roi.data.get("p2", (0, 0))
-        self.current_line_data = {
-            "p1": (float(p1[0]), float(p1[1])),
-            "p2": (float(p2[0]), float(p2[1])),
-            "path": None,
-        }
-
-        self._ensure_source_series()
-        self._refresh_profiles()
 
     def _ensure_source_series(self):
         if self.source_window is None:
@@ -754,14 +709,13 @@ class LineProfileDialog(QDialog):
         self._hide_all_overlays()
         self.series_config.clear()
         self._computed_series = []
-        self.current_roi = None
         self.current_line_data = None
         self.source_window = None
         self._unsubscribe_from_shape_source()
 
         self._refresh_series_list()
         self.profile_widget.clear()
-        self.status_label.setText("Select a LineROI to start")
+        self.status_label.setText("Select a line/polyline shape to start")
 
     def _refresh_series_list(self, select_wid=None):
         selected_wid = None
@@ -861,7 +815,7 @@ class LineProfileDialog(QDialog):
         if self.current_line_data is None:
             self.profile_widget.clear()
             self._computed_series = []
-            self.status_label.setText("Select a LineROI to start")
+            self.status_label.setText("Select a line/polyline shape to start")
             return
 
         p1 = self.current_line_data["p1"]
@@ -1096,7 +1050,7 @@ class LineProfileDialog(QDialog):
         """Draw/update the profile-path indicator on a compared window.
 
         Skipped for the source window, which already renders the real,
-        editable LineROI/shape the profile was taken from.
+        editable shape the profile was taken from.
         """
         if window is None or window is self.source_window:
             return
@@ -1196,14 +1150,9 @@ class LineProfileDialog(QDialog):
 
         for window in manager.get_all().values():
             self._connect_window(window)
-            for roi in window.rois:
-                if roi.selected and isinstance(roi, LineROI):
-                    self.active_window = window
-                    self._update_profile(roi)
-                    return
 
-        # No newly-selected LineROI took over as source; restore any
-        # previously-configured overlays (hidden on the last hideEvent).
+        # Restore any previously-configured overlays (hidden on the last
+        # hideEvent).
         self._refresh_profiles()
 
     def hideEvent(self, event):
@@ -1235,7 +1184,6 @@ class LineProfileDialog(QDialog):
         self._unsubscribe_from_shape_source()
         self.active_window = None
         self.source_window = None
-        self.current_roi = None
         self.current_line_data = None
 
 

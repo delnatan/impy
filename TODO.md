@@ -69,31 +69,33 @@ what actually shipped is lighter: `gel_analyzer.py` defines `ShapeLane` /
 as gel lanes (`mark_as_lane()`) instead of introducing a new data model.
 `gel_analyzer.py` no longer imports `rois.py` or `LaneROI` at all.
 
-### 4d. Delete `rois.py` and `AnnotationManager` — partially done, now unblocked
+### 4d. Delete `rois.py` and `AnnotationManager` — done
 
 - [x] `AnnotationManager` / `pyvistra/ui/annotation_manager.py` — already
       deleted, zero references remain anywhere.
-- [ ] `pyvistra/rois.py` is **not** fully dead, so this isn't a straight
-      delete. Confirmed by grep (no constructor calls anywhere) that
-      `CircleROI`, `LineROI`, `CoordinateROI`, `LaneROI` are dead code.
-      `ROI`, `RectangleROI`, `PointROI` are still load-bearing:
-      `ImageWindow._focused_point_roi` (window.py:2175) constructs a
+- [x] `pyvistra/rois.py` trimmed to `ROI`, `RectangleROI`, `PointROI`
+      (still load-bearing: `ImageWindow._focused_point_roi` constructs a
       `PointROI` to reuse `RectangleROI`'s handle/drag machinery for the
-      focused-point-edit feature.
-- [ ] `window.self.rois` is dead: initialized to `[]` in `__init__` and
-      never appended to anywhere in the codebase (gel_analyzer stopped
-      populating it once it moved to `ShapeLane`). The `for roi in
-      self.rois` loops in `window.py` and `widgets/line_profile.py` are
-      therefore no-ops today.
-- [ ] `apps/gel_rois.py` (the `LaneROI` re-export shim) is unused —
-      nothing imports it anymore.
-- [ ] Remaining cleanup, once someone wants to spend the time: delete the
-      four dead ROI subclasses + `apps/gel_rois.py` + the dead
-      `self.rois` plumbing (list, append/remove sites, the
-      `line_profile.py` branch that iterates it) while keeping
-      `ROI`/`RectangleROI`/`PointROI` for focused-point editing. Update
-      `pyvistra/__init__.py` exports accordingly. Not done yet — flagged
-      here so it isn't lost, not blocking anything.
+      focused-point-edit feature). Deleted the dead `CircleROI`,
+      `LineROI`, `CoordinateROI`, `LaneROI` subclasses and their
+      `pyvistra/__init__.py` lazy exports.
+- [x] `window.self.rois` (list, ID pool, group-management methods,
+      append/remove sites) deleted — it was initialized to `[]` and never
+      appended to. Also removed the now-dead `LaneROI` modifier-click
+      handling and legacy-ROI hit-test loop in `window.py`'s mouse-press
+      handler (all gated on the empty list).
+- [x] `apps/gel_rois.py` (the `LaneROI` re-export shim) deleted — had zero
+      importers.
+- [x] `widgets/line_profile.py`'s legacy-LineROI-as-profile-source path
+      removed (`_update_profile`, `current_roi`, `_on_roi_modified`, the
+      `for roi in window.rois` loops) — provably dead once `LineROI` no
+      longer exists (`_on_roi_selection_changed`'s `isinstance(roi,
+      LineROI)` was already always `False` since `self.rois` was always
+      empty). Shape-layer-based `set_shape_source` remains the live path.
+      `widgets/radial_profile_dialog.py` had already fully migrated to
+      shape-layer circles; only updated its leftover "Select a CircleROI"
+      status-label text.
+      110 tests pass after this cleanup.
 - [ ] Remove the `Toolbar` backward-compat re-export at the bottom of
       `ui/window.py` if grep confirms no consumers.
 - [ ] Remove the `labels` / `label_overlay` backward-compat properties on

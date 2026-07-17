@@ -59,7 +59,7 @@ class LayerList:
     """Ordered collection of named layers.
 
     One LayerList per viewer window. Replaces the separate
-    window.rois, _point_layers, _track_layers, _mask_layers dicts.
+    _point_layers, _track_layers, _mask_layers dicts.
     """
 
     def __init__(self) -> None:
