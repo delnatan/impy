@@ -24,8 +24,6 @@ from .transform import TransformDialog
 from .alignment import AlignmentDialog
 from .output_selector import ImageOutputSelector
 from .region_selector import RegionSelector
-from .source_selector import SourceSelector
-from .file_list import FlaggableFileListWidget
 from .axes_dialog import AxesDialog
 from .line_profile import LineProfileDialog, get_line_profile_dialog, line_profile_dialog_exists
 from .radial_profile_dialog import (
@@ -70,8 +68,6 @@ __all__ = [
     "AlignmentDialog",
     "ImageOutputSelector",
     "RegionSelector",
-    "SourceSelector",
-    "FlaggableFileListWidget",
     "AxesDialog",
     "ZProjectionDialog",
     "ImageMathDialog",
