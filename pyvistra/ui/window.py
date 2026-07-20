@@ -3178,7 +3178,11 @@ class ImageWindow(QMainWindow):
             self.playback_fps_spin.setSingleStep(0.25)
             self.playback_fps_spin.setValue(self._playback_fps)
             self.playback_fps_spin.setSuffix(" fps")
-            self.playback_fps_spin.setFocusPolicy(Qt.NoFocus)  # see c_slider above
+            # ClickFocus (not NoFocus like c_slider above): unlike a slider,
+            # this needs direct keyboard text entry, but only when the user
+            # clicks into it -- Tab traversal still won't land here and
+            # steal arrow keys from the shape-nudge shortcut.
+            self.playback_fps_spin.setFocusPolicy(Qt.ClickFocus)
             self.playback_fps_spin.valueChanged.connect(
                 self.on_playback_fps_changed
             )

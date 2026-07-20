@@ -142,6 +142,7 @@ class _TabGroup(QTabWidget):
         widget = self.widget(idx)
         if widget is None:
             return
+        self._workspace._release_channel_popup(widget)
         if widget.close():
             # ImageWindows drop their tab via window_unregistered (and
             # WA_DeleteOnClose); other viewers need an explicit removal.
@@ -420,10 +421,32 @@ class Workspace(QMainWindow):
         self._collapse_empty_groups()
 
     def _drop_tab(self, window):
+        self._release_channel_popup(window)
         group = self._group_of(window)
         if group is not None:
             group.removeTab(group.indexOf(window))
             self._collapse_empty_groups()
+
+    def _release_channel_popup(self, widget):
+        """If the shared Channels & Contrast popup is currently bound to
+        *widget*, tear it down before *widget* closes.
+
+        Nothing else retargets ``_channel_popup`` when its viewer closes
+        (only ``show_channel_panel()`` calls ``rebind_viewer``, on the
+        next explicit open) -- left unfixed, the popup stays visible
+        and bound to a viewer that's about to be destroyed, and the next
+        control interaction (clim spin, colormap swatch, ...) calls back
+        into ``self.viewer.renderer`` on a deleted Qt object and raises
+        RuntimeError. Closing the panel here (rather than just the popup)
+        reuses its own closeEvent cleanup (display unsubscribe,
+        view_changed disconnect) via the same path ``rebind_viewer`` uses.
+        """
+        popup = self._channel_popup
+        if popup is None or popup.panel is None or popup.panel.viewer is not widget:
+            return
+        popup.panel.close()
+        popup.close()
+        self._channel_popup = None
 
     # ------------------------------------------------------------------
     # Menu / panels
