@@ -102,12 +102,16 @@ class ConvergencePlotWidget(QWidget):
     # ------------------------------------------------------------------
 
     def set_series(self, label, values, color=None, visible=True, axis="left"):
-        """Insert or replace a series. ``values`` is any 1-D iterable.
+        """Insert or replace a series wholesale. ``values`` is any 1-D
+        iterable.
 
         ``axis`` is ``"left"`` or ``"right"`` — series on different axes
-        are autoscaled independently (see class docstring).
+        are autoscaled independently (see class docstring). For live
+        per-iteration updates, prefer :meth:`append_point` -- this rebuilds
+        the whole stored list every call, which is O(n) instead of
+        :meth:`append_point`'s O(1) amortized.
         """
-        vals = np.asarray(list(values), dtype=float)
+        vals = [float(v) for v in values]
         entry = self._series.get(label)
         if entry is None:
             entry = {
@@ -123,6 +127,31 @@ class ConvergencePlotWidget(QWidget):
                 entry["color"] = color
             entry["visible"] = visible
             entry["axis"] = axis
+        self.update()
+
+    def append_point(self, label, value, color=None, visible=True, axis="left"):
+        """Append one value to ``label`` (creating it if new).
+
+        The incremental counterpart to :meth:`set_series` for live
+        per-iteration updates: appends to the series' backing Python list
+        in O(1) amortized time instead of re-sending and rebuilding the
+        entire history every call, so a caller pushing one point per solver
+        iteration doesn't pay O(n) per call (O(n^2) over a run).
+        """
+        entry = self._series.get(label)
+        if entry is None:
+            entry = {
+                "color": color or FALLBACK_COLORS[len(self._series) % len(FALLBACK_COLORS)],
+                "values": [],
+                "visible": visible,
+                "axis": axis,
+            }
+            self._series[label] = entry
+        entry["values"].append(float(value))
+        if color is not None:
+            entry["color"] = color
+        entry["visible"] = visible
+        entry["axis"] = axis
         self.update()
 
     def remove_series(self, label):
@@ -177,7 +206,7 @@ class ConvergencePlotWidget(QWidget):
         """(y_min, y_max, log_y_min, log_y_max) spanning ``items``' values."""
         all_finite = []
         for _, s in items:
-            v = s["values"]
+            v = np.asarray(s["values"], dtype=float)
             if self._y_log:
                 v = v[np.isfinite(v) & (v > 0)]
             else:
@@ -216,7 +245,7 @@ class ConvergencePlotWidget(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), WIDGET_BG)
 
-        visible = [(lbl, s) for lbl, s in self._series.items() if s["visible"] and s["values"].size > 0]
+        visible = [(lbl, s) for lbl, s in self._series.items() if s["visible"] and len(s["values"]) > 0]
         if not visible:
             painter.setPen(TEXT_COLOR)
             painter.drawText(self.rect(), Qt.AlignCenter, "(no convergence data yet)")
@@ -229,7 +258,7 @@ class ConvergencePlotWidget(QWidget):
         margin_right = self.margin_right_axis if has_right else self.margin_right
         plot_x, plot_y, plot_w, plot_h = self._plot_rect(margin_right)
 
-        x_max = max(s["values"].size for _, s in visible)
+        x_max = max(len(s["values"]) for _, s in visible)
         x_min = 1
         if x_max < 2:
             x_max = 2

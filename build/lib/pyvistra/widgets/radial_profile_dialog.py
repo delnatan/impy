@@ -194,7 +194,7 @@ class RadialProfileDialog(QDialog):
         self.profile_widget = LineProfileWidget()
         layout.addWidget(self.profile_widget, 1)
 
-        self.status_label = QLabel("Select a CircleROI to start")
+        self.status_label = QLabel("Select a circle shape to start")
         self.status_label.setStyleSheet("color: #AAA; font-size: 10px;")
         layout.addWidget(self.status_label)
 
@@ -298,7 +298,7 @@ class RadialProfileDialog(QDialog):
                 self._unsubscribe_from_shape_source()
                 self.current_circle_data = None
                 self.profile_widget.clear()
-                self.status_label.setText("Select a CircleROI to start")
+                self.status_label.setText("Select a circle shape to start")
                 return
             if event_kind in (EVT_EDITED, EVT_BULK):
                 if self._extract_shape_circle_data(
@@ -378,7 +378,7 @@ class RadialProfileDialog(QDialog):
         self._unsubscribe_from_shape_source()
         self._refresh_series_list()
         self.profile_widget.clear()
-        self.status_label.setText("Select a CircleROI to start")
+        self.status_label.setText("Select a circle shape to start")
 
     def _refresh_series_list(self, select_wid=None):
         selected_wid = None
@@ -473,7 +473,7 @@ class RadialProfileDialog(QDialog):
         if self.current_circle_data is None:
             self.profile_widget.clear()
             self._computed_series = []
-            self.status_label.setText("Select a CircleROI to start")
+            self.status_label.setText("Select a circle shape to start")
             return
 
         cx = self.current_circle_data["cx"]

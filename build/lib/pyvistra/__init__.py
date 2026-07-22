@@ -47,10 +47,6 @@ _LAZY_IMPORTS = {
     # rois (legacy)
     "ROI": (".rois", "ROI"),
     "RectangleROI": (".rois", "RectangleROI"),
-    "CircleROI": (".rois", "CircleROI"),
-    "LineROI": (".rois", "LineROI"),
-    "CoordinateROI": (".rois", "CoordinateROI"),
-    "LaneROI": (".rois", "LaneROI"),
     # labels/masks
     "SparseLabels": (".data.labels", "SparseLabels"),
     "LabelOverlayVisual": (".visuals.labels", "LabelOverlayVisual"),

@@ -71,6 +71,12 @@ class ConvergencePlotWidget(QWidget):
     Series are stored in insertion order. Calling :meth:`set_series` with
     an existing label updates that series in place (cheap repaint, no
     flicker), which is the canonical pattern during live iteration.
+
+    Each series is assigned to the ``"left"`` or ``"right"`` y-axis (via
+    ``set_series(..., axis=...)``). The two axes are scaled independently,
+    which keeps a narrow-range series legible next to a wide-range one
+    instead of both sharing one autoscaled range. The right axis is only
+    drawn when at least one visible series uses it.
     """
 
     def __init__(self, parent=None):
@@ -78,14 +84,16 @@ class ConvergencePlotWidget(QWidget):
         self.setMinimumHeight(140)
         self.setMinimumWidth(280)
 
-        self._series = OrderedDict()  # label -> {color, values, visible}
+        self._series = OrderedDict()  # label -> {color, values, visible, axis}
         self._y_log = True
         self._x_label = "Iteration"
         self._y_label = "MSE"
+        self._y_label_right = None
         self._title = ""
 
         self.margin_left = 56
         self.margin_right = 12
+        self.margin_right_axis = 52
         self.margin_top = 18
         self.margin_bottom = 28
 
@@ -93,15 +101,24 @@ class ConvergencePlotWidget(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def set_series(self, label, values, color=None, visible=True):
-        """Insert or replace a series. ``values`` is any 1-D iterable."""
-        vals = np.asarray(list(values), dtype=float)
+    def set_series(self, label, values, color=None, visible=True, axis="left"):
+        """Insert or replace a series wholesale. ``values`` is any 1-D
+        iterable.
+
+        ``axis`` is ``"left"`` or ``"right"`` — series on different axes
+        are autoscaled independently (see class docstring). For live
+        per-iteration updates, prefer :meth:`append_point` -- this rebuilds
+        the whole stored list every call, which is O(n) instead of
+        :meth:`append_point`'s O(1) amortized.
+        """
+        vals = [float(v) for v in values]
         entry = self._series.get(label)
         if entry is None:
             entry = {
                 "color": color or FALLBACK_COLORS[len(self._series) % len(FALLBACK_COLORS)],
                 "values": vals,
                 "visible": visible,
+                "axis": axis,
             }
             self._series[label] = entry
         else:
@@ -109,6 +126,32 @@ class ConvergencePlotWidget(QWidget):
             if color is not None:
                 entry["color"] = color
             entry["visible"] = visible
+            entry["axis"] = axis
+        self.update()
+
+    def append_point(self, label, value, color=None, visible=True, axis="left"):
+        """Append one value to ``label`` (creating it if new).
+
+        The incremental counterpart to :meth:`set_series` for live
+        per-iteration updates: appends to the series' backing Python list
+        in O(1) amortized time instead of re-sending and rebuilding the
+        entire history every call, so a caller pushing one point per solver
+        iteration doesn't pay O(n) per call (O(n^2) over a run).
+        """
+        entry = self._series.get(label)
+        if entry is None:
+            entry = {
+                "color": color or FALLBACK_COLORS[len(self._series) % len(FALLBACK_COLORS)],
+                "values": [],
+                "visible": visible,
+                "axis": axis,
+            }
+            self._series[label] = entry
+        entry["values"].append(float(value))
+        if color is not None:
+            entry["color"] = color
+        entry["visible"] = visible
+        entry["axis"] = axis
         self.update()
 
     def remove_series(self, label):
@@ -136,11 +179,13 @@ class ConvergencePlotWidget(QWidget):
         self._y_log = bool(enabled)
         self.update()
 
-    def set_labels(self, x_label=None, y_label=None, title=None):
+    def set_labels(self, x_label=None, y_label=None, title=None, y_label_right=None):
         if x_label is not None:
             self._x_label = x_label
         if y_label is not None:
             self._y_label = y_label
+        if y_label_right is not None:
+            self._y_label_right = y_label_right
         if title is not None:
             self._title = title
         self.update()
@@ -149,34 +194,19 @@ class ConvergencePlotWidget(QWidget):
     # Painting
     # ------------------------------------------------------------------
 
-    def _plot_rect(self):
+    def _plot_rect(self, margin_right=None):
         x = self.margin_left
         y = self.margin_top
-        w = self.width() - self.margin_left - self.margin_right
-        h = self.height() - self.margin_top - self.margin_bottom
+        mr = self.margin_right if margin_right is None else margin_right
+        w = self.width() - x - mr
+        h = self.height() - y - self.margin_bottom
         return x, y, max(1, w), max(1, h)
 
-    def paintEvent(self, _event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), WIDGET_BG)
-
-        visible = [(lbl, s) for lbl, s in self._series.items() if s["visible"] and s["values"].size > 0]
-        if not visible:
-            painter.setPen(TEXT_COLOR)
-            painter.drawText(self.rect(), Qt.AlignCenter, "(no convergence data yet)")
-            return
-
-        plot_x, plot_y, plot_w, plot_h = self._plot_rect()
-
-        x_max = max(s["values"].size for _, s in visible)
-        x_min = 1
-        if x_max < 2:
-            x_max = 2
-
+    def _axis_range(self, items):
+        """(y_min, y_max, log_y_min, log_y_max) spanning ``items``' values."""
         all_finite = []
-        for _, s in visible:
-            v = s["values"]
+        for _, s in items:
+            v = np.asarray(s["values"], dtype=float)
             if self._y_log:
                 v = v[np.isfinite(v) & (v > 0)]
             else:
@@ -207,17 +237,45 @@ class ConvergencePlotWidget(QWidget):
                 pad = 0.05 * (y_max - y_min)
                 y_min -= pad
                 y_max += pad
-            log_y_min = log_y_max = None  # silence linter
+            log_y_min = log_y_max = None
+        return y_min, y_max, log_y_min, log_y_max
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), WIDGET_BG)
+
+        visible = [(lbl, s) for lbl, s in self._series.items() if s["visible"] and len(s["values"]) > 0]
+        if not visible:
+            painter.setPen(TEXT_COLOR)
+            painter.drawText(self.rect(), Qt.AlignCenter, "(no convergence data yet)")
+            return
+
+        left_items = [(lbl, s) for lbl, s in visible if s["axis"] != "right"]
+        right_items = [(lbl, s) for lbl, s in visible if s["axis"] == "right"]
+        has_right = bool(right_items)
+
+        margin_right = self.margin_right_axis if has_right else self.margin_right
+        plot_x, plot_y, plot_w, plot_h = self._plot_rect(margin_right)
+
+        x_max = max(len(s["values"]) for _, s in visible)
+        x_min = 1
+        if x_max < 2:
+            x_max = 2
+
+        left_range = self._axis_range(left_items) if left_items else None
+        right_range = self._axis_range(right_items) if right_items else None
 
         self._draw_axes(
             painter, plot_x, plot_y, plot_w, plot_h,
-            x_min, x_max, y_min, y_max, log_y_min, log_y_max,
+            x_min, x_max, left_range, right_range, has_right,
         )
         self._draw_legend(painter, plot_x, plot_y, plot_w, visible)
         for idx, (label, s) in enumerate(visible):
+            axis_range = right_range if s["axis"] == "right" else left_range
             self._draw_series(
                 painter, s, idx, plot_x, plot_y, plot_w, plot_h,
-                x_min, x_max, y_min, y_max, log_y_min, log_y_max,
+                x_min, x_max, *axis_range,
             )
 
     def _x_to_px(self, x_val, x_min, x_max, plot_x, plot_w):
@@ -238,9 +296,33 @@ class ConvergencePlotWidget(QWidget):
             r = (y_val - y_min) / (y_max - y_min)
         return plot_y + plot_h - r * plot_h
 
+    def _draw_y_ticks(self, painter, plot_x, plot_y, plot_w, plot_h, axis_range, side):
+        y_min, y_max, log_y_min, log_y_max = axis_range
+        if side == "left":
+            text_x, text_w, align = 2, self.margin_left - 6, Qt.AlignRight | Qt.AlignVCenter
+        else:
+            text_x, text_w = int(plot_x + plot_w + 4), self.margin_right_axis - 6
+            align = Qt.AlignLeft | Qt.AlignVCenter
+
+        if self._y_log:
+            n_ticks = 4
+            for i in range(n_ticks + 1):
+                v_log = log_y_min + (i / n_ticks) * (log_y_max - log_y_min)
+                v = 10 ** v_log
+                yp = self._y_to_px(v, y_min, y_max, plot_y, plot_h, log_y_min, log_y_max)
+                if yp is None:
+                    continue
+                painter.drawText(int(text_x), int(yp - 6), text_w, 12, align, _fmt(v))
+        else:
+            for v in (y_min, (y_min + y_max) / 2, y_max):
+                yp = self._y_to_px(v, y_min, y_max, plot_y, plot_h, log_y_min, log_y_max)
+                if yp is None:
+                    continue
+                painter.drawText(int(text_x), int(yp - 6), text_w, 12, align, _fmt(v))
+
     def _draw_axes(
         self, painter, plot_x, plot_y, plot_w, plot_h,
-        x_min, x_max, y_min, y_max, log_y_min, log_y_max,
+        x_min, x_max, left_range, right_range, has_right,
     ):
         border = QPen(QColor(80, 80, 80))
         border.setWidth(1)
@@ -261,28 +343,10 @@ class ConvergencePlotWidget(QWidget):
         font.setPointSize(8)
         painter.setFont(font)
 
-        # Y tick labels
-        if self._y_log:
-            n_ticks = 4
-            for i in range(n_ticks + 1):
-                v_log = log_y_min + (i / n_ticks) * (log_y_max - log_y_min)
-                v = 10 ** v_log
-                yp = self._y_to_px(v, y_min, y_max, plot_y, plot_h, log_y_min, log_y_max)
-                if yp is None:
-                    continue
-                painter.drawText(
-                    2, int(yp - 6), self.margin_left - 6, 12,
-                    Qt.AlignRight | Qt.AlignVCenter, _fmt(v),
-                )
-        else:
-            for v in (y_min, (y_min + y_max) / 2, y_max):
-                yp = self._y_to_px(v, y_min, y_max, plot_y, plot_h, log_y_min, log_y_max)
-                if yp is None:
-                    continue
-                painter.drawText(
-                    2, int(yp - 6), self.margin_left - 6, 12,
-                    Qt.AlignRight | Qt.AlignVCenter, _fmt(v),
-                )
+        if left_range is not None:
+            self._draw_y_ticks(painter, plot_x, plot_y, plot_w, plot_h, left_range, "left")
+        if right_range is not None:
+            self._draw_y_ticks(painter, plot_x, plot_y, plot_w, plot_h, right_range, "right")
 
         # X tick labels
         for v in (x_min, (x_min + x_max) // 2, x_max):
@@ -296,12 +360,19 @@ class ConvergencePlotWidget(QWidget):
             int(plot_x + plot_w / 2 - 60), int(plot_y + plot_h + 14),
             120, 14, Qt.AlignCenter, self._x_label,
         )
-        # Y-axis label, rotated.
+        # Y-axis label(s), rotated.
         painter.save()
         painter.translate(12, plot_y + plot_h / 2)
         painter.rotate(-90)
         painter.drawText(-60, -2, 120, 14, Qt.AlignCenter, self._y_label)
         painter.restore()
+
+        if has_right and self._y_label_right:
+            painter.save()
+            painter.translate(int(plot_x + plot_w + self.margin_right_axis - 4), plot_y + plot_h / 2)
+            painter.rotate(90)
+            painter.drawText(-60, -2, 120, 14, Qt.AlignCenter, self._y_label_right)
+            painter.restore()
 
         if self._title:
             painter.drawText(
@@ -317,7 +388,7 @@ class ConvergencePlotWidget(QWidget):
         y = plot_y + 4
         for label, s in visible:
             qc = _to_qcolor(s["color"], QColor(255, 255, 255))
-            text = label
+            text = f"{label} (R)" if s["axis"] == "right" else label
             tw = painter.fontMetrics().horizontalAdvance(text)
             box_w = tw + 22
             painter.fillRect(int(x - box_w), int(y), 10, 10, qc)

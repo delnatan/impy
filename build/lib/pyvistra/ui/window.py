@@ -1,5 +1,4 @@
 import os
-import heapq
 import sys
 from collections import OrderedDict
 from datetime import datetime
@@ -74,11 +73,7 @@ from ..data.view_state import ViewState
 from ..data.channel_state import ChannelDisplayList
 from ..visuals.points import DEFAULT_STYLE as POINT_DEFAULT_STYLE, PointLayerVisual
 from ..visuals.shapes import ShapeLayerVisual
-from ..rois import (
-    LaneROI,
-    LineROI,
-    PointROI,
-)
+from ..rois import PointROI
 from ..data.tracks import TrackTable
 from ..visuals.tracks import TrackLayerVisual
 from ..visuals.image import CompositeImageVisual
@@ -372,14 +367,8 @@ class ImageWindow(QMainWindow):
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
 
-        # 8. ROI State
-        self.rois = []
-        self._next_roi_id = 0
-        self._freed_roi_ids = []  # min-heap of freed IDs for reuse
+        # 8. ROI State (focused-point editing only; see PointROI)
         self.start_pos = None
-        # ROI grouping
-        self._roi_groups_visible = {"Default": True}
-        self._active_roi_group = "Default"
         # Editing State
         self.dragging_roi = None
         self.drag_handle = None
@@ -598,11 +587,8 @@ class ImageWindow(QMainWindow):
             # Toggle ROI labels visibility
             from ..rois import ROI
 
-            show = ROI.toggle_labels()
-            # Update visibility for all ROIs in all windows
+            ROI.toggle_labels()
             for w in manager.get_all().values():
-                for roi in w.rois:
-                    roi.label_visual.visible = show
                 w.canvas.update()
         elif event.key() == Qt.Key_Escape:
             # Cancel contour mode if active
@@ -622,8 +608,6 @@ class ImageWindow(QMainWindow):
                 self._polyline_drawing_id = None
                 return
             # Deselect all ROIs and shape-layer entries
-            for roi in self.rois:
-                roi.select(False)
             self._clear_shape_selection()
             self.canvas.update()
             self.roi_selection_changed.emit(None)
@@ -1262,31 +1246,6 @@ class ImageWindow(QMainWindow):
         if not output_dir:
             return
         self.export_frames(output_dir)
-
-    # ---- ROI ID Management ----
-
-    def _get_next_roi_id(self):
-        """Get next available ROI ID, reusing freed IDs when possible."""
-        if self._freed_roi_ids:
-            return heapq.heappop(self._freed_roi_ids)
-        roi_id = self._next_roi_id
-        self._next_roi_id += 1
-        return roi_id
-
-    def _free_roi_id(self, roi):
-        """Return an ROI's ID to the pool for reuse."""
-        try:
-            heapq.heappush(self._freed_roi_ids, int(roi.name))
-        except ValueError:
-            pass  # Non-numeric name, ignore
-
-    def remove_roi(self, roi):
-        """Remove an ROI from this window, freeing its ID."""
-        if roi in self.rois:
-            self._free_roi_id(roi)
-            roi.remove()
-            self.rois.remove(roi)
-            self.roi_removed.emit(roi)
 
     # ---- Label/Mask Methods ----
 
@@ -2881,45 +2840,6 @@ class ImageWindow(QMainWindow):
     def preserve_labels(self, value: bool):
         self._preserve_labels = value
 
-    # ---- ROI Grouping ----
-
-    def get_roi_groups(self):
-        """Return dict mapping group name → list of ROIs."""
-        groups = {}
-        for roi in self.rois:
-            g = getattr(roi, "group", "Default")
-            groups.setdefault(g, []).append(roi)
-        # Include empty groups that exist in visibility dict
-        for name in self._roi_groups_visible:
-            if name not in groups:
-                groups[name] = []
-        return groups
-
-    def set_group_visible(self, name, visible):
-        """Toggle visibility of all ROIs in a group."""
-        self._roi_groups_visible[name] = visible
-        for roi in self.rois:
-            if getattr(roi, "group", "Default") == name:
-                roi.set_visible(visible)
-        self.canvas.update()
-
-    def add_roi_group(self, name):
-        """Create a new empty ROI group."""
-        if name not in self._roi_groups_visible:
-            self._roi_groups_visible[name] = True
-
-    def remove_roi_group(self, name):
-        """Delete a group and all its ROIs."""
-        rois_to_remove = [
-            r for r in self.rois if getattr(r, "group", "Default") == name
-        ]
-        for roi in rois_to_remove:
-            self.remove_roi(roi)
-        self._roi_groups_visible.pop(name, None)
-        if self._active_roi_group == name:
-            self._active_roi_group = "Default"
-            self._roi_groups_visible.setdefault("Default", True)
-
     def show_metadata_dialog(self):
         dlg = MetadataDialog(self.meta, parent=self)
         dlg.exec_()
@@ -3051,11 +2971,6 @@ class ImageWindow(QMainWindow):
         dialog.active_window = self
         dialog.show()
         dialog.raise_()
-        # Trigger update if a LineROI is selected
-        for roi in self.rois:
-            if roi.selected and isinstance(roi, LineROI):
-                dialog._update_profile(roi)
-                break
 
     def show_axes_dialog(self):
         """Show dialog to reorder axes for ambiguous TIFF dimensions."""
@@ -3263,7 +3178,11 @@ class ImageWindow(QMainWindow):
             self.playback_fps_spin.setSingleStep(0.25)
             self.playback_fps_spin.setValue(self._playback_fps)
             self.playback_fps_spin.setSuffix(" fps")
-            self.playback_fps_spin.setFocusPolicy(Qt.NoFocus)  # see c_slider above
+            # ClickFocus (not NoFocus like c_slider above): unlike a slider,
+            # this needs direct keyboard text entry, but only when the user
+            # clicks into it -- Tab traversal still won't land here and
+            # steal arrow keys from the shape-nudge shortcut.
+            self.playback_fps_spin.setFocusPolicy(Qt.ClickFocus)
             self.playback_fps_spin.valueChanged.connect(
                 self.on_playback_fps_changed
             )
@@ -3749,17 +3668,11 @@ class ImageWindow(QMainWindow):
                     self._reset_vispy_press_state()
                     return
 
-            # Hit Test ROIs (Reverse order to select top-most)
+            # Hit Test ROIs
             hit_roi = None
             hit_handle = None
 
-            for roi in reversed(self.rois):
-                res = roi.hit_test((x, y))
-                if res:
-                    hit_roi = roi
-                    hit_handle = res
-                    break
-            if hit_roi is None and self._focused_point_roi is not None:
+            if self._focused_point_roi is not None:
                 res = self._focused_point_roi.hit_test((x, y))
                 if res:
                     hit_roi = self._focused_point_roi
@@ -3772,43 +3685,7 @@ class ImageWindow(QMainWindow):
                     hit_roi = self._focused_point_roi
                     hit_handle = "center"
 
-            # Handle modifier clicks on LaneROIs
-            if isinstance(hit_roi, LaneROI):
-                # Ctrl+Click (or Cmd+Click on Mac) on a marker: remove it
-                has_ctrl_or_cmd = (
-                    "Control" in event.modifiers or "Meta" in event.modifiers
-                )
-                if has_ctrl_or_cmd:
-                    if (
-                        isinstance(hit_handle, tuple)
-                        and hit_handle[0] == "marker"
-                    ):
-                        marker_idx = hit_handle[1]
-                        hit_roi.remove_marker(marker_idx)
-                        # Trigger callback for live MW update
-                        if hit_roi._on_markers_changed:
-                            hit_roi._on_markers_changed()
-                        self.canvas.update()
-                        return
-
-                # Shift+Click anywhere in lane: add a marker
-                # Works on body, center, or even on existing marker position
-                if "Shift" in event.modifiers:
-                    if hit_handle in ("body", "center") or isinstance(
-                        hit_handle, tuple
-                    ):
-                        x_min, x_max, y_min, y_max = hit_roi._get_bounds()
-                        y_local = y - y_min
-                        hit_roi.add_marker(y_local)
-                        # Trigger callback for live MW update
-                        if hit_roi._on_markers_changed:
-                            hit_roi._on_markers_changed()
-                        self.canvas.update()
-                        return
-
             # Update Selection
-            for roi in self.rois:
-                roi.select(roi is hit_roi)
             if self._focused_point_roi is not None:
                 self._focused_point_roi.select(self._focused_point_roi is hit_roi)
 
@@ -3944,8 +3821,7 @@ class ImageWindow(QMainWindow):
             return
 
         # Shape drawing tools (rect, circle, line) populate the active
-        # ShapeData layer via AddShape. Legacy ROI objects in self.rois
-        # are programmatic-only (e.g. gel_analyzer's LaneROIs).
+        # ShapeData layer via AddShape.
         if tool in ("rect", "circle", "line"):
             # If the press lands on a HANDLE of a selected shape, route to
             # the edit path so the user can grab handles of the just-drawn
@@ -4284,9 +4160,6 @@ class ImageWindow(QMainWindow):
         if self.dragging_roi:
             # Emit final modification signal
             self.roi_modified.emit(self.dragging_roi)
-            # Notify ROI that drag ended (for LaneROI marker callbacks)
-            if hasattr(self.dragging_roi, "end_marker_drag"):
-                self.dragging_roi.end_marker_drag()
             self.dragging_roi = None
             self.drag_handle = None
             self.last_pos = None

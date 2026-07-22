@@ -90,6 +90,11 @@ class OrthoViewer(QMainWindow):
     # listen for this to refresh per-channel histograms / profiles.
     view_changed = Signal(object)
 
+    # Internal — marshals ImageBuffer change notifications from any worker
+    # thread onto the GUI thread (Qt.QueuedConnection in __init__), same
+    # contract as ImageWindow's _buffer_dirty.
+    _buffer_dirty = Signal(object)
+
     # Mirrored onto the Workspace's persistent menu bar while docked
     # (see ui/workspace.py); format documented at window.MENU_SPEC.
     MENU_SPEC = [
@@ -341,6 +346,11 @@ class OrthoViewer(QMainWindow):
 
         # Store event handlers for proper cleanup on close
         self._event_handlers = []
+
+        # Live ImageBuffer updates (see _subscribe_to_buffer/_on_buffer_dirty).
+        self._buffer_unsubscribe = None
+        self._buffer_dirty.connect(self._on_buffer_dirty, Qt.QueuedConnection)
+        self._subscribe_to_buffer(self.data)
 
         self._setup_controls()
         self._setup_menu()
@@ -821,6 +831,46 @@ class OrthoViewer(QMainWindow):
     @img_data.setter
     def img_data(self, value):
         self.data = value
+        self._subscribe_to_buffer(value)
+
+    def _subscribe_to_buffer(self, data):
+        if self._buffer_unsubscribe is not None:
+            self._buffer_unsubscribe()
+            self._buffer_unsubscribe = None
+        if hasattr(data, "subscribe"):
+            self._buffer_unsubscribe = data.subscribe(
+                lambda key: self._buffer_dirty.emit(key)
+            )
+
+    def _on_buffer_dirty(self, key):
+        if self._key_touches_current_t(key):
+            self.update_views()
+        else:
+            self.canvas_yx.update()
+            self.canvas_zy.update()
+            self.canvas_zx.update()
+
+    def _key_touches_current_t(self, key):
+        """Conservative check: True if a buffer write at *key* could affect
+        the currently displayed T index. Unlike ImageWindow's equivalent,
+        no Z check is needed -- the ZY/ZX panels already show every Z plane
+        at a fixed Y/X, so any Z write for the current T is always visible.
+        """
+        if not isinstance(key, tuple):
+            key = (key,)
+        if Ellipsis in key:
+            return True
+        if len(key) < 1:
+            return True
+
+        axis_val = key[0]
+        if isinstance(axis_val, slice):
+            start, stop, step = axis_val.indices(self.T)
+            return start <= self.ct < stop and (self.ct - start) % step == 0
+        try:
+            return int(axis_val) == self.ct
+        except (TypeError, ValueError):
+            return True
 
     @property
     def canvas(self):
@@ -863,6 +913,10 @@ class OrthoViewer(QMainWindow):
             self.canvas_zx.update()
 
     def closeEvent(self, event):
+        if self._buffer_unsubscribe is not None:
+            self._buffer_unsubscribe()
+            self._buffer_unsubscribe = None
+
         # Disconnect all event handlers to prevent callbacks to dead objects
         for event_emitter, handler in self._event_handlers:
             try:
