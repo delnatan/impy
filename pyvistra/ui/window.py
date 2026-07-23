@@ -238,7 +238,7 @@ class ImageWindow(QMainWindow):
     # loader thread onto the GUI thread (Qt.QueuedConnection in __init__).
     _slice_ready = Signal(object, object)
 
-    def __init__(self, data_or_path, title="Image", meta=None):
+    def __init__(self, data_or_path, title="Image", meta=None, filepath=None):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
 
@@ -248,7 +248,7 @@ class ImageWindow(QMainWindow):
             self.img_data, self.meta = load_image(self.filepath)
             filename = self.meta.get("filename", "Image")
         else:
-            self.filepath = None
+            self.filepath = filepath
             self.meta = meta or {}
 
             # Accept any 5D proxy-like object (Imaris5DProxy, Numpy5DProxy, etc.)

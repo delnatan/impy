@@ -3,7 +3,7 @@
 import os
 
 from natsort import natsort_key
-from qtpy.QtCore import QSize, Qt
+from qtpy.QtCore import QObject, QSize, Qt, QThread, Signal
 from qtpy.QtGui import QDragEnterEvent, QDropEvent, QIcon
 from qtpy.QtWidgets import (
     QAction,
@@ -23,6 +23,32 @@ from ..apps.console import console_exists, get_console
 from .manager import manager
 
 
+class _ImageLoadWorker(QObject):
+    """Runs load_image() on a worker thread so file-open/metadata-scan
+    (and, for compressed TIFFs, a full eager array read) never blocks
+    the GUI thread."""
+
+    # img_data, meta, filepath, worker (self -- QObject.sender() is
+    # unreliable for moveToThread()'d emitters on a queued connection,
+    # so identify the pending-load entry to clean up explicitly)
+    finished = Signal(object, object, str, object)
+    error = Signal(str, str, object)  # message, filepath, worker
+
+    def __init__(self, filepath):
+        super().__init__()
+        self.filepath = filepath
+
+    def run(self):
+        from ..io import load_image
+
+        try:
+            data, meta = load_image(self.filepath)
+        except Exception as e:
+            self.error.emit(str(e), self.filepath, self)
+            return
+        self.finished.emit(data, meta, self.filepath, self)
+
+
 class Toolbar(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -30,6 +56,7 @@ class Toolbar(QMainWindow):
         self.setGeometry(100, 100, 600, 100)  # Wider
         self.setAcceptDrops(True)
         self.open_windows = []
+        self._pending_loads = {}  # worker -> thread, keeps them alive
 
         # Central Widget with Layout
         central = QWidget()
@@ -367,12 +394,35 @@ class Toolbar(QMainWindow):
         super().closeEvent(event)
 
     def spawn_viewer(self, filepath):
+        worker = _ImageLoadWorker(filepath)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_image_loaded)
+        worker.error.connect(self._on_image_load_error)
+
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._pending_loads[worker] = thread
+        thread.start()
+
+    def _on_image_loaded(self, data, meta, filepath, worker):
         from .window import ImageWindow
         from .workspace import present_window
 
+        self._pending_loads.pop(worker, None)
         try:
-            viewer = ImageWindow(filepath)
+            viewer = ImageWindow(data, meta=meta, filepath=filepath)
             present_window(viewer)
             self.open_windows.append(viewer)
         except Exception as e:
             print(f"Error opening {filepath}: {e}")
+
+    def _on_image_load_error(self, message, filepath, worker):
+        self._pending_loads.pop(worker, None)
+        print(f"Error opening {filepath}: {message}")
