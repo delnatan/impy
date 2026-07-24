@@ -11,6 +11,7 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
+    QProgressBar,
     QStyle,
     QToolBar,
     QVBoxLayout,
@@ -208,6 +209,29 @@ class Toolbar(QMainWindow):
             "QLabel { color: #d2d2d2; font-size: 11px; padding: 0 4px; }"
         )
         self.tools.addWidget(self.mode_indicator)
+
+        # Busy indicator: shown only while one or more _ImageLoadWorker
+        # threads are in flight (see spawn_viewer/_pending_loads below).
+        # Lives in the status bar rather than the QToolBar -- the toolbar
+        # is narrow and already crowded with tool icons, so extra widgets
+        # added to it can silently land behind the overflow chevron
+        # instead of actually being seen. Indeterminate (min==max==0)
+        # since there's no meaningful progress fraction for a single
+        # load_image() call.
+        self.loading_label = QLabel("")
+        self.loading_label.setStyleSheet(
+            "QLabel { color: #d2d2d2; font-size: 11px; padding: 0 4px; }"
+        )
+        self.loading_label.setVisible(False)
+        self.statusBar().addWidget(self.loading_label)
+
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setRange(0, 0)
+        self.loading_bar.setMaximumWidth(80)
+        self.loading_bar.setMaximumHeight(14)
+        self.loading_bar.setTextVisible(False)
+        self.loading_bar.setVisible(False)
+        self.statusBar().addWidget(self.loading_bar)
 
         # Group for exclusive tool selection
         self.group = QActionGroup(self)
@@ -409,13 +433,29 @@ class Toolbar(QMainWindow):
         thread.finished.connect(thread.deleteLater)
 
         self._pending_loads[worker] = thread
+        self._update_loading_indicator(os.path.basename(filepath))
         thread.start()
+
+    def _update_loading_indicator(self, filepath_hint=None):
+        """Show/hide the toolbar busy indicator based on how many
+        _ImageLoadWorker threads are still in flight."""
+        n = len(self._pending_loads)
+        busy = n > 0
+        if busy:
+            if n == 1 and filepath_hint:
+                text = f"Loading {filepath_hint}..."
+            else:
+                text = f"Loading {n} images..."
+            self.loading_label.setText(text)
+        self.loading_label.setVisible(busy)
+        self.loading_bar.setVisible(busy)
 
     def _on_image_loaded(self, data, meta, filepath, worker):
         from .window import ImageWindow
         from .workspace import present_window
 
         self._pending_loads.pop(worker, None)
+        self._update_loading_indicator()
         try:
             viewer = ImageWindow(data, meta=meta, filepath=filepath)
             present_window(viewer)
@@ -425,4 +465,5 @@ class Toolbar(QMainWindow):
 
     def _on_image_load_error(self, message, filepath, worker):
         self._pending_loads.pop(worker, None)
+        self._update_loading_indicator()
         print(f"Error opening {filepath}: {message}")

@@ -205,6 +205,11 @@ class Workspace(QMainWindow):
         # tabs via ChannelPopup.rebind_viewer -- see that function's
         # docstring.
         self._channel_popup = None
+        # Only the very first window ever docked gets to auto-fit the
+        # workspace (see add_window/_fit_to_first_window) -- once the user
+        # has a size (whether from that auto-fit or their own resizing),
+        # later windows just dock into it rather than snapping it around.
+        self._sized_to_first_window = False
         self._add_group()
 
         # A viewer that closes itself (or is closed via its tab) must
@@ -289,6 +294,12 @@ class Workspace(QMainWindow):
             group = self._group_of(window)
             group.setCurrentWidget(window)
             return
+        should_fit = not self._sized_to_first_window and all(
+            g.count() == 0 for g in self._groups()
+        )
+        # Capture before reparenting into a tab, which relayouts the
+        # widget to fill the tab page and discards this preferred size.
+        fit_size = window.size() if should_fit else None
         # A previously-floated window (re-adopted via present_window, per
         # the module docstring) is a live top-level QMainWindow; addTab()
         # below reparents it under the workspace, which is the same
@@ -359,10 +370,26 @@ class Workspace(QMainWindow):
         group = self._active_group()
         group.addTab(window, title or window.windowTitle() or "Image")
         group.setCurrentWidget(window)
+        if should_fit:
+            self._fit_to_first_window(group, fit_size)
+            self._sized_to_first_window = True
         if was_shown and hasattr(window, "_rebuild_canvas_for_float"):
             window._rebuild_canvas_for_float()
         manager.set_active_window(window)
         self._refresh_mirrored_menus()
+
+    def _fit_to_first_window(self, group, fit_size):
+        """Size the workspace to the first docked window's own preferred
+        size (e.g. ImageWindow's aspect-ratio-fit canvas size) instead of
+        the flat default -- otherwise a small image gets stretched into a
+        mostly-empty oversized workspace. `fit_size` is the window's size
+        captured before it was reparented into a tab (reparenting relayouts
+        it to fill the tab page, discarding that preferred size).
+        """
+        tab_bar_h = group.tabBar().sizeHint().height()
+        target_w = fit_size.width()
+        target_h = fit_size.height() + tab_bar_h
+        self.resize(max(target_w, 400), max(target_h, 300))
 
     def split_right(self, window):
         """Move *window*'s tab into a new tab group to the right."""

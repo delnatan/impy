@@ -33,6 +33,37 @@ viewer = imshow(data, meta)
 run_app()
 ```
 
+## Workspace: tabs vs. floating windows
+
+By default `imshow()` docks the viewer as a tab in a shared `Workspace`
+window rather than opening an independent top-level window. The
+workspace is a singleton created on first use, so calling `imshow()`
+repeatedly in a notebook session — e.g. once per cell as you iterate —
+adds a new tab to the same workspace instead of piling up separate
+windows on screen:
+
+```python
+viewer1 = imshow(data1, meta1)   # creates the workspace, docks tab 1
+viewer2 = imshow(data2, meta2)   # docks tab 2 in the same workspace
+```
+
+Either call still returns the underlying `ImageWindow`, so all the
+usual scripting access (`viewer.layers`, `viewer.renderer`,
+`viewer.img_data`, ...) works the same whether the window ended up
+docked or floating.
+
+Pass `floating=True` to opt out and get a standalone top-level window
+instead (the pre-workspace behavior) — useful for e.g. comparing two
+viewers on separate monitors:
+
+```python
+viewer = imshow(data, meta, floating=True)
+```
+
+Use `pyvistra.get_workspace()` to reach the shared workspace instance
+directly (it's created lazily, so calling it before any `imshow()` call
+still returns a valid, empty workspace).
+
 ## Accessing data consistently
 
 `data` behaves like a 5D array in `(T, Z, C, Y, X)` order.

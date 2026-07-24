@@ -1,6 +1,6 @@
 # pyvistra
 
-Image analysis and ROI management tool.
+Image visualization and analysis package for microscopy data — supports both GUI workflows and interactive Python usage.
 
 ## Installation
 
@@ -47,7 +47,7 @@ You can use `pyvistra` as a library to read and process images programmatically.
 You can use the `ImarisReader` class to read `.ims` files directly:
 
 ```python
-from pyvistra.imaris_reader import ImarisReader
+from pyvistra.readers.imaris import ImarisReader
 
 # Open the file
 reader = ImarisReader('path/to/file.ims')
@@ -115,7 +115,7 @@ save_tiff("output.tif", volume, scale=meta['scale'])
 
 # Now you can use imshow() interactively
 import numpy as np
-from pyvistra.ui import imshow
+from pyvistra import imshow
 
 # Create some test data
 data = np.random.rand(20, 256, 256)  # (Z, Y, X)
@@ -133,10 +133,17 @@ data, meta = load_image('path/to/file.ims')
 viewer2 = imshow(data[0, :, 0], title="Channel 0", dims="zyx")
 ```
 
+By default each `imshow()` call docks its viewer as a tab in a shared
+`Workspace` window (created the first time you call `imshow()`), so
+repeated calls across notebook cells accumulate tabs in one window
+instead of scattering separate top-level windows. Pass
+`floating=True` to get an independent top-level window instead. See
+[Interactive Python](docs/interactive-python.md) for details.
+
 If you're running from a regular Python script (not IPython), you need to start the Qt event loop manually:
 
 ```python
-from pyvistra.ui import imshow, run_app
+from pyvistra import imshow, run_app
 import numpy as np
 
 data = np.random.rand(10, 100, 100)
@@ -146,35 +153,30 @@ viewer = imshow(data, dims="zyx")
 run_app()
 ```
 
-### Working with ROIs
+### Working with Shape Annotations
 
-ROIs (Regions of Interest) can be drawn interactively and used to extract data from images.
-
-#### Extracting Region Data
-
-Each ROI type has methods to extract the corresponding region from image data:
+Rectangle/circle/line/polyline/point annotations drawn in the viewer's
+toolbar live in the layer system (`viewer.layers`), not on the window
+itself:
 
 ```python
+from pyvistra.data.shapes import RECTANGLE, rectangle_bounds
+
 # Get the current displayed slice from the viewer
 cache = viewer.renderer.current_slice_cache  # Shape: (C, Y, X)
 
-# Rectangle ROI - extract rectangular region
-rect_roi = viewer.rois[0]  # Assuming first ROI is a RectangleROI
-cropped = rect_roi.get_region(cache)  # Shape: (C, height, width)
+layer = viewer.layers.active("shapes")
+sid = layer.data.shape_ids[0]
+rec = layer.data.get(sid)
 
-# Circle ROI - extract circular region with mask
-circle_roi = viewer.rois[1]  # Assuming second ROI is a CircleROI
-region, mask = circle_roi.get_region(cache)
-# region: bounding box array (C, height, width)
-# mask: boolean array (height, width) - True inside circle
-
-# Get mean intensity inside circle for each channel
-mean_per_channel = [region[c][mask].mean() for c in range(region.shape[0])]
-
-# Line ROI - extract intensity profile along line
-line_roi = viewer.rois[2]  # Assuming third ROI is a LineROI
-profile = line_roi.get_profile(cache)  # Shape: (C, num_points)
+if rec.shape_type == RECTANGLE:
+    x0, y0, x1, y1 = rectangle_bounds(rec, cache.shape[-2:])
+    crop = cache[:, y0:y1, x0:x1]  # Shape: (C, height, width)
 ```
+
+See [Annotations and Labels](docs/annotations-and-labels.md) for
+circle/line outlines, point layers, and sparse label (segmentation
+mask) IO.
 
 ### Image Transforms
 
@@ -188,7 +190,7 @@ To bake the transform into the image data (WYSIWYG - what you see is what you ge
 2. Adjust rotation and translation visually
 3. Click "Apply Transform" to permanently apply the transform to the data
 
-This creates a transformed copy in memory. After applying, ROI region extraction will match what you see on screen.
+This creates a transformed copy in memory. After applying, shape annotation region extraction will match what you see on screen.
 
 #### Programmatic Transform
 
@@ -213,7 +215,7 @@ print(buffer.shape)  # Same as input
 buffer.save_as('rotated_output.tif')
 
 # Or display in a new viewer
-from pyvistra.ui import imshow
+from pyvistra import imshow
 viewer = imshow(buffer, title="Rotated")
 ```
 
