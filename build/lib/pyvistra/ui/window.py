@@ -21,6 +21,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -202,6 +203,15 @@ def build_menus(menubar, spec, target):
     return actions
 
 
+# Fixed regardless of how many of the Mode/Channel, Time, and Z rows a
+# given image actually needs, so two windows with different dimensionality
+# get the same canvas height whenever their outer window height matches
+# (floating windows sized alike, or docked side-by-side in a Workspace
+# split) -- otherwise the canvas (the layout's only stretch=1 item) eats
+# whatever the controls panel doesn't use, and that varies per image.
+_CONTROLS_PANEL_HEIGHT = 140
+
+
 class ImageWindow(QMainWindow):
     """Main image viewer window with ROI support."""
 
@@ -238,7 +248,7 @@ class ImageWindow(QMainWindow):
     # loader thread onto the GUI thread (Qt.QueuedConnection in __init__).
     _slice_ready = Signal(object, object)
 
-    def __init__(self, data_or_path, title="Image", meta=None):
+    def __init__(self, data_or_path, title="Image", meta=None, filepath=None):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
 
@@ -248,7 +258,7 @@ class ImageWindow(QMainWindow):
             self.img_data, self.meta = load_image(self.filepath)
             filename = self.meta.get("filename", "Image")
         else:
-            self.filepath = None
+            self.filepath = filepath
             self.meta = meta or {}
 
             # Accept any 5D proxy-like object (Imaris5DProxy, Numpy5DProxy, etc.)
@@ -293,7 +303,6 @@ class ImageWindow(QMainWindow):
         if self.filepath:
             title_str += f"[{sx:.2f} x {sy:.2f} \u00b5m]"
         self.setWindowTitle(title_str)
-        self.resize(700, 750)  # Taller for extra controls
 
         # 2. Main Layout
         central_widget = QWidget()
@@ -328,6 +337,7 @@ class ImageWindow(QMainWindow):
         self.controls_layout = QVBoxLayout(self.controls_widget)
         self.controls_layout.setContentsMargins(10, 10, 10, 10)
         self.controls_layout.setSpacing(5)
+        self.controls_widget.setFixedHeight(_CONTROLS_PANEL_HEIGHT)
         self.layout.addWidget(self.controls_widget, 0)
 
         # Navigation state (t, z, projection). Sliders write into it;
@@ -366,6 +376,16 @@ class ImageWindow(QMainWindow):
         self._fft_dialog = None
         self._alignment_dialog = None  # Shared singleton
         self._setup_menu()
+
+        # Initial window size: fit the canvas to the image's XY aspect
+        # ratio (within a screen-relative bounding box) rather than a flat
+        # default, so e.g. a wide mosaic and a tall crop don't both open at
+        # the same square-ish size. Done here (not earlier) so the menu bar
+        # is already built and its sizeHint() is accurate.
+        canvas_w, canvas_h = self._compute_canvas_size()
+        menubar_h = self.menuBar().sizeHint().height()
+        total_h = canvas_h + self.info_label.height() + _CONTROLS_PANEL_HEIGHT + menubar_h
+        self.resize(canvas_w, total_h)
 
         # 8. ROI State (focused-point editing only; see PointROI)
         self.start_pos = None
@@ -494,19 +514,23 @@ class ImageWindow(QMainWindow):
         """
         vs = self.view_state
         if field == "t":
-            if self.t_label is not None:
-                self.t_label.setText(str(vs.t))
             if self.t_slider is not None and self.t_slider.value() != vs.t:
                 self.t_slider.blockSignals(True)
                 self.t_slider.setValue(vs.t)
                 self.t_slider.blockSignals(False)
+            if self.t_spin is not None and self.t_spin.value() != vs.t:
+                self.t_spin.blockSignals(True)
+                self.t_spin.setValue(vs.t)
+                self.t_spin.blockSignals(False)
         elif field == "z":
-            if self.z_label is not None:
-                self.z_label.setText(str(vs.z))
             if self.z_slider is not None and self.z_slider.value() != vs.z:
                 self.z_slider.blockSignals(True)
                 self.z_slider.setValue(vs.z)
                 self.z_slider.blockSignals(False)
+            if self.z_spin is not None and self.z_spin.value() != vs.z:
+                self.z_spin.blockSignals(True)
+                self.z_spin.setValue(vs.z)
+                self.z_spin.blockSignals(False)
         if not self._suspend_view_updates:
             self.update_view()
 
@@ -983,13 +1007,21 @@ class ImageWindow(QMainWindow):
             z_slider.blockSignals(True)
             z_slider.setValue(self.z_idx)
             z_slider.blockSignals(False)
-        if getattr(self, "c_label", None) is not None:
-            self.c_label.setText(str(self.c_idx))
-        if getattr(self, "t_label", None) is not None:
-            self.t_label.setText(str(self.t_idx))
-        z_label = getattr(self, "z_label", None)
-        if z_label is not None:
-            z_label.setText(str(self.z_idx))
+        c_spin = getattr(self, "c_spin", None)
+        if c_spin is not None:
+            c_spin.blockSignals(True)
+            c_spin.setValue(self.c_idx)
+            c_spin.blockSignals(False)
+        t_spin = getattr(self, "t_spin", None)
+        if t_spin is not None:
+            t_spin.blockSignals(True)
+            t_spin.setValue(self.t_idx)
+            t_spin.blockSignals(False)
+        z_spin = getattr(self, "z_spin", None)
+        if z_spin is not None:
+            z_spin.blockSignals(True)
+            z_spin.setValue(self.z_idx)
+            z_spin.blockSignals(False)
 
         self.update_view()
         if needs_rebuild:
@@ -3092,19 +3124,45 @@ class ImageWindow(QMainWindow):
         for w in manager.get_all().values():
             w.update_cursor()
 
+    def _compute_canvas_size(self):
+        """Fit the canvas to the image's XY aspect ratio within a
+        screen-relative bounding box, scaling small images up to a minimum
+        visible size. Extreme aspect ratios legitimately end up capped on
+        one axis and small on the other -- that's correct, not a bug.
+        """
+        aspect = self.X / self.Y
+
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            max_w, max_h = int(avail.width() * 0.7), int(avail.height() * 0.7)
+        else:
+            max_w, max_h = 900, 720  # offscreen/headless fallback
+
+        min_long_side = 500  # don't let small images open tiny
+
+        long_side = max(self.X, self.Y, min_long_side)
+        if self.X >= self.Y:
+            canvas_w, canvas_h = long_side, long_side / aspect
+        else:
+            canvas_h, canvas_w = long_side, long_side * aspect
+
+        scale = min(max_w / canvas_w, max_h / canvas_h, 1.0)
+        return int(canvas_w * scale), int(canvas_h * scale)
+
     def _init_control_refs(self):
         """Initialize dynamic control references to safe defaults."""
         self.mode_combo = None
         self.channel_row_widget = None
         self.c_slider = None
-        self.c_label = None
+        self.c_spin = None
         self.t_slider = None
-        self.t_label = None
+        self.t_spin = None
         self.play_button = None
         self.playback_fps_spin = None
         self.playback_realtime_btn = None
         self.z_slider = None
-        self.z_label = None
+        self.z_spin = None
         self.chk_proj = None
         self.z_range_slider = None
         self.z_range_slider_widget = None
@@ -3112,17 +3170,16 @@ class ImageWindow(QMainWindow):
         self.z_range_slider_max_label = None
 
     def _setup_controls(self):
-        # -- Mode Selector (Only if Multi-channel) --
+        # -- Channel Slider + Mode Selector (Only if Multi-channel) --
         if self.C > 1:
             row = QHBoxLayout()
-            row.addWidget(QLabel("Mode:"))
 
+            # -- Mode Selector (always visible when C > 1) --
+            row.addWidget(QLabel("Mode:"))
             self.mode_combo = QComboBox()
             self.mode_combo.addItems(["Composite", "Single Channel"])
             self.mode_combo.currentIndexChanged.connect(self.on_mode_change)
             row.addWidget(self.mode_combo)
-            row.addStretch()
-            self.controls_layout.addLayout(row)
 
             # -- Channel Slider (Initially Hidden) --
             self.channel_row_widget = QWidget()
@@ -3138,16 +3195,26 @@ class ImageWindow(QMainWindow):
             # step its own value instead, silently moving off the shape's
             # t/z plane and making it look like it "disappeared".
             self.c_slider.setFocusPolicy(Qt.NoFocus)
+            self.c_slider.setMaximumWidth(120)
+            self.c_slider.setPageStep(1)
+            self.c_slider.setTickPosition(QSlider.TicksBelow)
+            self.c_slider.setTickInterval(1)
             self.c_slider.valueChanged.connect(self.on_channel_change)
             c_layout.addWidget(self.c_slider)
 
-            self.c_label = QLabel(str(self.c_idx))
-            self.c_label.setFixedWidth(30)
-            self.c_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            c_layout.addWidget(self.c_label)
+            self.c_spin = QSpinBox()
+            self.c_spin.setRange(0, self.C - 1)
+            self.c_spin.setValue(self.c_idx)
+            self.c_spin.setFocusPolicy(Qt.ClickFocus)
+            self.c_spin.setFixedWidth(50)
+            self.c_spin.valueChanged.connect(self.on_channel_change)
+            c_layout.addWidget(self.c_spin)
 
-            self.controls_layout.addWidget(self.channel_row_widget)
+            row.addWidget(self.channel_row_widget)
             self.channel_row_widget.setVisible(False)  # Default is Composite
+            row.addStretch()
+
+            self.controls_layout.addLayout(row)
 
         # -- Time Controls --
         has_multiple_timepoints = self.T > 1
@@ -3159,13 +3226,20 @@ class ImageWindow(QMainWindow):
             self.t_slider.setRange(0, self.T - 1)
             self.t_slider.setValue(self.t_idx)
             self.t_slider.setFocusPolicy(Qt.NoFocus)
+            self.t_slider.setMaximumWidth(150)
+            self.t_slider.setPageStep(1)
+            self.t_slider.setTickPosition(QSlider.TicksBelow)
+            self.t_slider.setTickInterval(max(1, (self.T - 1) // 20))
             self.t_slider.valueChanged.connect(self.on_time_change)
             row.addWidget(self.t_slider)
 
-            self.t_label = QLabel(str(self.t_idx))
-            self.t_label.setFixedWidth(30)
-            self.t_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            row.addWidget(self.t_label)
+            self.t_spin = QSpinBox()
+            self.t_spin.setRange(0, self.T - 1)
+            self.t_spin.setValue(self.t_idx)
+            self.t_spin.setFocusPolicy(Qt.ClickFocus)
+            self.t_spin.setFixedWidth(50)
+            self.t_spin.valueChanged.connect(self.on_time_change)
+            row.addWidget(self.t_spin)
 
             self.play_button = QPushButton("Play")
             self.play_button.setCheckable(True)
@@ -3207,13 +3281,20 @@ class ImageWindow(QMainWindow):
             self.z_slider.setRange(0, self.Z - 1)
             self.z_slider.setValue(self.z_idx)
             self.z_slider.setFocusPolicy(Qt.NoFocus)
+            self.z_slider.setMaximumWidth(150)
+            self.z_slider.setPageStep(1)
+            self.z_slider.setTickPosition(QSlider.TicksBelow)
+            self.z_slider.setTickInterval(max(1, (self.Z - 1) // 20))
             self.z_slider.valueChanged.connect(self.on_z_change)
             row.addWidget(self.z_slider)
 
-            self.z_label = QLabel(str(self.z_idx))
-            self.z_label.setFixedWidth(30)  # Fixed width to prevent jumping
-            self.z_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            row.addWidget(self.z_label)
+            self.z_spin = QSpinBox()
+            self.z_spin.setRange(0, self.Z - 1)
+            self.z_spin.setValue(self.z_idx)
+            self.z_spin.setFocusPolicy(Qt.ClickFocus)
+            self.z_spin.setFixedWidth(50)
+            self.z_spin.valueChanged.connect(self.on_z_change)
+            row.addWidget(self.z_spin)
 
             # Projection Controls
             self.chk_proj = QCheckBox("Max Proj")
@@ -3242,6 +3323,8 @@ class ImageWindow(QMainWindow):
             row.addWidget(self.chk_proj)
             self.controls_layout.addLayout(row)
 
+        self.controls_layout.addStretch(1)
+
     def on_mode_change(self, index):
         mode = "composite" if index == 0 else "single"
 
@@ -3255,8 +3338,14 @@ class ImageWindow(QMainWindow):
 
     def on_channel_change(self, val):
         self.c_idx = val
-        if hasattr(self, "c_label") and self.c_label is not None:
-            self.c_label.setText(str(val))
+        if self.c_slider is not None and self.c_slider.value() != val:
+            self.c_slider.blockSignals(True)
+            self.c_slider.setValue(val)
+            self.c_slider.blockSignals(False)
+        if self.c_spin is not None and self.c_spin.value() != val:
+            self.c_spin.blockSignals(True)
+            self.c_spin.setValue(val)
+            self.c_spin.blockSignals(False)
         self.renderer.set_active_channel(val)
         self.canvas.update()
         self.view_changed.emit(self)

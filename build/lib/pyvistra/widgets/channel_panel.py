@@ -273,7 +273,12 @@ class ChannelPanel(QWidget):
         super().__init__(parent)
         self.viewer = viewer
         self.setWindowTitle("Channels")
-        self.resize(280, min(140 + viewer.C * 85, 560))
+        # A plain resize() only sticks when self is a top-level widget (the
+        # tiled viewer's per-tile panel). Embedded in ChannelPopup's layout
+        # (the common case), the layout re-lays-out from sizeHint() instead,
+        # and QScrollArea's default sizeHint() ignores its scrollable
+        # content -- so use setMinimumSize, which the layout does honor.
+        self.setMinimumSize(280, min(140 + viewer.C * 85, 560))
 
         # Auto-contrast tighten/loosen state.
         self._pct_low = 0.5
@@ -624,4 +629,10 @@ class ChannelPopup(QDialog):
         self._layout.addWidget(self.panel)
         title = getattr(viewer, "window_id", None) or viewer.windowTitle()
         self.setWindowTitle(f"Channels & Contrast — {title}")
-        self.adjustSize()
+        # adjustSize() alone only reliably sizes a widget before its first
+        # show(); rebind_viewer() is also called on an already-visible popup
+        # (retargeting the shared workspace popup across tabs), where it can
+        # use a stale sizeHint and cram the freshly swapped-in panel's rows
+        # into the old geometry. Force the layout to re-measure first.
+        self._layout.activate()
+        self.resize(self._layout.totalSizeHint())

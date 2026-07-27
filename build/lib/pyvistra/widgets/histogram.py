@@ -171,11 +171,20 @@ class BaseHistogramWidget(QWidget):
             self.data_max = 1.0
             self.hist_data = np.zeros(100, dtype=float)
         else:
+            # Compute in float64: at low-precision dtypes (e.g. float32),
+            # a tiny span relative to the values' magnitude (near-constant
+            # data with dtype noise) rounds bin edges to non-increasing
+            # values, and np.histogram raises "Too many bins for data
+            # range." float64 pushes that precision floor down enough
+            # that the clamp below is the only guard actually needed.
+            finite_data = finite_data.astype(np.float64, copy=False)
             self.data_min = float(np.min(finite_data))
             self.data_max = float(np.max(finite_data))
 
-            if self.data_max <= self.data_min:
-                self.data_max = self.data_min + 1e-5
+            span = self.data_max - self.data_min
+            min_span = max(abs(self.data_min), abs(self.data_max), 1.0) * 1e-9
+            if span < min_span:
+                self.data_max = self.data_min + min_span
 
             y, _ = np.histogram(
                 finite_data, bins=100, range=(self.data_min, self.data_max)
