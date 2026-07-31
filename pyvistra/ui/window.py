@@ -2968,42 +2968,47 @@ class ImageWindow(QMainWindow):
 
         _show_channel_panel(self)
 
+    def _show_singleton_dialog(self, attr_name, factory):
+        """Show a dialog cached as ``self.<attr_name>``, building it once
+        via zero-arg *factory* on first use and reusing it afterwards."""
+        dlg = getattr(self, attr_name)
+        if dlg is None:
+            dlg = factory()
+            setattr(self, attr_name, dlg)
+        dlg.show()
+        dlg.raise_()
+        return dlg
+
     def show_transform_dialog(self):
-        if self.transform_dialog is None:
-            self.transform_dialog = TransformDialog(self, parent=self)
-        self.transform_dialog.show()
-        self.transform_dialog.raise_()
-        self.transform_dialog.refresh_ui()
+        dlg = self._show_singleton_dialog(
+            "transform_dialog", lambda: TransformDialog(self, parent=self)
+        )
+        dlg.refresh_ui()
 
     def show_alignment_dialog(self):
-        if self._alignment_dialog is None:
-            self._alignment_dialog = AlignmentDialog(parent=self)
-        self._alignment_dialog.show()
-        self._alignment_dialog.raise_()
+        self._show_singleton_dialog(
+            "_alignment_dialog", lambda: AlignmentDialog(parent=self)
+        )
 
     def show_z_projection_dialog(self):
-        if self.z_projection_dialog is None:
-            self.z_projection_dialog = ZProjectionDialog(self, parent=self)
-        self.z_projection_dialog.show()
-        self.z_projection_dialog.raise_()
+        self._show_singleton_dialog(
+            "z_projection_dialog", lambda: ZProjectionDialog(self, parent=self)
+        )
 
     def show_image_math_dialog(self):
-        if self._image_math_dialog is None:
-            self._image_math_dialog = ImageMathDialog(self, parent=self)
-        self._image_math_dialog.show()
-        self._image_math_dialog.raise_()
+        self._show_singleton_dialog(
+            "_image_math_dialog", lambda: ImageMathDialog(self, parent=self)
+        )
 
     def show_combine_images_dialog(self):
-        if self._combine_images_dialog is None:
-            self._combine_images_dialog = CombineImagesDialog(self, parent=self)
-        self._combine_images_dialog.show()
-        self._combine_images_dialog.raise_()
+        self._show_singleton_dialog(
+            "_combine_images_dialog", lambda: CombineImagesDialog(self, parent=self)
+        )
 
     def show_fft_dialog(self):
-        if self._fft_dialog is None:
-            self._fft_dialog = FFTDialog(self, parent=self)
-        self._fft_dialog.show()
-        self._fft_dialog.raise_()
+        self._show_singleton_dialog(
+            "_fft_dialog", lambda: FFTDialog(self, parent=self)
+        )
 
     def show_line_profile(self):
         """Show the line profile dialog."""
