@@ -258,11 +258,6 @@ class Toolbar(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        analyze_menu = menubar.addMenu("Analyze")
-        gel_action = QAction("Gel Analyzer...", self)
-        gel_action.triggered.connect(self.show_gel_analyzer)
-        analyze_menu.addAction(gel_action)
-
         manager.tool_changed.connect(self._on_tool_changed)
         self._on_tool_changed(manager.active_tool)
 
@@ -304,11 +299,6 @@ class Toolbar(QMainWindow):
         from .layer_manager import show_layer_manager
 
         show_layer_manager()
-
-    def show_gel_analyzer(self):
-        from ..apps.gel_analyzer import show_gel_analyzer
-
-        show_gel_analyzer(manager)
 
     def show_console(self):
         console = get_console()

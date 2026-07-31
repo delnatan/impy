@@ -9,9 +9,9 @@ its own ``pyproject.toml``:
     mypackage = "mypackage._pyvistra_plugin:register"
 
 and ``mypackage/_pyvistra_plugin.py`` exposes a zero-arg ``register()``
-that calls the functions below to add menu items / file formats /
-colormaps. Nothing else is required -- ``pip install mypackage`` is
-enough for pyvistra to pick it up.
+that calls the functions below to add menu items / shape context-menu
+entries / file formats / colormaps. Nothing else is required --
+``pip install mypackage`` is enough for pyvistra to pick it up.
 
 Discovery is triggered lazily, from ``build_menus``/``build_proxy_menus``
 (``ui/window.py``/``ui/workspace.py``) the first time any viewer actually
@@ -34,6 +34,8 @@ __all__ = [
     "register_output_format",
     "register_input_format",
     "register_colormap",
+    "register_shape_context_action",
+    "shape_context_actions_for",
 ]
 
 _discovered = False
@@ -95,3 +97,30 @@ def add_menu_item(target_cls, menu_title, item, submenu=None):
         return
     new_items = [item] if submenu is None else [{"label": submenu, "submenu": [item]}]
     spec.append((menu_title, new_items))
+
+
+_shape_context_actions = []  # (target_cls, shape_types, label, method, tooltip)
+
+
+def register_shape_context_action(target_cls, shape_types, label, method, tooltip=None):
+    """Register a right-click context-menu entry for shapes of the given
+    type(s) on *target_cls* (e.g. ``ImageWindow``).
+
+    *method* is looked up on the target instance and called as
+    ``method(layer, shape_id)`` when triggered -- same dispatch convention
+    as a ``MENU_SPEC`` leaf's ``"method"`` key. *shape_types* is a single
+    shape-type constant or a tuple of them (see ``pyvistra.data.shapes``).
+    """
+    if isinstance(shape_types, str):
+        shape_types = (shape_types,)
+    _shape_context_actions.append((target_cls, tuple(shape_types), label, method, tooltip))
+
+
+def shape_context_actions_for(target_cls, shape_type):
+    """Return ``[(label, method, tooltip), ...]`` registered for
+    *target_cls* matching *shape_type*, in registration order."""
+    return [
+        (label, method, tooltip)
+        for (cls, types, label, method, tooltip) in _shape_context_actions
+        if cls is target_cls and shape_type in types
+    ]

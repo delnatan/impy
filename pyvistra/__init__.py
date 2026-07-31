@@ -69,10 +69,6 @@ _LAZY_IMPORTS = {
     # managers
     "WindowManager": (".ui.manager", "WindowManager"),
     "manager": (".ui.manager", "manager"),
-    # gel analysis
-    "GelAnalyzerWidget": (".apps.gel_analyzer", "GelAnalyzerWidget"),
-    "get_gel_analyzer": (".apps.gel_analyzer", "get_gel_analyzer"),
-    "show_gel_analyzer": (".apps.gel_analyzer", "show_gel_analyzer"),
     # viewers
     "OrthoViewer": (".viewers", "OrthoViewer"),
     "VolumeViewer": (".viewers", "VolumeViewer"),

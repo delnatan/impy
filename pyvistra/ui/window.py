@@ -2100,7 +2100,6 @@ class ImageWindow(QMainWindow):
 
         act_crop = None
         act_stats = None
-        act_gel = None
         act_kymo = None
         act_close = None
         smooth_actions: dict = {}
@@ -2108,7 +2107,6 @@ class ImageWindow(QMainWindow):
             menu.addSeparator()
             if rec.shape_type == RECTANGLE:
                 act_crop = menu.addAction("Crop…")
-                act_gel = menu.addAction("Gel Analyzer…")
             act_stats = menu.addAction("Region Statistics…")
         act_profile = None
         if rec.shape_type in (LINE, POLYLINE):
@@ -2139,6 +2137,19 @@ class ImageWindow(QMainWindow):
                 action.setCheckable(True)
                 action.setChecked(abs(current_s - value) < 1e-6)
                 smooth_actions[action] = value
+
+        # Plugin-contributed entries (see pyvistra.plugins.register_shape_context_action).
+        from ..plugins import shape_context_actions_for
+        plugin_entries = shape_context_actions_for(ImageWindow, rec.shape_type)
+        plugin_actions: dict = {}
+        if plugin_entries:
+            menu.addSeparator()
+            for label, method, tooltip in plugin_entries:
+                action = menu.addAction(label)
+                if tooltip:
+                    action.setToolTip(tooltip)
+                plugin_actions[action] = method
+
         chosen = menu.exec_(global_pos)
         if chosen is act_props:
             # Make sure the right shape is the single selection.
@@ -2152,11 +2163,9 @@ class ImageWindow(QMainWindow):
             self.delete_selected_shape()
         elif act_crop is not None and chosen is act_crop:
             self._crop_with_rect(layer, shape_id)
-        elif act_gel is not None and chosen is act_gel:
-            from ..apps.gel_analyzer import show_gel_analyzer
-            manager.set_active_window(self)
-            show_gel_analyzer(manager)
+        elif chosen in plugin_actions:
             self._select_shape(layer, shape_id)
+            getattr(self, plugin_actions[chosen])(layer, shape_id)
         elif act_stats is not None and chosen is act_stats:
             from ..widgets.region_statistics_dialog import RegionStatisticsDialog
             dlg = RegionStatisticsDialog(self, layer, shape_id, parent=self)
