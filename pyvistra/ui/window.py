@@ -1349,6 +1349,82 @@ class ImageWindow(QMainWindow):
                 if entry["labels"].ndim == 3:
                     entry["visual"].update_slice(self.z_idx)
 
+    # ---- Shared named-layer-registry bookkeeping ----
+    #
+    # _mask_layers/_track_layers/_point_layers are parallel OrderedDicts
+    # (name -> entry dict) with an identical add/remove/visible/active
+    # skeleton around type-specific entry construction. These three
+    # helpers hold that skeleton once; per-type add_*_layer/remove_*_layer
+    # build the type-specific entry/visual/unified-Layer data and delegate
+    # the rest here. Data-replacement (set_*_layer_tracks/points), style,
+    # selection, and focus-point methods stay separate per type -- point
+    # layers in particular reach into the mouse-drag handlers elsewhere in
+    # this file, so that logic is deliberately left alone.
+
+    def _register_layer_entry(
+        self, registry, active_attr, name, entry, *, added_signal, layer_type,
+        layer_data, visual, style=None,
+    ):
+        """Store *entry* in *registry*, promote it to active if none is
+        active yet, emit *added_signal*, and mirror it into the unified
+        ``self.layers`` LayerList. Caller must already have guarded against
+        a duplicate *name* and built *entry*/*visual*/*layer_data*."""
+        registry[name] = entry
+        if getattr(self, active_attr) is None:
+            setattr(self, active_attr, name)
+        added_signal.emit(name)
+        if name not in self.layers:
+            kwargs = {} if style is None else {"style": style}
+            layer = Layer(
+                name=name, layer_type=layer_type, data=layer_data, visual=visual,
+                **kwargs,
+            )
+            self.layers.add(layer)
+            self.layer_added.emit(layer)
+
+    def _unregister_layer_entry(
+        self, registry, active_attr, name, *, removed_signal, after_pop=None
+    ):
+        """Pop *name* from *registry*, tear down its visual, reassign the
+        active layer if needed, emit *removed_signal*, and remove the
+        mirrored entry from ``self.layers``. *after_pop* (if given) runs
+        immediately after the pop, before the visual is torn down -- for
+        type-specific cleanup that must happen first (e.g. unsubscribing).
+        Returns the popped entry."""
+        entry = registry.pop(name)
+        if after_pop is not None:
+            after_pop(entry)
+        visual = entry.get("visual")
+        if visual is not None:
+            visual.remove()
+        if getattr(self, active_attr) == name:
+            setattr(self, active_attr, next(iter(registry), None))
+        removed_signal.emit(name)
+        if name in self.layers:
+            removed = self.layers.remove(name)
+            self.layer_removed.emit(removed)
+        self.canvas.update()
+        return entry
+
+    def _set_layer_visible(self, registry, name, visible):
+        """Toggle visibility for a named layer entry in *registry*."""
+        if name not in registry:
+            return
+        visible = bool(visible)
+        registry[name]["visible"] = visible
+        visual = registry[name]["visual"]
+        if visual is not None:
+            visual.visible = visible
+        self.canvas.update()
+
+    def _set_active_layer(self, registry, active_attr, name):
+        """Switch the active layer name for *registry*. Returns whether
+        *name* was found (and thus actually switched)."""
+        if name not in registry:
+            return False
+        setattr(self, active_attr, name)
+        return True
+
     # ---- Multiple Mask Layers API ----
 
     def add_mask_layer(self, name, labels=None):
@@ -1369,50 +1445,29 @@ class ImageWindow(QMainWindow):
         visual.set_labels(labels)
         if labels.ndim == 3:
             visual.update_slice(self.z_idx)
-        self._mask_layers[name] = {
-            "labels": labels,
-            "visual": visual,
-            "visible": True,
-        }
-        if self._active_mask_layer is None:
-            self._active_mask_layer = name
-        self.mask_layer_added.emit(name)
-        # Register in unified LayerList
-        if name not in self.layers:
-            layer = Layer(name=name, layer_type="labels", data=labels, visual=visual)
-            self.layers.add(layer)
-            self.layer_added.emit(layer)
+        self._register_layer_entry(
+            self._mask_layers, "_active_mask_layer", name,
+            {"labels": labels, "visual": visual, "visible": True},
+            added_signal=self.mask_layer_added,
+            layer_type="labels", layer_data=labels, visual=visual,
+        )
 
     def remove_mask_layer(self, name):
         """Remove a named mask layer and clean up its visual."""
         if name not in self._mask_layers:
             return
-        entry = self._mask_layers.pop(name)
-        if entry["visual"] is not None:
-            entry["visual"].remove()
-        if self._active_mask_layer == name:
-            self._active_mask_layer = next(iter(self._mask_layers), None)
-        self.mask_layer_removed.emit(name)
-        # Remove from unified LayerList
-        if name in self.layers:
-            removed = self.layers.remove(name)
-            self.layer_removed.emit(removed)
-        self.canvas.update()
+        self._unregister_layer_entry(
+            self._mask_layers, "_active_mask_layer", name,
+            removed_signal=self.mask_layer_removed,
+        )
 
     def set_mask_layer_visible(self, name, visible):
         """Toggle visibility of a specific mask layer."""
-        if name not in self._mask_layers:
-            return
-        self._mask_layers[name]["visible"] = visible
-        visual = self._mask_layers[name]["visual"]
-        if visual is not None:
-            visual.visible = visible
-        self.canvas.update()
+        self._set_layer_visible(self._mask_layers, name, visible)
 
     def set_active_mask_layer(self, name):
         """Switch which mask layer receives painting."""
-        if name in self._mask_layers:
-            self._active_mask_layer = name
+        self._set_active_layer(self._mask_layers, "_active_mask_layer", name)
 
     # ---- Multiple Track Layers API ----
 
@@ -1432,19 +1487,12 @@ class ImageWindow(QMainWindow):
         )
         visual.set_tracks(tracks)
         visual.set_time_z(self.t_idx, self.z_idx)
-        self._track_layers[name] = {
-            "tracks": tracks,
-            "visual": visual,
-            "visible": True,
-        }
-        if self._active_track_layer is None:
-            self._active_track_layer = name
-        self.track_layer_added.emit(name)
-        # Register in unified LayerList
-        if name not in self.layers:
-            layer = Layer(name=name, layer_type="tracks", data=tracks, visual=visual)
-            self.layers.add(layer)
-            self.layer_added.emit(layer)
+        self._register_layer_entry(
+            self._track_layers, "_active_track_layer", name,
+            {"tracks": tracks, "visual": visual, "visible": True},
+            added_signal=self.track_layer_added,
+            layer_type="tracks", layer_data=tracks, visual=visual,
+        )
         self.canvas.update()
 
     def set_track_layer_tracks(self, name, tracks):
@@ -1465,32 +1513,18 @@ class ImageWindow(QMainWindow):
         """Remove a named track layer and clean up its visual."""
         if name not in self._track_layers:
             return
-        entry = self._track_layers.pop(name)
-        if entry["visual"] is not None:
-            entry["visual"].remove()
-        if self._active_track_layer == name:
-            self._active_track_layer = next(iter(self._track_layers), None)
-        self.track_layer_removed.emit(name)
-        # Remove from unified LayerList
-        if name in self.layers:
-            removed = self.layers.remove(name)
-            self.layer_removed.emit(removed)
-        self.canvas.update()
+        self._unregister_layer_entry(
+            self._track_layers, "_active_track_layer", name,
+            removed_signal=self.track_layer_removed,
+        )
 
     def set_track_layer_visible(self, name, visible):
         """Toggle visibility of a specific track layer."""
-        if name not in self._track_layers:
-            return
-        self._track_layers[name]["visible"] = bool(visible)
-        visual = self._track_layers[name]["visual"]
-        if visual is not None:
-            visual.visible = bool(visible)
-        self.canvas.update()
+        self._set_layer_visible(self._track_layers, name, visible)
 
     def set_active_track_layer(self, name):
         """Switch which track layer is active."""
-        if name in self._track_layers:
-            self._active_track_layer = name
+        self._set_active_layer(self._track_layers, "_active_track_layer", name)
 
     def remove_track_from_layer(self, layer_name, track_id):
         """Remove a single trajectory from a track layer by track ID."""
@@ -1527,25 +1561,22 @@ class ImageWindow(QMainWindow):
         visual = PointLayerVisual(self.view, **style)
         visual.set_points(holder.table)
         visual.set_time_z(self.t_idx, self.z_idx)
-        self._point_layers[name] = {
-            "points": holder.table,
-            "holder": holder,
-            "visual": visual,
-            "visible": True,
-            "selected_ids": set(),
-            "style": style,
-        }
-        if self._active_point_layer is None:
-            self._active_point_layer = name
-        self.point_layer_added.emit(name)
-        # Register in unified LayerList with the holder as data so the
-        # standard AddPoint/RemovePoint/MovePoint commands operate on it.
-        layer = None
-        if name not in self.layers:
-            layer = Layer(name=name, layer_type="points", data=holder, visual=visual,
-                          style=style)
-            self.layers.add(layer)
-            self.layer_added.emit(layer)
+        # Registered with the holder as the unified-LayerList data (not the
+        # table) so the standard AddPoint/RemovePoint/MovePoint commands
+        # operate on the same in-place object.
+        self._register_layer_entry(
+            self._point_layers, "_active_point_layer", name,
+            {
+                "points": holder.table,
+                "holder": holder,
+                "visual": visual,
+                "visible": True,
+                "selected_ids": set(),
+                "style": style,
+            },
+            added_signal=self.point_layer_added,
+            layer_type="points", layer_data=holder, visual=visual, style=style,
+        )
 
         def _on_point_event(_kind, _pid, _name=name):
             entry = self._point_layers.get(_name)
@@ -1582,40 +1613,29 @@ class ImageWindow(QMainWindow):
         """Remove a named point layer and clean up its visual."""
         if name not in self._point_layers:
             return
-        entry = self._point_layers.pop(name)
-        unsub = entry.get("_unsubscribe")
-        if unsub is not None:
-            try:
-                unsub()
-            except Exception:
-                pass
-        if entry["visual"] is not None:
-            entry["visual"].remove()
-        if self._active_point_layer == name:
-            self._active_point_layer = next(iter(self._point_layers), None)
+
+        def _unsubscribe(entry):
+            unsub = entry.get("_unsubscribe")
+            if unsub is not None:
+                try:
+                    unsub()
+                except Exception:
+                    pass
+
+        self._unregister_layer_entry(
+            self._point_layers, "_active_point_layer", name,
+            removed_signal=self.point_layer_removed, after_pop=_unsubscribe,
+        )
         if self._focused_point_layer == name:
             self.clear_focused_point()
-        self.point_layer_removed.emit(name)
-        # Remove from unified LayerList
-        if name in self.layers:
-            removed = self.layers.remove(name)
-            self.layer_removed.emit(removed)
-        self.canvas.update()
 
     def set_point_layer_visible(self, name, visible):
         """Toggle visibility of a specific point layer."""
-        if name not in self._point_layers:
-            return
-        self._point_layers[name]["visible"] = bool(visible)
-        visual = self._point_layers[name]["visual"]
-        if visual is not None:
-            visual.visible = bool(visible)
-        self.canvas.update()
+        self._set_layer_visible(self._point_layers, name, visible)
 
     def set_active_point_layer(self, name):
         """Switch which point layer is active."""
-        if name in self._point_layers:
-            self._active_point_layer = name
+        if self._set_active_layer(self._point_layers, "_active_point_layer", name):
             self.canvas.update()
 
     def remove_point_from_layer(self, layer_name, point_id):
