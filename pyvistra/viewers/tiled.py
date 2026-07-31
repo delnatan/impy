@@ -2207,6 +2207,15 @@ class TiledViewer(QMainWindow):
         self.current_page = 0
         self._load_current_page()
 
+    def _for_each_tile(self, fn):
+        """Call fn(tile) for every currently-loaded normal-mode TileWidget.
+        No-op in fast mode, which has no per-tile TileWidget objects to
+        iterate (the thumbnail grid handles its tiles as one widget)."""
+        if self._fast_mode:
+            return
+        for tile in self.tile_widgets:
+            fn(tile)
+
     def _on_tile_size_changed(self, value):
         """Handle tile size slider change."""
         self.tile_size = value
@@ -2216,8 +2225,7 @@ class TiledViewer(QMainWindow):
             self.thumbnail_grid.set_tile_size(value)
             return
 
-        for tile in self.tile_widgets:
-            tile.set_tile_size(value)
+        self._for_each_tile(lambda tile: tile.set_tile_size(value))
 
         # Trigger reflow
         self.flow_container.adjustSize()
@@ -2281,15 +2289,12 @@ class TiledViewer(QMainWindow):
             if self.colors_panel is not None and self._colors_dock.isVisible():
                 self.colors_panel.refresh_ui()
             return
-        for tile in self.tile_widgets:
-            tile._auto_contrast()
+        self._for_each_tile(lambda tile: tile._auto_contrast())
 
     def _reset_all_views(self):
-        """Reset view (fit image) for all tiles."""
-        if self._fast_mode:
-            return  # no per-tile camera in the fast grid
-        for tile in self.tile_widgets:
-            tile._fit_view()
+        """Reset view (fit image) for all tiles. No-op in fast mode (no
+        per-tile camera in the fast grid)."""
+        self._for_each_tile(lambda tile: tile._fit_view())
 
     def _on_show_info_toggled(self, checked):
         """Handle show info checkbox toggle."""
@@ -2297,8 +2302,7 @@ class TiledViewer(QMainWindow):
         if self._fast_mode:
             self.thumbnail_grid.set_show_info(checked)
             return
-        for tile in self.tile_widgets:
-            tile.set_show_info(checked)
+        self._for_each_tile(lambda tile: tile.set_show_info(checked))
         # Trigger reflow
         self.flow_container.adjustSize()
 
