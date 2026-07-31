@@ -265,6 +265,12 @@ class ImageWindow(QMainWindow):
             # Accept any 5D proxy-like object (Imaris5DProxy, Numpy5DProxy, etc.)
             if isinstance(data_or_path, (Imaris5DProxy, Numpy5DProxy)):
                 self.img_data = data_or_path
+            elif isinstance(data_or_path, np.ndarray):
+                # Plain ndarray, even if already 5D -- always wrap it so
+                # img_data is refcounted (.acquire()/.release()) like every
+                # other proxy, instead of falling through to the generic
+                # duck-typed branch below (which a bare ndarray also matches).
+                self.img_data = normalize_to_5d(data_or_path)
             elif (
                 hasattr(data_or_path, "shape")
                 and hasattr(data_or_path, "ndim")
@@ -272,8 +278,6 @@ class ImageWindow(QMainWindow):
             ):
                 # Generic 5D proxy-like object
                 self.img_data = data_or_path
-            elif isinstance(data_or_path, np.ndarray):
-                self.img_data = normalize_to_5d(data_or_path)
             else:
                 raise ValueError(
                     "data must be a 5D proxy, numpy array, or filepath string"
