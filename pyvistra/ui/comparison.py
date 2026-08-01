@@ -210,6 +210,18 @@ class ComparisonView(QWidget):
         self._splitter.addWidget(pair.window_b)
         layout.addWidget(self._splitter)
 
+        # Both windows come from a _TabGroup (QTabWidget), which explicitly
+        # hides every tab page that isn't the current one -- and leaves the
+        # *outgoing* current page hidden too once its tab is removed. That
+        # explicit hidden state isn't cleared just by reparenting into a new,
+        # visible parent; QSplitter then allocates a hidden child exactly
+        # zero space; both children stayed hidden here, so the pane you and
+        # the user actually see was really a splitter with two 0-width
+        # children -- the symptom was a blank comparison tab with no visible
+        # canvas at all. Explicitly (re)show them once they're in place.
+        pair.window_a.show()
+        pair.window_b.show()
+
     def members(self):
         return (self.pair.window_a, self.pair.window_b)
 

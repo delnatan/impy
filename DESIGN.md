@@ -202,6 +202,16 @@ extraction backlog above):
    treatment. `Workspace._splitter`/`split_right`/`_collapse_empty_groups`
    needed no changes — a `ComparisonView` docks as one ordinary tab, same
    as `OrthoViewer`/`VolumeViewer`.
+   - Bug fixed after initial landing: a pair's two members come from a
+     `_TabGroup` (`QTabWidget`), which explicitly hides every tab page
+     that isn't current — and leaves the *outgoing* current page hidden
+     too once its tab is removed. That explicit hidden state doesn't
+     clear on reparenting into a new, visible parent; `QSplitter` then
+     allocates a hidden child exactly zero space. Both members stayed
+     hidden this way, so a freshly created comparison showed as a blank
+     tab with no visible canvas at all. Fixed by explicitly `show()`-ing
+     both members in `ComparisonView.__init__` right after they're added
+     to the splitter.
 2. ✅ Auto-wire `LineProfileDialog`/`RadialProfileDialog` to a pair's other
    member: new `ui/comparison.py:paired_window(window)` helper (shared
    lookup for "the other side of the comparison," reusable by a future
