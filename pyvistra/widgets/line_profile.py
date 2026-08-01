@@ -26,6 +26,7 @@ from qtpy.QtWidgets import (
 )
 
 from .histogram import WIDGET_BG, TEXT_COLOR
+from ..ui.comparison import paired_window
 from ..ui.manager import manager
 
 # Singleton instance
@@ -459,6 +460,18 @@ class LineProfileDialog(QDialog):
         self.series_channel_spin.setEnabled(False)
         self.series_channel_spin.valueChanged.connect(self._on_selected_channel_changed)
         channel_row.addWidget(self.series_channel_spin)
+
+        self.normalize_cb = QCheckBox("Normalize (per series)")
+        self.normalize_cb.setChecked(False)
+        self.normalize_cb.setToolTip(
+            "Rescale each plotted profile to its own [min, max] -- compares "
+            "shape across series with very different absolute intensity "
+            "scales (e.g. different exposure/gain), independent of the "
+            "actual values. Export always uses absolute values."
+        )
+        self.normalize_cb.toggled.connect(self._on_normalize_toggled)
+        channel_row.addWidget(self.normalize_cb)
+
         channel_row.addStretch()
         layout.addLayout(channel_row)
 
@@ -550,6 +563,13 @@ class LineProfileDialog(QDialog):
 
         self._subscribe_to_shape_source(layer, shape_id)
         self._ensure_source_series()
+        # If the source window is one half of an explicit comparison pair
+        # (see ui/comparison.py), the whole point of the pairing is to
+        # compare this shape against the other side too -- add it instead
+        # of making the user click "Add Window..." for it every time.
+        partner = paired_window(window)
+        if partner is not None:
+            self._add_series_for_window(partner)
         self._refresh_profiles()
 
     def _extract_shape_line_data(self, layer, shape_id):
@@ -791,6 +811,9 @@ class LineProfileDialog(QDialog):
         self._refresh_series_list()
         self._refresh_profiles()
 
+    def _on_normalize_toggled(self, checked):
+        self._refresh_profiles()
+
     def _on_selected_channel_changed(self, value):
         item = self.series_list.currentItem()
         if item is None:
@@ -883,6 +906,7 @@ class LineProfileDialog(QDialog):
         distances_um = distances_plot if has_phys else None
 
         all_channels = self.all_channels_cb.isChecked()
+        normalize = self.normalize_cb.isChecked()
         plot_series = []
         computed_series = []
         stale_wids = []
@@ -942,12 +966,16 @@ class LineProfileDialog(QDialog):
                 color_idx += 1
                 ch_label = f"{label} Ch{ch_used + 1}"
 
+                plot_values = profile
+                if normalize:
+                    plot_values = self._normalize_profile(profile)
+
                 plot_series.append(
                     {
                         "label": ch_label,
                         "color": color,
                         "distances": distances_plot,
-                        "values": profile,
+                        "values": plot_values,
                         "visible": visible,
                     }
                 )
@@ -1003,6 +1031,8 @@ class LineProfileDialog(QDialog):
             )
         if skipped_labels:
             status += f" | {len(skipped_labels)} skipped (mismatched pixel space)"
+        if normalize:
+            status += " | normalized (per series)"
         self.status_label.setText(status)
 
     def _sample_profile(self, window, path_px, channel_idx):
@@ -1032,6 +1062,23 @@ class LineProfileDialog(QDialog):
             mode="nearest",
         )
         return profile, channel_used
+
+    @staticmethod
+    def _normalize_profile(values):
+        """Min-max rescale *values* to its own [0, 1] -- compares profile
+        *shape* across series with very different absolute intensity
+        scales, independent of the actual values. A flat (zero-range)
+        profile has no shape to normalize and is returned as all-zero
+        rather than dividing by zero."""
+        values = np.asarray(values, dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size == 0:
+            return values
+        vmin, vmax = float(np.min(finite)), float(np.max(finite))
+        rng = vmax - vmin
+        if rng <= 0:
+            return np.where(np.isfinite(values), 0.0, values)
+        return (values - vmin) / rng
 
     @staticmethod
     def _num_channels(window):

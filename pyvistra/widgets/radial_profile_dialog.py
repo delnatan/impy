@@ -39,6 +39,7 @@ from .line_profile import (
     _to_qcolor,
     window_is_frequency_space,
 )
+from ..ui.comparison import paired_window
 from ..ui.manager import manager
 from ..data.shapes import CIRCLE, EVT_EDITED, EVT_REMOVED, EVT_BULK
 
@@ -269,6 +270,12 @@ class RadialProfileDialog(QDialog):
         self.active_window = window
         self._subscribe_to_shape_source(layer, shape_id)
         self._add_series_for_window(window)
+        # If the source window is one half of an explicit comparison pair
+        # (see ui/comparison.py), add the paired window as a series too
+        # instead of making the user click "Add Window..." for it.
+        partner = paired_window(window)
+        if partner is not None:
+            self._add_series_for_window(partner)
         self._refresh_profiles()
 
     def _extract_shape_circle_data(self, layer, shape_id):
