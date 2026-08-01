@@ -3523,12 +3523,14 @@ class ImageWindow(QMainWindow):
         if self._slice_loader is None:
             # In-memory source: slice synchronously.
             self.renderer.update_slice(vs.t, z_key)
+            pixels_ready = True
         else:
             plane = self._slice_loader.request(vs.t, z_key)
             if plane is not None:
                 self.renderer.set_slice(plane)
             # else: keep showing the current frame; _on_slice_ready
             # displays the new one as soon as the worker has it.
+            pixels_ready = plane is not None
 
         # Update all mask layers for 3D data
         for entry in self._mask_layers.values():
@@ -3548,8 +3550,16 @@ class ImageWindow(QMainWindow):
         if self.overlay is not None:
             self.overlay.update()
         self.canvas.update()
-        # Channel panel auto-refreshes via view_changed + display subscription.
-        self.view_changed.emit(self)
+        if pixels_ready:
+            # Channel panel auto-refreshes via view_changed + display
+            # subscription. On a lazy-source cache miss the pixel data
+            # hasn't actually arrived yet (current_slice_cache still holds
+            # the previous frame) -- emitting here would have every
+            # view_changed consumer that samples pixel data (line/radial
+            # profile, region stats, point intensity, channel histograms)
+            # transiently read the wrong frame. _on_slice_ready emits this
+            # same signal once the real plane lands instead.
+            self.view_changed.emit(self)
 
     def _sync_focused_point_visibility(self):
         if self._focused_point_roi is None:
