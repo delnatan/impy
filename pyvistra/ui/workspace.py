@@ -33,19 +33,31 @@ their visibility) matters for the same reason: on macOS, ``setVisible``
 on an action already rendered into the native menu bar does not
 reliably re-sync the underlying NSMenu, so a "hidden" menu can keep
 showing — and stay clickable — after the active tab changes.
+
+Split/float are generic layout with no notion of *why* two panes are
+side by side. ``compare_with_dialog``/``compare_windows`` are the
+special-purpose alternative for the one thing splits are actually used
+for: relating exactly two windows. A ``ComparisonPair`` (see
+``ui/comparison.py``) docks as a single ordinary tab (a ``ComparisonView``
+holding both windows in its own splitter) rather than as two tab groups,
+so it needs none of the tab-group bookkeeping above — its lifecycle is
+explicit (``compare_with_dialog`` creates it, ``_end_comparison`` or a
+member closing ends it) instead of inferred from group emptiness.
 """
 
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtGui import QKeySequence
 from qtpy.QtWidgets import (
     QAction,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QSplitter,
     QTabWidget,
 )
 
-from .manager import manager
+from .comparison import ComparisonPair, ComparisonView
+from .manager import compatible_windows, manager
 
 _workspace = None
 
@@ -143,6 +155,16 @@ class _TabGroup(QTabWidget):
         if widget is None:
             return
         self._workspace._release_channel_popup(widget)
+        if isinstance(widget, ComparisonView):
+            # Closing a comparison tab closes both compared windows, same
+            # as closing an ordinary tab closes its one window. Each
+            # window's own closeEvent (window_closing -> ComparisonPair.end
+            # -> Workspace._end_comparison) removes this tab and re-docks
+            # the other member (or, as here, lets it be closed right after)
+            # -- don't also close() the container itself.
+            widget.pair.window_a.close()
+            widget.pair.window_b.close()
+            return
         if widget.close():
             # ImageWindows drop their tab via window_unregistered (and
             # WA_DeleteOnClose); other viewers need an explicit removal.
@@ -153,6 +175,12 @@ class _TabGroup(QTabWidget):
 
     def _activate_current(self, idx):
         widget = self.widget(idx)
+        # A ComparisonView isn't itself a viewer (no MENU_SPEC) -- dispatch
+        # to whichever member last had focus instead, so the mirrored menu
+        # bar reflects a real window immediately on switching to this tab
+        # rather than going blank until the user clicks inside it.
+        if isinstance(widget, ComparisonView):
+            widget = widget.pair.active_member
         # Only ImageWindow instances register with `manager` — Ortho/
         # Volume/ZMontage/Tiled viewer tabs never do — so track the
         # workspace's own notion of "active tab" independently rather
@@ -167,19 +195,38 @@ class _TabGroup(QTabWidget):
         idx = self.tabBar().tabAt(pos)
         if idx < 0:
             return
+        widget = self.widget(idx)
+        is_comparison = isinstance(widget, ComparisonView)
         menu = QMenu(self)
-        split_action = QAction("Split Right", menu)
-        float_action = QAction("Float Window", menu)
+        # Splitting/floating a live comparison pair is out of scope --
+        # "Stop Comparing" returns both windows to ordinary tabs first,
+        # where the usual split/float actions apply to each individually.
+        split_action = None
+        float_action = None
+        compare_action = None
+        stop_compare_action = None
+        if not is_comparison:
+            split_action = QAction("Split Right", menu)
+            float_action = QAction("Float Window", menu)
+            compare_action = QAction("Compare With...", menu)
+            menu.addAction(split_action)
+            menu.addAction(float_action)
+            menu.addAction(compare_action)
+        else:
+            stop_compare_action = QAction("Stop Comparing", menu)
+            menu.addAction(stop_compare_action)
         close_action = QAction("Close", menu)
-        menu.addAction(split_action)
-        menu.addAction(float_action)
         menu.addSeparator()
         menu.addAction(close_action)
         chosen = menu.exec_(self.tabBar().mapToGlobal(pos))
-        if chosen is split_action:
-            self._workspace.split_right(self.widget(idx))
-        elif chosen is float_action:
-            self._workspace.float_window(self.widget(idx))
+        if split_action is not None and chosen is split_action:
+            self._workspace.split_right(widget)
+        elif float_action is not None and chosen is float_action:
+            self._workspace.float_window(widget)
+        elif compare_action is not None and chosen is compare_action:
+            self._workspace.compare_with_dialog(widget)
+        elif stop_compare_action is not None and chosen is stop_compare_action:
+            widget.pair.end()
         elif chosen is close_action:
             self._close_tab(idx)
 
@@ -288,27 +335,12 @@ class Workspace(QMainWindow):
     # Public API
     # ------------------------------------------------------------------
 
-    def add_window(self, window, title=None):
-        """Adopt *window* (any QWidget viewer) as a tab."""
-        if self._group_of(window) is not None:
-            group = self._group_of(window)
-            group.setCurrentWidget(window)
-            return
-        should_fit = not self._sized_to_first_window and all(
-            g.count() == 0 for g in self._groups()
-        )
-        # Capture before reparenting into a tab, which relayouts the
-        # widget to fill the tab page and discards this preferred size.
-        fit_size = window.size() if should_fit else None
-        # A previously-floated window (re-adopted via present_window, per
-        # the module docstring) is a live top-level QMainWindow; addTab()
-        # below reparents it under the workspace, which is the same
-        # cross-top-level reparent that corrupts a vispy QOpenGLWidget's
-        # GL context in float_window() -- see _rebuild_canvas_for_float.
-        # A window that has never been shown (the common case, fresh from
-        # ImageWindow()) is not yet a live top-level window, so no rebuild
-        # is needed for it.
-        was_shown = window.isVisible()
+    def _dock_menu_bar(self, window):
+        """Give *window* the treatment every docked viewer needs, whether
+        it's becoming a tab itself or one member of a ``ComparisonView``:
+        focus-scope its shortcuts, mirror its ``MENU_SPEC``, disarm its own
+        copies of those shortcuts, and hide its embedded menu bar.
+        """
         # Embedded viewers share one top-level window, so their QAction
         # shortcuts must be focus-scoped or every second tab makes
         # Ctrl+S & co. ambiguous. WidgetWithChildrenShortcut context
@@ -336,13 +368,12 @@ class Workspace(QMainWindow):
         # mirrored, _mirror_spec's own _refresh_mirrored_menus() call (see
         # below) needs this window's spec to already read as active, or it
         # adds the just-built top-level actions and immediately removes
-        # them again (stale active tab), relying on the second
-        # _refresh_mirrored_menus() call at the end of this method to
-        # re-add them. Harmless in practice since both calls converge to
-        # the same end state, but pointlessly churns the native menu bar
-        # on the exact "first viewer of this class, single tab, right as
-        # it opens" path -- avoid the churn instead of relying on it
-        # resolving itself.
+        # them again (stale active tab), relying on the caller's own
+        # _refresh_mirrored_menus() call to re-add them. Harmless in
+        # practice since both calls converge to the same end state, but
+        # pointlessly churns the native menu bar on the exact "first
+        # viewer of this class, single tab, right as it opens" path --
+        # avoid the churn instead of relying on it resolving itself.
         self._active_tab_widget = window
 
         spec = getattr(type(window), "MENU_SPEC", None)
@@ -361,19 +392,61 @@ class Workspace(QMainWindow):
             # QMenuBar's visibility toggling doesn't reliably resync the
             # underlying NSMenu on macOS -- the same class of bug the
             # class docstring documents for the mirrored workspace bar --
-            # so re-showing it later in float_window() can leave the
-            # floated window with no visible menu at all. Once non-native
-            # it renders as a plain in-window widget, whose visibility
-            # toggles exactly as reliably as any other widget.
+            # so re-showing it later (float_window, _undock_menu_bar) can
+            # leave the window with no visible menu at all. Once
+            # non-native it renders as a plain in-window widget, whose
+            # visibility toggles exactly as reliably as any other widget.
             window.menuBar().setNativeMenuBar(False)
             window.menuBar().setVisible(False)
+
+    def _undock_menu_bar(self, window):
+        """Reverse of ``_dock_menu_bar``: restore *window*'s own menu bar
+        and shortcuts once it's no longer sharing the workspace's bar."""
+        for action, shortcut in getattr(
+            window, "_docked_menu_shortcuts", {}
+        ).items():
+            action.setShortcut(shortcut)
+        window._docked_menu_shortcuts = {}
+        menu_bar = window.menuBar() if hasattr(window, "menuBar") else None
+        if menu_bar is not None:
+            menu_bar.setVisible(True)
+
+    def add_window(self, window, title=None):
+        """Adopt *window* (any QWidget viewer) as a tab."""
+        if self._group_of(window) is not None:
+            group = self._group_of(window)
+            group.setCurrentWidget(window)
+            return
+        should_fit = not self._sized_to_first_window and all(
+            g.count() == 0 for g in self._groups()
+        )
+        # Capture before reparenting into a tab, which relayouts the
+        # widget to fill the tab page and discards this preferred size.
+        fit_size = window.size() if should_fit else None
+        # A previously-floated window (re-adopted via present_window, per
+        # the module docstring) is a live, shown, top-level QMainWindow;
+        # addTab() below reparents it under the workspace, which is the
+        # same cross-top-level reparent that corrupts a vispy
+        # QOpenGLWidget's GL context in float_window() -- see
+        # _rebuild_canvas_for_float. Neither half of that check is
+        # sufficient alone: a window that has never been shown (the
+        # common case, fresh from ImageWindow()) is still isWindow()
+        # (parentless) but not isVisible(); a ComparisonView member
+        # returning to an ordinary tab via Workspace._end_comparison is
+        # isVisible() (still shown while its tab is being swapped) but
+        # already parented as a plain child widget, not isWindow(). Only
+        # the case that's actually both -- shown *and* currently
+        # top-level -- is the cross-boundary reparent this rebuild
+        # exists for.
+        was_toplevel = window.isVisible() and window.isWindow()
+        self._dock_menu_bar(window)
         group = self._active_group()
         group.addTab(window, title or window.windowTitle() or "Image")
         group.setCurrentWidget(window)
         if should_fit:
             self._fit_to_first_window(group, fit_size)
             self._sized_to_first_window = True
-        if was_shown and hasattr(window, "_rebuild_canvas_for_float"):
+        if was_toplevel and hasattr(window, "_rebuild_canvas_for_float"):
             window._rebuild_canvas_for_float()
         manager.set_active_window(window)
         self._refresh_mirrored_menus()
@@ -410,15 +483,8 @@ class Workspace(QMainWindow):
             return
         group.removeTab(group.indexOf(window))
         # Restore this window's own menu bar and the shortcuts disarmed
-        # in add_window, since it no longer shares the workspace's bar.
-        for action, shortcut in getattr(
-            window, "_docked_menu_shortcuts", {}
-        ).items():
-            action.setShortcut(shortcut)
-        window._docked_menu_shortcuts = {}
-        menu_bar = window.menuBar() if hasattr(window, "menuBar") else None
-        if menu_bar is not None:
-            menu_bar.setVisible(True)
+        # in _dock_menu_bar, since it no longer shares the workspace's bar.
+        self._undock_menu_bar(window)
         window.setParent(None)
         # ImageWindow owns a live vispy QOpenGLWidget canvas; reparenting
         # it from being a tab's child to a top-level window corrupts its
@@ -446,6 +512,110 @@ class Workspace(QMainWindow):
 
         QTimer.singleShot(0, _nudge_size)
         self._collapse_empty_groups()
+
+    # ------------------------------------------------------------------
+    # Comparison
+    # ------------------------------------------------------------------
+
+    def compare_windows(self, window_a, window_b):
+        """Pair *window_a* and *window_b* into a ``ComparisonPair``, docked
+        side by side as one tab in place of wherever each is docked now."""
+        if window_a is window_b:
+            return
+        for window in (window_a, window_b):
+            if getattr(window, "_comparison_view", None) is not None:
+                return
+            group = self._group_of(window)
+            if group is None:
+                return
+            group.removeTab(group.indexOf(window))
+
+        pair = ComparisonPair(window_a, window_b, parent=self)
+        view = ComparisonView(pair, parent=self)
+        window_a._comparison_view = view
+        window_b._comparison_view = view
+
+        def _follow_active_pane(window):
+            # Switching panes within an already-current comparison tab
+            # doesn't change the QTabWidget's current index, so
+            # _TabGroup's currentChanged/tabBarClicked wiring never sees
+            # it -- follow focus directly instead.
+            self._active_tab_widget = window
+            self._refresh_mirrored_menus()
+
+        view._active_pane_slot = _follow_active_pane
+        window_a.window_activated.connect(_follow_active_pane)
+        window_b.window_activated.connect(_follow_active_pane)
+        pair.ended.connect(lambda: self._end_comparison(view))
+
+        self._dock_menu_bar(window_a)
+        self._dock_menu_bar(window_b)
+        self.add_window(
+            view, title=f"{window_a.windowTitle()} ↔ {window_b.windowTitle()}"
+        )
+        self._collapse_empty_groups()
+
+    def _end_comparison(self, view):
+        """Slot for ``ComparisonPair.ended``: return surviving members to
+        ordinary tabs and drop the container.
+
+        A member the pair recorded as ``closing_member`` is left alone --
+        it's mid-``WA_DeleteOnClose`` teardown, and re-docking it here would
+        drag a half-torn-down ``QMainWindow`` out of the splitter (the same
+        hazard ``_collapse_empty_groups`` avoids for tab groups).
+        """
+        pair = view.pair
+        group = self._group_of(view)
+        if group is not None:
+            group.removeTab(group.indexOf(view))
+        for window in (pair.window_a, pair.window_b):
+            del window._comparison_view
+            try:
+                window.window_activated.disconnect(view._active_pane_slot)
+            except (TypeError, RuntimeError):
+                pass
+            if window is pair.closing_member:
+                continue
+            self.add_window(window)
+        view.deleteLater()
+        self._collapse_empty_groups()
+
+    def compare_with_dialog(self, window):
+        """"Compare With..." picker: prompt for a second window and start a
+        ``ComparisonPair`` with *window*.
+
+        Defaults the candidate list to ``compatible_windows`` (matching XY
+        shape, the same filter the shape-copy context menu uses); falls
+        back to every other open, unpaired window (annotated as
+        shape-mismatched) when no compatible window is open.
+        """
+        if getattr(window, "_comparison_view", None) is not None:
+            return
+
+        matched = [
+            w
+            for w in compatible_windows(window)
+            if getattr(w, "_comparison_view", None) is None
+        ]
+        mismatched = not matched
+        candidates = matched or [
+            w
+            for w in manager.get_all().values()
+            if w is not window and getattr(w, "_comparison_view", None) is None
+        ]
+        if not candidates:
+            return
+
+        labels = [w.windowTitle() or "window" for w in candidates]
+        if mismatched:
+            labels = [f"{label}  ⚠ scale differs" for label in labels]
+
+        item, ok = QInputDialog.getItem(
+            window, "Compare With", "Select window to compare:", labels, 0, False
+        )
+        if not ok or not item:
+            return
+        self.compare_windows(window, candidates[labels.index(item)])
 
     def _drop_tab(self, window):
         self._release_channel_popup(window)

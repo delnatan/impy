@@ -153,6 +153,8 @@ MENU_SPEC = [
     ]),
     ("View", [
         {"label": "Overlay Settings...", "method": "show_overlay_settings_dialog"},
+        None,
+        {"label": "Compare With...", "method": "compare_with_dialog"},
     ]),
 ]
 
@@ -230,6 +232,11 @@ class ImageWindow(QMainWindow):
     roi_selection_changed = Signal(object)  # Emits the selected ROI (or None)
     roi_modified = Signal(object)  # Emits ROI when it's being modified (dragged)
     view_changed = Signal(object)  # Emits self when displayed slice/channel changes
+    # Emits the new channel index precisely on change. t/z have this via
+    # ViewState.subscribe(); channel has no such observable, so anything
+    # that needs to react to *just* a channel change (as opposed to
+    # view_changed's coarser "slice or channel changed") uses this instead.
+    channel_changed = Signal(int)
     label_changed = Signal(object)  # Emits SparseLabels when labels change
     mask_layer_added = Signal(str)  # Emits mask layer name when added
     mask_layer_removed = Signal(str)  # Emits mask layer name when removed
@@ -3043,6 +3050,13 @@ class ImageWindow(QMainWindow):
         dialog.show()
         dialog.raise_()
 
+    def compare_with_dialog(self):
+        """Pick a second window and dock it side by side with this one as
+        an explicit comparison pair (see ``ui/comparison.py``)."""
+        from .workspace import get_workspace
+
+        get_workspace().compare_with_dialog(self)
+
     def show_axes_dialog(self):
         """Show dialog to reorder axes for ambiguous TIFF dimensions."""
         raw_shape = self.meta.get("raw_shape")
@@ -3384,6 +3398,7 @@ class ImageWindow(QMainWindow):
         self.renderer.set_active_channel(val)
         self.canvas.update()
         self.view_changed.emit(self)
+        self.channel_changed.emit(val)
 
     def on_time_change(self, val):
         self.view_state.set_t(val)  # label + redraw via subscription
