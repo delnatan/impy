@@ -46,6 +46,9 @@ from .processing_helper import BufferProcessingRunner
 from .overlay_settings import OverlaySettingsDialog
 from .zmontage_settings import ZMontageSettingsDialog
 from .tiled_display_settings_dialog import TiledDisplaySettingsDialog
+from .color_button import ColorButton
+from .point_display_settings_dialog import PointDisplaySettingsDialog
+from .track_display_settings_dialog import TrackDisplaySettingsDialog
 
 __all__ = [
     # Theme constants
@@ -80,6 +83,9 @@ __all__ = [
     "OverlaySettingsDialog",
     "ZMontageSettingsDialog",
     "TiledDisplaySettingsDialog",
+    "ColorButton",
+    "PointDisplaySettingsDialog",
+    "TrackDisplaySettingsDialog",
     "BufferProcessingRunner",
     "LineProfileDialog",
     "get_line_profile_dialog",

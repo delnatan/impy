@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
+    QDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -411,15 +412,45 @@ class LayerManager(QWidget):
         dlg.raise_()
 
     def _show_layer_menu(self, item, global_pos) -> None:
+        name = item.data(0, _ROLE_LAYER_NAME)
+        layer = None
+        if self._current_window is not None and name is not None:
+            try:
+                layer = self._current_window.layers[name]
+            except KeyError:
+                pass
+
         menu = QMenu(self)
+        display_settings_action = None
+        if layer is not None and layer.layer_type in ("points", "tracks"):
+            display_settings_action = menu.addAction("Display Settings…")
+            menu.addSeparator()
         rename_action = menu.addAction("Rename")
         remove_action = menu.addAction("Remove")
         chosen = menu.exec_(global_pos)
-        name = item.data(0, _ROLE_LAYER_NAME)
         if chosen is rename_action:
             self._rename_layer(name)
         elif chosen is remove_action:
             self._remove_layer(name)
+        elif chosen is not None and chosen is display_settings_action:
+            self._open_display_settings_dialog(layer)
+
+    def _open_display_settings_dialog(self, layer) -> None:
+        if layer.layer_type == "points":
+            from ..widgets.point_display_settings_dialog import PointDisplaySettingsDialog
+
+            dlg = PointDisplaySettingsDialog(dict(layer.style), parent=self._current_window)
+            if dlg.exec_() == QDialog.Accepted:
+                self._current_window.set_point_layer_style(layer.name, **dlg.get_style())
+        elif layer.layer_type == "tracks":
+            from ..widgets.track_display_settings_dialog import TrackDisplaySettingsDialog
+
+            available_properties = sorted(layer.data.properties.keys())
+            dlg = TrackDisplaySettingsDialog(
+                dict(layer.style), available_properties, parent=self._current_window
+            )
+            if dlg.exec_() == QDialog.Accepted:
+                self._current_window.set_track_layer_style(layer.name, **dlg.get_style())
 
     def _show_shape_menu(self, item, global_pos) -> None:
         layer, sid = self._resolve_shape_item(item)

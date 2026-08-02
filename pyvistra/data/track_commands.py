@@ -25,12 +25,21 @@ class TrackDataHolder:
 class AddTrack:
     """Add a complete track (all points for one track_id)."""
 
-    def __init__(self, track_id: int, t: list, x: list, y: list, z: list | None = None):
+    def __init__(
+        self,
+        track_id: int,
+        t: list,
+        x: list,
+        y: list,
+        z: list | None = None,
+        properties: dict[str, list] | None = None,
+    ):
         self.track_id = track_id
         self.t = t
         self.x = x
         self.y = y
         self.z = z
+        self.properties = properties
         self._old_table: TrackTable | None = None
 
     def execute(self, data: TrackDataHolder) -> None:
@@ -46,8 +55,25 @@ class AddTrack:
             old_z = old.z if old.z is not None else np.zeros(len(old.track_id), dtype=np.float32)
             z_arr = np.asarray(self.z, dtype=np.float32) if self.z is not None else np.zeros(n_new, dtype=np.float32)
             new_z = np.append(old_z, z_arr)
+
+        new_props = None
+        if old.properties or self.properties:
+            new_props = {}
+            keys = set(old.properties) | set(self.properties or {})
+            for key in keys:
+                old_arr = old.properties.get(key)
+                if old_arr is None:
+                    old_arr = np.full(len(old.track_id), np.nan)
+                new_vals = (self.properties or {}).get(key)
+                new_arr = (
+                    np.asarray(new_vals) if new_vals is not None
+                    else np.full(n_new, np.nan)
+                )
+                new_props[key] = np.append(old_arr, new_arr)
+
         data.table = TrackTable.from_arrays(
             track_id=new_tid, t=new_t, x=new_x, y=new_y, z=new_z,
+            properties=new_props,
         )
 
     def undo(self, data: TrackDataHolder) -> None:
@@ -72,6 +98,7 @@ class RemoveTrack:
             x=old.x[keep],
             y=old.y[keep],
             z=None if old.z is None else old.z[keep],
+            properties={k: v[keep] for k, v in old.properties.items()},
         )
 
     def undo(self, data: TrackDataHolder) -> None:

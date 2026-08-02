@@ -77,7 +77,7 @@ from ..visuals.points import DEFAULT_STYLE as POINT_DEFAULT_STYLE, PointLayerVis
 from ..visuals.shapes import ShapeLayerVisual
 from ..rois import PointROI
 from ..data.tracks import TrackTable
-from ..visuals.tracks import TrackLayerVisual
+from ..visuals.tracks import DEFAULT_STYLE as TRACK_DEFAULT_STYLE, TrackLayerVisual
 from ..visuals.image import CompositeImageVisual
 from ..widgets import (
     AlignmentDialog,
@@ -908,16 +908,7 @@ class ImageWindow(QMainWindow):
                 self.layers[name].visual = visual
 
         for name, entry in self._track_layers.items():
-            old_visual = entry["visual"]
-            trail_window = getattr(old_visual, "_trail_window", 30)
-            line_width = getattr(old_visual, "_line_width", 2.0)
-            opacity = getattr(old_visual, "_opacity", 0.9)
-            visual = TrackLayerVisual(
-                self.view,
-                trail_window=trail_window,
-                line_width=line_width,
-                opacity=opacity,
-            )
+            visual = TrackLayerVisual(self.view, **entry["style"])
             entry["visual"] = visual
             visual.set_tracks(entry["tracks"])
             visual.set_time_z(self.t_idx, self.z_idx)
@@ -1488,17 +1479,16 @@ class ImageWindow(QMainWindow):
         elif not isinstance(tracks, TrackTable):
             raise TypeError("tracks must be a TrackTable or None")
 
-        visual = TrackLayerVisual(
-            self.view,
-            trail_window=trail_window,
-        )
+        style = dict(TRACK_DEFAULT_STYLE)
+        style["trail_window"] = trail_window
+        visual = TrackLayerVisual(self.view, **style)
         visual.set_tracks(tracks)
         visual.set_time_z(self.t_idx, self.z_idx)
         self._register_layer_entry(
             self._track_layers, "_active_track_layer", name,
-            {"tracks": tracks, "visual": visual, "visible": True},
+            {"tracks": tracks, "visual": visual, "visible": True, "style": style},
             added_signal=self.track_layer_added,
-            layer_type="tracks", layer_data=tracks, visual=visual,
+            layer_type="tracks", layer_data=tracks, visual=visual, style=style,
         )
         self.canvas.update()
 
@@ -1510,10 +1500,24 @@ class ImageWindow(QMainWindow):
             raise TypeError("tracks must be a TrackTable")
 
         self._track_layers[name]["tracks"] = tracks
+        if name in self.layers:
+            self.layers[name].data = tracks
         visual = self._track_layers[name]["visual"]
         if visual is not None:
             visual.set_tracks(tracks)
             visual.set_time_z(self.t_idx, self.z_idx)
+        self.canvas.update()
+
+    def set_track_layer_style(self, name, **style):
+        """Update style for a specific track layer."""
+        if name not in self._track_layers:
+            return
+        entry = self._track_layers[name]
+        visual = entry["visual"]
+        if visual is None:
+            return
+        visual.set_style(**style)
+        entry["style"].update(style)
         self.canvas.update()
 
     def remove_track_layer(self, name):

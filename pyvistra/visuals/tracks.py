@@ -5,19 +5,54 @@ import colorsys
 import numpy as np
 from vispy import scene
 
+from .. import colormaps as cmap
 from ..data.tracks import TrackTable
+
+DEFAULT_STYLE = {
+    "trail_window": 30,
+    "line_width": 2.0,
+    "opacity": 0.9,
+    "color_mode": "auto",
+    "fixed_color": (1.0, 1.0, 1.0, 1.0),
+    "color_property": None,
+    "colormap_name": "viridis",
+    "color_clim": None,
+    "show_heads": True,
+    "head_size": 8.0,
+}
 
 
 class TrackLayerVisual:
     """Renders time-aware polylines for tracking overlays."""
 
-    def __init__(self, view, *, trail_window=30, line_width=2.0, opacity=0.9):
+    def __init__(
+        self,
+        view,
+        *,
+        trail_window=30,
+        line_width=2.0,
+        opacity=0.9,
+        color_mode="auto",
+        fixed_color=(1.0, 1.0, 1.0, 1.0),
+        color_property=None,
+        colormap_name="viridis",
+        color_clim=None,
+        show_heads=True,
+        head_size=8.0,
+    ):
         self.view = view
         self._tracks: TrackTable | None = None
         self._visible = True
         self._trail_window = trail_window
         self._line_width = float(line_width)
         self._opacity = float(opacity)
+        self._color_mode = str(color_mode)
+        self._fixed_color = tuple(fixed_color)
+        self._color_property = color_property
+        self._colormap_name = str(colormap_name)
+        self._color_clim = None if color_clim is None else tuple(color_clim)
+        self._show_heads = bool(show_heads)
+        self._head_size = float(head_size)
         self._t_idx = 0
         self._z_idx = 0
 
@@ -65,6 +100,21 @@ class TrackLayerVisual:
         self._line.visible = self._visible
         self._heads.visible = self._visible
 
+    @property
+    def style(self) -> dict[str, object]:
+        return {
+            "trail_window": self._trail_window,
+            "line_width": self._line_width,
+            "opacity": self._opacity,
+            "color_mode": self._color_mode,
+            "fixed_color": self._fixed_color,
+            "color_property": self._color_property,
+            "colormap_name": self._colormap_name,
+            "color_clim": self._color_clim,
+            "show_heads": self._show_heads,
+            "head_size": self._head_size,
+        }
+
     def set_tracks(self, tracks: TrackTable | None):
         self._tracks = tracks
         self.refresh()
@@ -78,8 +128,36 @@ class TrackLayerVisual:
         self._trail_window = trail_window
         self.refresh()
 
+    def set_line_width(self, line_width: float):
+        self._line_width = float(line_width)
+        self.refresh()
+
     def set_opacity(self, opacity: float):
         self._opacity = float(np.clip(opacity, 0.0, 1.0))
+        self.refresh()
+
+    def set_style(self, **kwargs):
+        if "trail_window" in kwargs:
+            self._trail_window = kwargs["trail_window"]
+        if "line_width" in kwargs:
+            self._line_width = float(kwargs["line_width"])
+        if "opacity" in kwargs:
+            self._opacity = float(np.clip(kwargs["opacity"], 0.0, 1.0))
+        if "color_mode" in kwargs:
+            self._color_mode = str(kwargs["color_mode"])
+        if "fixed_color" in kwargs:
+            self._fixed_color = tuple(kwargs["fixed_color"])
+        if "color_property" in kwargs:
+            self._color_property = kwargs["color_property"]
+        if "colormap_name" in kwargs:
+            self._colormap_name = str(kwargs["colormap_name"])
+        if "color_clim" in kwargs:
+            clim = kwargs["color_clim"]
+            self._color_clim = None if clim is None else tuple(clim)
+        if "show_heads" in kwargs:
+            self._show_heads = bool(kwargs["show_heads"])
+        if "head_size" in kwargs:
+            self._head_size = float(kwargs["head_size"])
         self.refresh()
 
     def remove(self):
@@ -96,6 +174,8 @@ class TrackLayerVisual:
         segment_colors = []
         head_positions = []
         head_colors = []
+
+        track_colors = self._build_track_colors()
 
         for track_id, track_slice in self._tracks.iter_track_slices():
             t = self._tracks.t[track_slice]
@@ -122,13 +202,14 @@ class TrackLayerVisual:
             ty = y[idx]
             tt = t[idx]
 
+            rgb = track_colors.get(int(track_id), (1.0, 1.0, 1.0))
+
             if idx.size >= 2:
                 if tt[-1] > tt[0]:
                     age_norm = (tt[1:] - tt[0]) / float(tt[-1] - tt[0])
                 else:
                     age_norm = np.ones(idx.size - 1, dtype=np.float32)
 
-                rgb = self._color_for_track(track_id)
                 for i in range(idx.size - 1):
                     p0 = np.array([tx[i], ty[i]], dtype=np.float32)
                     p1 = np.array([tx[i + 1], ty[i + 1]], dtype=np.float32)
@@ -137,9 +218,9 @@ class TrackLayerVisual:
                     segment_positions.extend([p0, p1])
                     segment_colors.extend([color, color])
 
-            head_positions.append(np.array([tx[-1], ty[-1]], dtype=np.float32))
-            hr, hg, hb = self._color_for_track(track_id)
-            head_colors.append((hr, hg, hb, self._opacity))
+            if self._show_heads:
+                head_positions.append(np.array([tx[-1], ty[-1]], dtype=np.float32))
+                head_colors.append((rgb[0], rgb[1], rgb[2], self._opacity))
 
         if segment_positions:
             self._line.set_data(
@@ -158,11 +239,56 @@ class TrackLayerVisual:
                 edge_color=(1.0, 1.0, 1.0, min(1.0, self._opacity + 0.1)),
                 edge_width=1.0,
                 symbol="disc",
-                size=8,
+                size=self._head_size,
             )
         else:
             self._heads.set_data(pos=np.zeros((0, 2), dtype=np.float32), size=0)
 
-    def _color_for_track(self, track_id: int):
-        hue = (int(track_id) * 0.61803398875) % 1.0
-        return colorsys.hsv_to_rgb(hue, 0.8, 0.95)
+    def _build_track_colors(self) -> dict[int, tuple[float, float, float]]:
+        """Resolve one RGB color per track_id under the current color mode.
+
+        "property" colors by the per-track mean of a properties column
+        (one color per whole trajectory, not per-vertex/time-varying) —
+        falls back to "auto" if the property isn't present on the table.
+        """
+        tracks = self._tracks
+
+        if self._color_mode == "fixed":
+            rgb = tuple(float(c) for c in self._fixed_color[:3])
+            return {int(tid): rgb for tid in tracks.track_ids}
+
+        if (
+            self._color_mode == "property"
+            and self._color_property is not None
+            and self._color_property in tracks.properties
+        ):
+            prop = tracks.properties[self._color_property]
+            means: dict[int, float] = {}
+            for tid, sl in tracks.iter_track_slices():
+                vals = np.asarray(prop[sl], dtype=np.float64)
+                means[tid] = float(np.nanmean(vals)) if vals.size else 0.0
+
+            if self._color_clim is not None:
+                lo, hi = self._color_clim
+            elif means:
+                vals = np.array(list(means.values()), dtype=np.float64)
+                lo, hi = float(np.nanmin(vals)), float(np.nanmax(vals))
+            else:
+                lo, hi = 0.0, 1.0
+            span = (hi - lo) if hi > lo else 1.0
+
+            colormap, _ = cmap.get(self._colormap_name)
+            tids = list(means.keys())
+            norm = np.clip(
+                (np.array([means[t] for t in tids], dtype=np.float64) - lo) / span,
+                0.0, 1.0,
+            )
+            rgba = colormap.map(norm)
+            return {int(tid): tuple(rgba[i, :3]) for i, tid in enumerate(tids)}
+
+        # "auto" (or "property" mode with an unset/missing property column):
+        # deterministic hue-by-track-id, unchanged from the original default.
+        return {
+            int(tid): colorsys.hsv_to_rgb((int(tid) * 0.61803398875) % 1.0, 0.8, 0.95)
+            for tid in tracks.track_ids
+        }
