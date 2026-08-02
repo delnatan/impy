@@ -19,6 +19,7 @@ DEFAULT_STYLE = {
     "color_clim": None,
     "show_heads": True,
     "head_size": 8.0,
+    "min_track_length": 1,
 }
 
 
@@ -39,6 +40,7 @@ class TrackLayerVisual:
         color_clim=None,
         show_heads=True,
         head_size=8.0,
+        min_track_length=1,
     ):
         self.view = view
         self._tracks: TrackTable | None = None
@@ -53,6 +55,7 @@ class TrackLayerVisual:
         self._color_clim = None if color_clim is None else tuple(color_clim)
         self._show_heads = bool(show_heads)
         self._head_size = float(head_size)
+        self._min_track_length = int(min_track_length)
         self._t_idx = 0
         self._z_idx = 0
 
@@ -113,6 +116,7 @@ class TrackLayerVisual:
             "color_clim": self._color_clim,
             "show_heads": self._show_heads,
             "head_size": self._head_size,
+            "min_track_length": self._min_track_length,
         }
 
     def set_tracks(self, tracks: TrackTable | None):
@@ -158,6 +162,8 @@ class TrackLayerVisual:
             self._show_heads = bool(kwargs["show_heads"])
         if "head_size" in kwargs:
             self._head_size = float(kwargs["head_size"])
+        if "min_track_length" in kwargs:
+            self._min_track_length = int(kwargs["min_track_length"])
         self.refresh()
 
     def remove(self):
@@ -178,6 +184,9 @@ class TrackLayerVisual:
         track_colors = self._build_track_colors()
 
         for track_id, track_slice in self._tracks.iter_track_slices():
+            if (track_slice.stop - track_slice.start) < self._min_track_length:
+                continue
+
             t = self._tracks.t[track_slice]
             x = self._tracks.x[track_slice]
             y = self._tracks.y[track_slice]

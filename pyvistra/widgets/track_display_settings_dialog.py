@@ -81,6 +81,15 @@ class TrackDisplaySettingsDialog(QDialog):
         self.head_size.setValue(float(cfg.get("head_size", 8.0)))
         form.addRow("Head Marker Size", self.head_size)
 
+        self.min_track_length = QSpinBox()
+        self.min_track_length.setRange(1, 100_000)
+        self.min_track_length.setValue(int(cfg.get("min_track_length", 1)))
+        self.min_track_length.setToolTip(
+            "Hide tracks with fewer than this many total frames"
+            " (e.g. set to 3 to hide singleton/2-frame 'dead' tracks)."
+        )
+        form.addRow("Min Track Length (frames)", self.min_track_length)
+
         self.color_mode = QComboBox()
         for label, value in _COLOR_MODES:
             self.color_mode.addItem(label, value)
@@ -134,6 +143,7 @@ class TrackDisplaySettingsDialog(QDialog):
             "opacity": self.opacity.value(),
             "show_heads": self.show_heads.isChecked(),
             "head_size": self.head_size.value(),
+            "min_track_length": self.min_track_length.value(),
             "color_mode": self.color_mode.currentData(),
             "fixed_color": self.fixed_color.rgba,
             "color_property": self.color_property.currentText() or None,
