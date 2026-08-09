@@ -537,6 +537,144 @@ def crop_rect(source, rec: ShapeRecord) -> np.ndarray:
     return np.asarray(source[:, :, :, y0:y1, x0:x1])
 
 
+def rect_mask(rec: ShapeRecord, Y: int, X: int) -> np.ndarray | None:
+    """Boolean ``(Y, X)`` mask of a RECTANGLE's interior, or ``None`` if the
+    rectangle is empty after clamping to the frame."""
+    x0, y0, x1, y1 = rectangle_bounds(rec, (Y, X))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    mask = np.zeros((Y, X), dtype=bool)
+    mask[y0:y1, x0:x1] = True
+    return mask
+
+
+def circle_mask(rec: ShapeRecord, Y: int, X: int) -> np.ndarray | None:
+    """Boolean ``(Y, X)`` mask of a CIRCLE's interior, or ``None`` if its
+    radius is zero."""
+    p = rec.params
+    cx, cy = float(p[0]), float(p[1])
+    radius = float(np.hypot(p[2] - cx, p[3] - cy))
+    if radius <= 0:
+        return None
+    yy, xx = np.ogrid[:Y, :X]
+    return (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
+
+
+def polygon_mask(rec: ShapeRecord, Y: int, X: int) -> np.ndarray | None:
+    """Boolean ``(Y, X)`` mask of a closed POLYLINE's interior via its
+    outline (:func:`get_outline`), or ``None`` if it isn't closed or has
+    too few points to enclose an area."""
+    if not polyline_is_closed(rec):
+        return None
+    outline = get_outline(rec)
+    if len(outline) < 4:
+        return None
+    poly = outline[:-1]  # drop closing duplicate
+    yy, xx = np.mgrid[:Y, :X]
+    px = xx.ravel().astype(np.float32)
+    py = yy.ravel().astype(np.float32)
+    n = len(poly)
+    inside = np.zeros(px.shape, dtype=bool)
+    j = n - 1
+    for i in range(n):
+        xi, yi = float(poly[i, 0]), float(poly[i, 1])
+        xj, yj = float(poly[j, 0]), float(poly[j, 1])
+        cond = ((yi > py) != (yj > py))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            x_cross = (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi
+        crosses = cond & (px < x_cross)
+        inside ^= crosses
+        j = i
+    return inside.reshape(Y, X)
+
+
+def mask_for(rec: ShapeRecord, Y: int, X: int) -> np.ndarray | None:
+    """Dispatch to :func:`rect_mask`/:func:`circle_mask`/:func:`polygon_mask`
+    by ``rec.shape_type``; ``None`` for unsupported types (e.g. LINE, which
+    has no interior)."""
+    if rec.shape_type == RECTANGLE:
+        return rect_mask(rec, Y, X)
+    if rec.shape_type == CIRCLE:
+        return circle_mask(rec, Y, X)
+    if rec.shape_type == POLYLINE:
+        return polygon_mask(rec, Y, X)
+    return None
+
+
+def rescale_shape(
+    rec: ShapeRecord,
+    scale_src_yx: tuple[float, float] | None,
+    scale_dst_yx: tuple[float, float] | None,
+) -> ShapeRecord:
+    """Return a copy of *rec* with its geometry remapped from one window's
+    pixel grid to another's, through a shared physical coordinate — the
+    same "convert the geometry, then rasterize/sample fresh" approach
+    line/radial profile use for paths (see ``data/calibration.py``),
+    applied to whole shapes so e.g. a region-statistics mask stays correct
+    across windows with different pixel sizes.
+
+    RECTANGLE/LINE points and POLYLINE vertices convert per-axis
+    (independent x/y scale — a rectangle stays a rectangle, an off-axis
+    line segment isn't approximated). CIRCLE converts its center as a
+    point and its radius isotropically (a circle has no anisotropic
+    generalization that wouldn't turn it into an ellipse); the returned
+    edge handle is reconstructed at angle 0 from the new center, since only
+    the center and radius matter for :func:`mask_for`/:func:`get_outline`.
+
+    If either scale is ``None``, returns an unmodified copy — there's no
+    physical coordinate to convert through.
+    """
+    from .calibration import (
+        points_phys_to_px,
+        points_px_to_phys,
+        radius_phys_to_px,
+        radius_px_to_phys,
+    )
+
+    new_rec = ShapeRecord(
+        shape_id=rec.shape_id,
+        shape_type=rec.shape_type,
+        t=rec.t,
+        z=rec.z,
+        params=rec.params.copy(),
+        label=rec.label,
+        properties=dict(rec.properties),
+        vertices=None if rec.vertices is None else rec.vertices.copy(),
+    )
+
+    if scale_src_yx is None or scale_dst_yx is None:
+        return new_rec
+
+    def _convert_points(points_xy: np.ndarray) -> np.ndarray:
+        phys = points_px_to_phys(points_xy, scale_src_yx)
+        return points_phys_to_px(phys, scale_dst_yx)
+
+    if rec.shape_type in (RECTANGLE, LINE):
+        pts = np.array(
+            [[rec.params[0], rec.params[1]], [rec.params[2], rec.params[3]]],
+            dtype=np.float64,
+        )
+        new_pts = _convert_points(pts)
+        new_params = new_rec.params.copy()
+        new_params[0:4] = [new_pts[0, 0], new_pts[0, 1], new_pts[1, 0], new_pts[1, 1]]
+        _set_record_params(new_rec, new_params)
+    elif rec.shape_type == CIRCLE:
+        cx, cy, ex, ey = (float(v) for v in rec.params[:4])
+        radius_px = float(np.hypot(ex - cx, ey - cy))
+        new_center = _convert_points(np.array([[cx, cy]], dtype=np.float64))[0]
+        radius_phys = radius_px_to_phys(radius_px, scale_src_yx)
+        new_radius = radius_phys_to_px(radius_phys, scale_dst_yx)
+        new_params = new_rec.params.copy()
+        new_params[0:4] = [
+            new_center[0], new_center[1], new_center[0] + new_radius, new_center[1],
+        ]
+        _set_record_params(new_rec, new_params)
+    elif rec.shape_type == POLYLINE and rec.vertices is not None:
+        new_rec.vertices = _convert_points(rec.vertices.astype(np.float64)).astype(np.float32)
+
+    return new_rec
+
+
 def _point_in_shape(px: float, py: float, rec: ShapeRecord, tolerance: float) -> bool:
     """Test if point (px, py) is inside/on a shape."""
     p = rec.params

@@ -1,7 +1,7 @@
 """KymographDialog — sample a LINE/POLYLINE shape across time.
 
 For each frame ``t`` in ``[t_start, t_end]``, the worker samples the
-source 2D plane (at the chosen Z) along the shape's path at
+target 2D plane (at the chosen Z) along the shape's path at
 ``num_points`` evenly spaced arc-length positions, and writes one row
 into an ``ImageBuffer``. The result is a 5D ``(1, 1, C, T_window,
 num_points)`` array — a standard kymograph (time on Y, position on X).
@@ -9,6 +9,12 @@ num_points)`` array — a standard kymograph (time on Y, position on X).
 Threading and output routing reuse :class:`BufferProcessingRunner` and
 :class:`ImageOutputSelector`, so destinations (new window / existing
 window / file) come for free.
+
+The shape is drawn on a "source" window, but a "Sample from" picker lets
+it be evaluated against any other open window with physical calibration
+(``meta["scale"]``) — the path is converted into the target's own pixel
+grid via ``data/calibration.py`` before sampling, the same approach
+line/radial profile and region-statistics use.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from __future__ import annotations
 import numpy as np
 from qtpy.QtCore import QObject, Qt, Signal
 from qtpy.QtWidgets import (
+    QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -27,14 +34,17 @@ from qtpy.QtWidgets import (
 )
 
 from .. import colors as tokens
+from ..data import calibration
 from ..data.shapes import (
     ALL_FRAMES,
     LINE,
     POLYLINE,
     polyline_is_closed,
 )
+from ..ui.manager import manager
 from .output_selector import ImageOutputSelector
 from .processing_helper import BufferProcessingRunner
+from .window_picker import list_other_image_windows
 
 
 def _sample_coords(rec, num_points: int) -> np.ndarray:
@@ -141,19 +151,18 @@ class KymographDialog(QDialog):
         super().__init__(parent if parent is not None else viewer)
         self.setWindowTitle("Kymograph")
         self.setWindowFlags(Qt.Tool)
-        self.resize(440, 320)
+        self.resize(440, 360)
         self._viewer = viewer
         self._layer = layer
         self._shape_id = int(shape_id)
         self._runner = None
+        self._target_window = viewer
+        self._target_closing_signal = None
 
         rec = layer.data.get(shape_id)
         path_len = _raw_pixel_length(rec)
         default_npoints = max(2, int(np.ceil(path_len)))
-
-        T, Z, _C, _Y, _X = viewer.img_data.shape
-        max_t = max(0, T - 1)
-        max_z = max(0, Z - 1)
+        self._default_z_anchor = int(rec.z) if rec.z != ALL_FRAMES else int(viewer.z_idx)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
@@ -165,26 +174,29 @@ class KymographDialog(QDialog):
         )
         outer.addWidget(shape_lbl)
 
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Sample from:"))
+        self._target_combo = QComboBox()
+        self._populate_target_combo()
+        self._target_combo.currentIndexChanged.connect(self._on_target_changed)
+        target_row.addWidget(self._target_combo, 1)
+        outer.addLayout(target_row)
+
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
 
-        self._t_start = QSpinBox(); self._t_start.setRange(0, max_t); self._t_start.setValue(0)
-        self._t_end = QSpinBox(); self._t_end.setRange(0, max_t); self._t_end.setValue(max_t)
+        self._t_start = QSpinBox()
+        self._t_end = QSpinBox()
         self._t_start.setKeyboardTracking(False)
         self._t_end.setKeyboardTracking(False)
         t_row = QHBoxLayout()
         t_row.addWidget(QLabel("From:")); t_row.addWidget(self._t_start)
         t_row.addSpacing(10)
         t_row.addWidget(QLabel("To:")); t_row.addWidget(self._t_end)
-        form.addRow(f"Time range (T = {T}):", t_row)
+        form.addRow("Time range:", t_row)
 
-        self._z_spin = QSpinBox(); self._z_spin.setRange(0, max_z)
-        default_z = (
-            int(rec.z) if rec.z != ALL_FRAMES else int(viewer.z_idx)
-        )
-        self._z_spin.setValue(max(0, min(max_z, default_z)))
-        self._z_spin.setEnabled(Z > 1)
-        form.addRow(f"Z (Z = {Z}):", self._z_spin)
+        self._z_spin = QSpinBox()
+        form.addRow("Z:", self._z_spin)
 
         self._npoints = QSpinBox()
         self._npoints.setRange(2, 100_000)
@@ -220,10 +232,131 @@ class KymographDialog(QDialog):
         btn_row.addWidget(close)
         outer.addLayout(btn_row)
 
+        self._update_target_ranges(initial=True)
+        self._connect_target_signals()
+
+    # ------------------------------------------------------------------
+    # Target-window picker
+    # ------------------------------------------------------------------
+    def _populate_target_combo(self):
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        self._target_combo.addItem(
+            f"[{self._viewer.window_id}] {self._viewer.windowTitle()} (source)", self._viewer
+        )
+        for w in list_other_image_windows(exclude=self._viewer):
+            self._target_combo.addItem(f"[{w.window_id}] {w.windowTitle()}", w)
+        idx = self._target_combo.findData(self._target_window)
+        self._target_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._target_combo.blockSignals(False)
+
+    def _on_target_changed(self, index):
+        window = self._target_combo.itemData(index)
+        if window is None or window is self._target_window:
+            return
+        self._disconnect_target_signals()
+        self._target_window = window
+        self._connect_target_signals()
+        self._update_target_ranges()
+
+    def _connect_target_signals(self):
+        w = self._target_window
+        # Only a *different* target needs a closing guard here -- if the
+        # source window itself closes, _start()'s existing shape-id check
+        # already makes the dialog inert (pre-existing behavior, unchanged).
+        if w is not self._viewer:
+            try:
+                w.window_closing.connect(self._on_target_window_closing)
+                self._target_closing_signal = w
+            except Exception:
+                pass
+
+    def _disconnect_target_signals(self):
+        if self._target_closing_signal is not None:
+            try:
+                self._target_closing_signal.window_closing.disconnect(self._on_target_window_closing)
+            except Exception:
+                pass
+            self._target_closing_signal = None
+
+    def _on_target_window_closing(self, window):
+        # Fall back to the source window rather than leaving a dangling
+        # reference to a closed target.
+        self._disconnect_target_signals()
+        self._target_window = self._viewer
+        self._connect_target_signals()
+        self._populate_target_combo()
+        self._update_target_ranges()
+
+    def _update_target_ranges(self, initial: bool = False):
+        """Refresh the T/Z spin-box ranges for the current target window.
+
+        These were previously derived once, from the source window, at
+        construction time -- now the target can change after construction,
+        so they must be re-derived on every target change, not just once.
+        """
+        T, Z, _C, _Y, _X = self._target_window.img_data.shape
+        max_t = max(0, T - 1)
+        max_z = max(0, Z - 1)
+
+        self._t_start.setRange(0, max_t)
+        self._t_end.setRange(0, max_t)
+        if initial:
+            self._t_start.setValue(0)
+            self._t_end.setValue(max_t)
+        else:
+            self._t_start.setValue(min(self._t_start.value(), max_t))
+            self._t_end.setValue(min(self._t_end.value(), max_t))
+
+        self._z_spin.setRange(0, max_z)
+        self._z_spin.setEnabled(Z > 1)
+        if initial:
+            self._z_spin.setValue(max(0, min(max_z, self._default_z_anchor)))
+        else:
+            self._z_spin.setValue(min(self._z_spin.value(), max_z))
+
     def _resample_coords(self):
+        """Path in the current target window's own pixel grid.
+
+        Sampled first in the source window's pixel space (unchanged), then
+        converted through a shared physical coordinate into the target's
+        grid when target != source — mirrors line/radial profile's path
+        conversion. Returns ``None`` if either window lacks calibration;
+        callers should already have refused via ``_cross_window_error``
+        before reaching this, but this never raises either way.
+        """
         rec = self._layer.data.get(self._shape_id)
         n = int(self._npoints.value())
-        return _sample_coords(rec, n)
+        coords = _sample_coords(rec, n)
+        if self._target_window is self._viewer:
+            return coords
+        src_scale = calibration.window_scale_yx(self._viewer)
+        dst_scale = calibration.window_scale_yx(self._target_window)
+        if src_scale is None or dst_scale is None:
+            return None
+        phys = calibration.points_px_to_phys(coords, src_scale)
+        return calibration.points_phys_to_px(phys, dst_scale)
+
+    def _cross_window_error(self) -> str | None:
+        """``None`` if sampling ``self._target_window`` is currently valid;
+        otherwise a user-facing reason it isn't."""
+        if self._target_window is self._viewer:
+            return None
+        src_scale = calibration.window_scale_yx(self._viewer)
+        dst_scale = calibration.window_scale_yx(self._target_window)
+        if src_scale is None or dst_scale is None:
+            return (
+                "Cannot sample: source and target windows must both have "
+                "physical calibration (scale) to compare."
+            )
+        if calibration.window_is_frequency_space(self._viewer) != calibration.window_is_frequency_space(
+            self._target_window
+        ):
+            return (
+                "Cannot sample: source and target are not the same kind "
+                "of pixel space (real vs. frequency)."
+            )
+        return None
 
     def _start(self):
         if self._runner.is_running():
@@ -232,23 +365,47 @@ class KymographDialog(QDialog):
             self._status.setText("Shape no longer exists.")
             self._status.setStyleSheet(f"color: {tokens.DANGER};")
             return
+
+        # Defensive re-check: normally the target is kept in sync by
+        # _on_target_window_closing (a direct, same-thread signal
+        # connection fires synchronously on window_closing), but don't
+        # trust a stale reference right before reading its data.
+        if self._target_window is not self._viewer and self._target_window not in manager.get_all().values():
+            self._disconnect_target_signals()
+            self._target_window = self._viewer
+            self._connect_target_signals()
+            self._populate_target_combo()
+            self._update_target_ranges()
+
+        err = self._cross_window_error()
+        if err is not None:
+            self._status.setText(err)
+            self._status.setStyleSheet(f"color: {tokens.DANGER};")
+            return
+
         t0, t1 = sorted(
             (int(self._t_start.value()), int(self._t_end.value()))
         )
         n = int(self._npoints.value())
         coords = self._resample_coords()
+        if coords is None:
+            self._status.setText("Could not resolve sample coordinates.")
+            self._status.setStyleSheet(f"color: {tokens.DANGER};")
+            return
 
-        T, _Z, C, _Y, _X = self._viewer.img_data.shape
+        target = self._target_window
+        T, _Z, C, _Y, _X = target.img_data.shape
         T_window = t1 - t0 + 1
 
-        meta = dict(self._viewer.meta or {})
-        base_name = meta.get("filename") or self._viewer.windowTitle() or "image"
+        meta = dict(target.meta or {})
+        base_name = meta.get("filename") or target.windowTitle() or "image"
         meta["filename"] = f"{base_name} [kymograph]"
 
         source, buffer = self._runner.prepare_output(
             output_shape=(1, 1, C, T_window, n),
-            output_dtype=np.dtype(self._viewer.img_data.dtype),
+            output_dtype=np.dtype(target.img_data.dtype),
             output_meta=meta,
+            source_window=target,
         )
 
         params = {
@@ -320,4 +477,5 @@ class KymographDialog(QDialog):
     def closeEvent(self, event):
         if self._runner is not None and self._runner.worker is not None:
             self._cancel()
+        self._disconnect_target_signals()
         super().closeEvent(event)

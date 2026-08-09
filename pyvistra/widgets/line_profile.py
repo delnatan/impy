@@ -15,10 +15,8 @@ from qtpy.QtWidgets import (
     QFileDialog,
     QDialog,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QListWidget,
-    QListWidgetItem,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -26,24 +24,16 @@ from qtpy.QtWidgets import (
 )
 
 from .. import colors as tokens
+from ..data import calibration
+from ..data.calibration import window_is_frequency_space
 from .histogram import WIDGET_BG, TEXT_COLOR
+from .series_colors import _to_qcolor
+from .window_series_mixin import WindowSeriesMixin
 from ..ui.comparison import paired_window
 from ..ui.manager import manager
 
 # Singleton instance
 _line_profile_dialog = None
-
-
-FALLBACK_COLORS = [
-    "#66CCFF",
-    "#FF9966",
-    "#99FF99",
-    "#FFCC66",
-    "#CC99FF",
-    "#FF6699",
-    "#66FFCC",
-    "#CCCCCC",
-]
 
 
 def get_line_profile_dialog():
@@ -370,12 +360,15 @@ class LineProfileWidget(QWidget):
         return f"{value:.0f}"
 
 
-class LineProfileDialog(QDialog):
+class LineProfileDialog(WindowSeriesMixin, QDialog):
     """
     Floating dialog that displays and compares intensity profiles along line/polyline shapes.
 
     Use the selected line/polyline shape as source geometry, then add target windows to
-    overlay profiles in one plot.
+    overlay profiles in one plot. Window/series bookkeeping is shared with
+    RadialProfileDialog via :class:`WindowSeriesMixin`; see its hook
+    overrides below for line-profile-specific behavior (overlays,
+    refresh-on-activation).
     """
 
     def __init__(self, parent=None):
@@ -404,14 +397,10 @@ class LineProfileDialog(QDialog):
         # shape, so it never gets one of these).
         self._overlay_key = "line_profile"
 
-        self._connected_windows = set()
         self._is_shutting_down = False
 
         self._setup_ui()
-
-        manager.window_registered.connect(self._on_window_registered)
-        for window in manager.get_all().values():
-            self._connect_window(window)
+        self._init_window_series()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -483,61 +472,43 @@ class LineProfileDialog(QDialog):
         self.status_label.setStyleSheet(f"color: {tokens.TEXT_SECONDARY}; font-size: 10px;")
         layout.addWidget(self.status_label)
 
-    def _on_window_registered(self, window):
-        if self._is_shutting_down:
-            return
-        self._connect_window(window)
-
-    def _connect_window(self, window):
-        if window in self._connected_windows:
-            return
-
-        window.window_activated.connect(self._on_window_activated)
-        window.window_closing.connect(self._on_window_closing)
+    # -- WindowSeriesMixin hooks --------------------------------------
+    def _connect_extra_series_signals(self, window):
         window.roi_selection_changed.connect(self._on_roi_selection_changed)
         if hasattr(window, "view_changed"):
             window.view_changed.connect(self._on_view_changed)
 
-        self._connected_windows.add(window)
+    def _disconnect_extra_series_signals(self, window):
+        window.roi_selection_changed.disconnect(self._on_roi_selection_changed)
+        if hasattr(window, "view_changed"):
+            window.view_changed.disconnect(self._on_view_changed)
 
-    def _disconnect_window(self, window):
-        if window not in self._connected_windows:
-            return
-
-        try:
-            window.window_activated.disconnect(self._on_window_activated)
-            window.window_closing.disconnect(self._on_window_closing)
-            window.roi_selection_changed.disconnect(self._on_roi_selection_changed)
-            if hasattr(window, "view_changed"):
-                window.view_changed.disconnect(self._on_view_changed)
-        except (TypeError, RuntimeError):
-            pass
-
-        self._connected_windows.discard(window)
-
-    def _on_window_activated(self, window):
-        if self._is_shutting_down:
-            return
-        self.active_window = window
-
+    def _on_active_window_changed(self):
         if self.current_line_data is not None:
             self._refresh_profiles()
 
-    def _on_window_closing(self, window):
-        self._disconnect_window(window)
+    def _has_shape_source(self) -> bool:
+        return self.current_line_data is not None
 
-        wid = getattr(window, "window_id", None)
-        if wid in self.series_config:
-            self.series_config.pop(wid, None)
-            self._refresh_series_list()
-            self._refresh_profiles()
+    def _eligible_series_windows(self):
+        return [w for w in manager.get_all().values() if hasattr(w, "roi_added")]
 
-        if window == self.active_window:
-            self.active_window = None
-        if window == self.source_window:
-            self.source_window = None
-            self._unsubscribe_from_shape_source()
+    def _on_series_removed(self, cfg):
+        self._hide_profile_overlay(cfg.get("window"))
 
+    def _on_series_cleared_pre(self):
+        self._hide_all_overlays()
+
+    def _reset_shape_source_data(self):
+        self.current_line_data = None
+
+    def _empty_status_text(self) -> str:
+        return "Select a line/polyline shape to start"
+
+    def _on_cleanup_extra(self):
+        self._hide_all_overlays()
+
+    # -- Shape source ---------------------------------------------------
     def _on_roi_selection_changed(self, roi):
         if self._is_shutting_down:
             return
@@ -642,197 +613,12 @@ class LineProfileDialog(QDialog):
         self._source_shape_layer = None
         self._source_shape_id = None
 
-    def _on_view_changed(self, window):
-        if self._is_shutting_down or self.current_line_data is None:
-            return
-
-        wid = getattr(window, "window_id", None)
-        source_wid = getattr(self.source_window, "window_id", None)
-        if wid in self.series_config or wid == source_wid:
-            self._refresh_profiles()
-
     def _ensure_source_series(self):
         if self.source_window is None:
             return
         self._add_series_for_window(self.source_window)
 
-    def _add_active_window_series(self):
-        if self.active_window is None:
-            self.status_label.setText("No active window")
-            return
-        self._add_series_for_window(self.active_window)
-        self._refresh_profiles()
-
-    def _add_window_series_dialog(self):
-        windows = []
-        labels = []
-        for win in manager.get_all().values():
-            if hasattr(win, "roi_added"):
-                windows.append(win)
-                labels.append(f"[{win.window_id}] {win.windowTitle()}")
-
-        if not windows:
-            self.status_label.setText("No image windows available")
-            return
-
-        item, ok = QInputDialog.getItem(
-            self,
-            "Add Window",
-            "Select window to compare:",
-            labels,
-            0,
-            False,
-        )
-        if not ok or not item:
-            return
-
-        idx = labels.index(item)
-        self._add_series_for_window(windows[idx])
-        self._refresh_profiles()
-
-    def _add_series_for_window(self, window, channel_idx=None):
-        wid = window.window_id
-
-        if wid in self.series_config:
-            return
-
-        if channel_idx is None:
-            channel_idx = int(getattr(window, "c_idx", 0))
-
-        num_channels = int(getattr(window, "C", 1))
-        channel_idx = int(np.clip(channel_idx, 0, max(0, num_channels - 1)))
-
-        color = self._get_window_channel_color(window, channel_idx, len(self.series_config))
-
-        self.series_config[wid] = {
-            "window": window,
-            "channel": channel_idx,
-            "visible": True,
-            "label": f"[{window.window_id}] {window.windowTitle()}",
-            "color": color,
-        }
-        self._refresh_series_list(select_wid=wid)
-
-    def _remove_selected_series(self):
-        item = self.series_list.currentItem()
-        if item is None:
-            return
-
-        wid = item.data(Qt.UserRole)
-        cfg = self.series_config.pop(wid, None)
-        if cfg is not None:
-            self._hide_profile_overlay(cfg.get("window"))
-
-        self._refresh_series_list()
-        self._refresh_profiles()
-
-    def _clear_series(self):
-        self._hide_all_overlays()
-        self.series_config.clear()
-        self._computed_series = []
-        self.current_line_data = None
-        self.source_window = None
-        self._unsubscribe_from_shape_source()
-
-        self._refresh_series_list()
-        self.profile_widget.clear()
-        self.status_label.setText("Select a line/polyline shape to start")
-
-    def _refresh_series_list(self, select_wid=None):
-        selected_wid = None
-        current_item = self.series_list.currentItem()
-        if current_item is not None:
-            selected_wid = current_item.data(Qt.UserRole)
-
-        self.series_list.blockSignals(True)
-        self.series_list.clear()
-
-        all_ch = self.all_channels_cb.isChecked()
-        for wid, cfg in self.series_config.items():
-            label = cfg.get("label", f"[{wid}] Window")
-            if all_ch:
-                n_ch = self._num_channels(cfg.get("window")) if cfg.get("window") else 1
-                ch_text = f"All ({n_ch}ch)"
-            else:
-                ch_text = f"Ch{int(cfg.get('channel', 0)) + 1}"
-            item = QListWidgetItem(f"{label} | {ch_text}")
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            item.setCheckState(Qt.Checked if cfg.get("visible", True) else Qt.Unchecked)
-            item.setData(Qt.UserRole, wid)
-            self.series_list.addItem(item)
-
-        target_wid = select_wid if select_wid is not None else selected_wid
-        if target_wid is not None:
-            for i in range(self.series_list.count()):
-                item = self.series_list.item(i)
-                if item.data(Qt.UserRole) == target_wid:
-                    self.series_list.setCurrentItem(item)
-                    break
-
-        self.series_list.blockSignals(False)
-        self._on_series_selection_changed()
-
-    def _on_series_item_changed(self, item):
-        wid = item.data(Qt.UserRole)
-        if wid not in self.series_config:
-            return
-
-        self.series_config[wid]["visible"] = item.checkState() == Qt.Checked
-        self._refresh_profiles()
-
-    def _on_series_selection_changed(self):
-        item = self.series_list.currentItem()
-        if item is None:
-            self.series_channel_spin.blockSignals(True)
-            self.series_channel_spin.setRange(1, 1)
-            self.series_channel_spin.setValue(1)
-            self.series_channel_spin.blockSignals(False)
-            self.series_channel_spin.setEnabled(False)
-            return
-
-        wid = item.data(Qt.UserRole)
-        if wid not in self.series_config:
-            return
-
-        cfg = self.series_config[wid]
-        window = cfg["window"]
-        n_channels = int(getattr(window, "C", 1))
-        ch = int(cfg.get("channel", 0)) + 1
-
-        self.series_channel_spin.blockSignals(True)
-        self.series_channel_spin.setRange(1, max(1, n_channels))
-        self.series_channel_spin.setValue(int(np.clip(ch, 1, max(1, n_channels))))
-        self.series_channel_spin.blockSignals(False)
-        self.series_channel_spin.setEnabled(
-            n_channels > 1 and not self.all_channels_cb.isChecked()
-        )
-
-    def _on_all_channels_toggled(self, checked):
-        self.series_channel_spin.setEnabled(not checked and self.series_list.currentItem() is not None)
-        self._refresh_series_list()
-        self._refresh_profiles()
-
     def _on_normalize_toggled(self, checked):
-        self._refresh_profiles()
-
-    def _on_selected_channel_changed(self, value):
-        item = self.series_list.currentItem()
-        if item is None:
-            return
-
-        wid = item.data(Qt.UserRole)
-        if wid not in self.series_config:
-            return
-
-        cfg = self.series_config[wid]
-        window = cfg["window"]
-        n_channels = int(getattr(window, "C", 1))
-        new_channel = int(np.clip(value - 1, 0, max(0, n_channels - 1)))
-
-        cfg["channel"] = new_channel
-        cfg["color"] = self._get_window_channel_color(window, new_channel, 0)
-
-        self._refresh_series_list(select_wid=wid)
         self._refresh_profiles()
 
     def _refresh_profiles(self):
@@ -872,15 +658,10 @@ class LineProfileDialog(QDialog):
         # axis label, and it isn't the same physical quantity as a
         # real-space distance from another window (handled below).
         is_frequency_space = window_is_frequency_space(self.source_window)
-        src_scale = (
-            getattr(self.source_window, "meta", {}).get("scale")
-            if self.source_window
-            else None
-        )
-        has_phys = src_scale is not None and len(src_scale) >= 3
+        src_scale_yx = calibration.window_scale_yx(self.source_window)
+        has_phys = src_scale_yx is not None
 
         if has_phys:
-            sy_src, sx_src = float(src_scale[1]), float(src_scale[2])
             # Physical-space path: scales each axis independently, so
             # anisotropic pixel sizes (sx != sy) and off-axis segments are
             # handled correctly rather than approximated by an averaged
@@ -888,7 +669,7 @@ class LineProfileDialog(QDialog):
             # windows with different pixel sizes (see the per-window
             # conversion below) -- the x-axis is now genuinely physical,
             # not borrowed from one specific window's pixel grid.
-            path_phys = path_px_source * np.array([sx_src, sy_src])
+            path_phys = calibration.points_px_to_phys(path_px_source, src_scale_yx)
             seg_phys = np.diff(path_phys, axis=0)
             distances_plot = np.concatenate(
                 [[0.0], np.cumsum(np.hypot(seg_phys[:, 0], seg_phys[:, 1]))]
@@ -932,16 +713,12 @@ class LineProfileDialog(QDialog):
                     # would be meaningless, so skip rather than mislabel.
                     skipped_labels.append(label)
                     continue
-                win_scale = window.meta.get("scale")
-                if win_scale is not None and len(win_scale) >= 3:
-                    sy_w, sx_w = float(win_scale[1]), float(win_scale[2])
-                else:
-                    sy_w, sx_w = 1.0, 1.0
+                win_scale_yx = calibration.window_scale_yx(window) or (1.0, 1.0)
                 # Convert the shared physical path into *this* window's own
                 # pixel grid -- sampling with the source window's raw pixel
                 # coordinates would land on the wrong physical location
                 # whenever pixel sizes differ between windows.
-                path_px_window = path_phys / np.array([sx_w, sy_w])
+                path_px_window = calibration.points_phys_to_px(path_phys, win_scale_yx)
             else:
                 path_px_window = path_px_source
 
@@ -1050,18 +827,7 @@ class LineProfileDialog(QDialog):
         else:
             return None, channel_idx
 
-        from scipy.ndimage import map_coordinates
-
-        xs = np.asarray(path_px[:, 0], dtype=float)
-        ys = np.asarray(path_px[:, 1], dtype=float)
-        coords = np.array([ys, xs], dtype=float)
-
-        profile = map_coordinates(
-            np.asarray(image_2d, dtype=float),
-            coords,
-            order=1,
-            mode="nearest",
-        )
+        profile = calibration.sample_along_path(image_2d, path_px)
         return profile, channel_used
 
     @staticmethod
@@ -1080,19 +846,6 @@ class LineProfileDialog(QDialog):
         if rng <= 0:
             return np.where(np.isfinite(values), 0.0, values)
         return (values - vmin) / rng
-
-    @staticmethod
-    def _num_channels(window):
-        cache = window.renderer.current_slice_cache
-        if cache is not None and cache.ndim == 3:
-            return cache.shape[0]
-        return int(getattr(window, "C", 1))
-
-    def _get_window_channel_color(self, window, channel_idx, fallback_idx):
-        colors = getattr(window.renderer, "channel_colors", [])
-        if channel_idx < len(colors):
-            return _to_qcolor(colors[channel_idx], QColor(FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)])).name()
-        return FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)]
 
     def _sync_profile_overlay(self, window, path_px, color):
         """Draw/update the profile-path indicator on a compared window.
@@ -1145,7 +898,7 @@ class LineProfileDialog(QDialog):
         if has_um:
             distances_um = np.asarray(distances_um, dtype=float)
 
-        scale = getattr(self.source_window, "meta", {}).get("scale") if self.source_window else None
+        scale_yx = calibration.window_scale_yx(self.source_window)
         is_frequency_space = window_is_frequency_space(self.source_window)
         phys_unit = "1/um" if is_frequency_space else "um"
         phys_col = "spatial_freq_1_per_um" if is_frequency_space else "distance_um"
@@ -1156,8 +909,8 @@ class LineProfileDialog(QDialog):
                 f.write(f"# Line Profile\n")
                 f.write(f"# p1_xy: ({p1[0]:.2f}, {p1[1]:.2f})\n")
                 f.write(f"# p2_xy: ({p2[0]:.2f}, {p2[1]:.2f})\n")
-                if scale is not None and len(scale) >= 3:
-                    f.write(f"# pixel_size_yx: ({float(scale[1]):.6g}, {float(scale[2]):.6g}) {phys_unit}\n")
+                if scale_yx is not None:
+                    f.write(f"# pixel_size_yx: ({scale_yx[0]:.6g}, {scale_yx[1]:.6g}) {phys_unit}\n")
                 f.write(f"# line_length_px: {float(distances_px[-1]):.2f}\n")
                 if has_um:
                     f.write(f"# line_{phys_length_key}: {float(distances_um[-1]):.4f}\n")
@@ -1209,56 +962,3 @@ class LineProfileDialog(QDialog):
         self._hide_all_overlays()
         super().hideEvent(event)
 
-    def closeEvent(self, event):
-        if self._is_shutting_down:
-            super().closeEvent(event)
-        else:
-            event.ignore()
-            self.hide()
-
-    def cleanup(self):
-        self._is_shutting_down = True
-
-        self._hide_all_overlays()
-
-        try:
-            manager.window_registered.disconnect(self._on_window_registered)
-        except (TypeError, RuntimeError):
-            pass
-
-        for window in list(self._connected_windows):
-            self._disconnect_window(window)
-
-        self._unsubscribe_from_shape_source()
-        self.active_window = None
-        self.source_window = None
-        self.current_line_data = None
-
-
-def window_is_frequency_space(window) -> bool:
-    """Whether ``window`` (or ``None``) is FFT/frequency-space output.
-
-    See ``ImageWindow.pixel_space`` / fft_dialog.py. Tolerates ``None`` so
-    callers don't need a separate check for a not-yet-set source window.
-    """
-    return getattr(window, "pixel_space", "real") == "frequency"
-
-
-def _to_qcolor(value, default):
-    if isinstance(value, QColor):
-        return value
-
-    # Handle rgb float triples/lists from renderer
-    if isinstance(value, (tuple, list)) and len(value) >= 3:
-        try:
-            r, g, b = value[:3]
-            if max(r, g, b) <= 1.0:
-                return QColor.fromRgbF(float(r), float(g), float(b))
-            return QColor(int(r), int(g), int(b))
-        except Exception:
-            return default
-
-    qcolor = QColor(value)
-    if not qcolor.isValid():
-        return default
-    return qcolor

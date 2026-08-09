@@ -6,8 +6,15 @@ checkbox toggles whether all channels are shown or just the currently
 displayed one.
 
 Supported shape types: :data:`RECTANGLE`, :data:`CIRCLE`, :data:`POLYLINE`
-(closed). Auto-refreshes via :class:`ShapeData.subscribe` and the parent
+(closed). Auto-refreshes via :class:`ShapeData.subscribe` and the target
 window's ``view_changed`` signal.
+
+The shape is drawn on a "source" window, but a "Sample from" picker lets it
+be evaluated against any other open window with physical calibration
+(``meta["scale"]``) — the shape's geometry is converted into the target's
+own pixel grid via :func:`~pyvistra.data.shapes.rescale_shape` before
+masking, the same "convert the geometry, not an already-rasterized result"
+approach line/radial profile use for paths.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ import numpy as np
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QHeaderView,
@@ -26,70 +34,9 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..data.shapes import (
-    CIRCLE,
-    EVT_REMOVED,
-    POLYLINE,
-    RECTANGLE,
-    get_outline,
-    polyline_is_closed,
-    rectangle_bounds,
-)
-
-
-def _rect_mask(rec, Y: int, X: int) -> np.ndarray | None:
-    x0, y0, x1, y1 = rectangle_bounds(rec, (Y, X))
-    if x1 <= x0 or y1 <= y0:
-        return None
-    mask = np.zeros((Y, X), dtype=bool)
-    mask[y0:y1, x0:x1] = True
-    return mask
-
-
-def _circle_mask(rec, Y: int, X: int) -> np.ndarray | None:
-    p = rec.params
-    cx, cy = float(p[0]), float(p[1])
-    radius = float(np.hypot(p[2] - cx, p[3] - cy))
-    if radius <= 0:
-        return None
-    yy, xx = np.ogrid[:Y, :X]
-    return (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
-
-
-def _polygon_mask(rec, Y: int, X: int) -> np.ndarray | None:
-    if not polyline_is_closed(rec):
-        return None
-    outline = get_outline(rec)
-    if len(outline) < 4:
-        return None
-    poly = outline[:-1]  # drop closing duplicate
-    yy, xx = np.mgrid[:Y, :X]
-    px = xx.ravel().astype(np.float32)
-    py = yy.ravel().astype(np.float32)
-    n = len(poly)
-    inside = np.zeros(px.shape, dtype=bool)
-    j = n - 1
-    for i in range(n):
-        xi, yi = float(poly[i, 0]), float(poly[i, 1])
-        xj, yj = float(poly[j, 0]), float(poly[j, 1])
-        cond = ((yi > py) != (yj > py))
-        with np.errstate(divide="ignore", invalid="ignore"):
-            x_cross = (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi
-        crosses = cond & (px < x_cross)
-        inside ^= crosses
-        j = i
-    return inside.reshape(Y, X)
-
-
-def _mask_for(rec, Y: int, X: int) -> np.ndarray | None:
-    if rec.shape_type == RECTANGLE:
-        return _rect_mask(rec, Y, X)
-    if rec.shape_type == CIRCLE:
-        return _circle_mask(rec, Y, X)
-    if rec.shape_type == POLYLINE:
-        return _polygon_mask(rec, Y, X)
-    return None
-
+from ..data import calibration
+from ..data.shapes import EVT_REMOVED, mask_for, rescale_shape
+from .window_picker import list_other_image_windows
 
 _STAT_KEYS = ["mean", "std", "sum", "min", "max", "n_pixels"]
 
@@ -108,9 +55,20 @@ class RegionStatisticsDialog(QDialog):
         self._window = window
         self._layer = layer
         self._shape_id = int(shape_id)
+        self._target_window = window
+        self._target_view_signal = None
+        self._target_closing_signal = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 10)
+
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel("Sample from:"))
+        self._target_combo = QComboBox()
+        self._populate_target_combo()
+        self._target_combo.currentIndexChanged.connect(self._on_target_changed)
+        target_row.addWidget(self._target_combo, 1)
+        outer.addLayout(target_row)
 
         self._all_channels = QCheckBox("All channels")
         self._all_channels.setChecked(True)
@@ -140,13 +98,83 @@ class RegionStatisticsDialog(QDialog):
 
         self._unsubs: list = []
         self._unsubs.append(layer.data.subscribe(self._on_shape_event))
-        if hasattr(window, "view_changed"):
+
+        # The source window owning the shape closing makes the shape itself
+        # unreachable regardless of which window is currently the sample
+        # target -- close the dialog. Connected once, for the dialog's
+        # whole lifetime (unlike the target's signals, which change with
+        # the combo box).
+        self._window.window_closing.connect(self._on_source_window_closing)
+        self._connect_target_signals()
+
+        self._refresh()
+
+    # ------------------------------------------------------------------
+    # Target-window picker
+    # ------------------------------------------------------------------
+    def _populate_target_combo(self):
+        self._target_combo.blockSignals(True)
+        self._target_combo.clear()
+        self._target_combo.addItem(
+            f"[{self._window.window_id}] {self._window.windowTitle()} (source)", self._window
+        )
+        for w in list_other_image_windows(exclude=self._window):
+            self._target_combo.addItem(f"[{w.window_id}] {w.windowTitle()}", w)
+        idx = self._target_combo.findData(self._target_window)
+        self._target_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._target_combo.blockSignals(False)
+
+    def _on_target_changed(self, index):
+        window = self._target_combo.itemData(index)
+        if window is None or window is self._target_window:
+            return
+        self._disconnect_target_signals()
+        self._target_window = window
+        self._connect_target_signals()
+        self._refresh()
+
+    def _connect_target_signals(self):
+        w = self._target_window
+        if hasattr(w, "view_changed"):
             try:
-                window.view_changed.connect(self._refresh)
-                self._unsubs.append(("view_changed", window.view_changed))
+                w.view_changed.connect(self._refresh)
+                self._target_view_signal = w
+            except Exception:
+                pass
+        # The source window's own closing is handled separately (and
+        # always) by _on_source_window_closing; only a *different* target
+        # needs its own closing handler.
+        if w is not self._window:
+            try:
+                w.window_closing.connect(self._on_target_window_closing)
+                self._target_closing_signal = w
             except Exception:
                 pass
 
+    def _disconnect_target_signals(self):
+        if self._target_view_signal is not None:
+            try:
+                self._target_view_signal.view_changed.disconnect(self._refresh)
+            except Exception:
+                pass
+            self._target_view_signal = None
+        if self._target_closing_signal is not None:
+            try:
+                self._target_closing_signal.window_closing.disconnect(self._on_target_window_closing)
+            except Exception:
+                pass
+            self._target_closing_signal = None
+
+    def _on_source_window_closing(self, window):
+        self.close()
+
+    def _on_target_window_closing(self, window):
+        # Fall back to the source window rather than leaving a dangling
+        # reference to a closed target.
+        self._disconnect_target_signals()
+        self._target_window = self._window
+        self._connect_target_signals()
+        self._populate_target_combo()
         self._refresh()
 
     def _on_shape_event(self, kind, sid):
@@ -161,23 +189,43 @@ class RegionStatisticsDialog(QDialog):
         if self._shape_id not in self._layer.data:
             return
         rec = self._layer.data.get(self._shape_id)
+        target = self._target_window
+        cross_window = target is not self._window
+
+        if cross_window:
+            src_scale = calibration.window_scale_yx(self._window)
+            dst_scale = calibration.window_scale_yx(target)
+            if src_scale is None or dst_scale is None:
+                self._status.setText(
+                    "Cannot sample: source and target windows must both have "
+                    "physical calibration (scale) to compare."
+                )
+                self._table.setRowCount(0)
+                return
+            if calibration.window_is_frequency_space(self._window) != calibration.window_is_frequency_space(target):
+                self._status.setText(
+                    "Cannot sample: source and target are not the same kind "
+                    "of pixel space (real vs. frequency)."
+                )
+                self._table.setRowCount(0)
+                return
+            rec = rescale_shape(rec, src_scale, dst_scale)
+
         try:
             frame = np.asarray(
-                self._window.img_data[
-                    self._window.t_idx, self._window.z_idx, :, :, :
-                ]
+                target.img_data[target.t_idx, target.z_idx, :, :, :]
             )
         except Exception as e:
             self._status.setText(f"Could not read frame: {e}")
             return
         C, Y, X = frame.shape
-        mask = _mask_for(rec, Y, X)
+        mask = mask_for(rec, Y, X)
         if mask is None or not mask.any():
             self._status.setText("Region is empty or shape is not maskable.")
             self._table.setRowCount(0)
             return
 
-        channels = list(range(C)) if self._all_channels.isChecked() else [self._window.c_idx]
+        channels = list(range(C)) if self._all_channels.isChecked() else [target.c_idx]
         channels = [c for c in channels if 0 <= c < C]
 
         self._table.setRowCount(len(channels))
@@ -191,18 +239,20 @@ class RegionStatisticsDialog(QDialog):
                 "max": float(np.max(data)),
                 "n_pixels": int(data.size),
             }
-            self._table.setItem(r, 0, QTableWidgetItem(self._channel_label(c)))
+            self._table.setItem(r, 0, QTableWidgetItem(self._channel_label(target, c)))
             for j, key in enumerate(_STAT_KEYS, start=1):
                 val = stats[key]
                 txt = f"{val:.3f}" if key != "n_pixels" else f"{int(val)}"
                 self._table.setItem(r, j, QTableWidgetItem(txt))
+        target_note = f" on [{target.window_id}]" if cross_window else ""
         self._status.setText(
-            f"Frame t={self._window.t_idx}, z={self._window.z_idx} · "
+            f"Frame t={target.t_idx}, z={target.z_idx}{target_note} · "
             f"{int(mask.sum())} px in mask"
         )
 
-    def _channel_label(self, c: int) -> str:
-        meta_channels = (self._window.meta or {}).get("channels") or []
+    @staticmethod
+    def _channel_label(window, c: int) -> str:
+        meta_channels = (window.meta or {}).get("channels") or []
         if c < len(meta_channels) and isinstance(meta_channels[c], dict):
             name = meta_channels[c].get("name")
             if name:
@@ -220,4 +270,11 @@ class RegionStatisticsDialog(QDialog):
             except Exception:
                 pass
         self._unsubs.clear()
+
+        self._disconnect_target_signals()
+        try:
+            self._window.window_closing.disconnect(self._on_source_window_closing)
+        except Exception:
+            pass
+
         super().closeEvent(event)

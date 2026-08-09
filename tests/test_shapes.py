@@ -547,3 +547,158 @@ def test_kymograph_sample_coords_polyline_arc_length():
     np.testing.assert_allclose(coords[10], [10.0, 0.0], atol=1e-5)
     # Endpoint matches the last vertex.
     np.testing.assert_allclose(coords[-1], [10.0, 10.0], atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# rect_mask / circle_mask / polygon_mask / mask_for
+# ---------------------------------------------------------------------------
+
+def test_rect_mask_matches_bounds():
+    from pyvistra.data.shapes import rect_mask
+
+    sd = ShapeData()
+    sid = sd.add(RECTANGLE, [2, 3, 6, 7])
+    mask = rect_mask(sd.get(sid), Y=10, X=10)
+    assert mask.shape == (10, 10)
+    assert mask.sum() == 4 * 4
+    assert mask[3:7, 2:6].all()
+    assert not mask[0, 0]
+
+
+def test_rect_mask_none_when_empty():
+    from pyvistra.data.shapes import rect_mask
+
+    sd = ShapeData()
+    sid = sd.add(RECTANGLE, [5, 5, 5, 5])
+    assert rect_mask(sd.get(sid), Y=10, X=10) is None
+
+
+def test_circle_mask_matches_radius():
+    from pyvistra.data.shapes import circle_mask
+
+    sd = ShapeData()
+    sid = sd.add(CIRCLE, [10, 10, 13, 10])  # center (10,10), radius 3
+    mask = circle_mask(sd.get(sid), Y=20, X=20)
+    assert mask[10, 10]  # center inside
+    assert mask[10, 13]  # exactly on radius
+    assert not mask[10, 14]  # just outside
+
+
+def test_circle_mask_none_for_zero_radius():
+    from pyvistra.data.shapes import circle_mask
+
+    sd = ShapeData()
+    sid = sd.add(CIRCLE, [5, 5, 5, 5])
+    assert circle_mask(sd.get(sid), Y=10, X=10) is None
+
+
+def test_polygon_mask_requires_closed():
+    from pyvistra.data.shapes import polygon_mask
+
+    sd = ShapeData()
+    sid = sd.add(POLYLINE, vertices=[(2, 2), (8, 2), (8, 8), (2, 8)])
+    assert polygon_mask(sd.get(sid), Y=10, X=10) is None  # open
+
+    SetPolylineFlags(sid, closed=True).execute(sd)
+    mask = polygon_mask(sd.get(sid), Y=10, X=10)
+    assert mask is not None
+    assert mask[5, 5]  # interior
+    assert not mask[0, 0]  # outside
+
+
+def test_mask_for_dispatches_by_shape_type():
+    from pyvistra.data.shapes import mask_for
+
+    sd = ShapeData()
+    rect_id = sd.add(RECTANGLE, [2, 2, 6, 6])
+    circle_id = sd.add(CIRCLE, [10, 10, 12, 10])
+    line_id = sd.add(LINE, [0, 0, 5, 5])
+
+    assert mask_for(sd.get(rect_id), 20, 20) is not None
+    assert mask_for(sd.get(circle_id), 20, 20) is not None
+    assert mask_for(sd.get(line_id), 20, 20) is None  # LINE has no interior
+
+
+# ---------------------------------------------------------------------------
+# rescale_shape
+# ---------------------------------------------------------------------------
+
+def test_rescale_shape_none_scale_returns_unmodified_copy():
+    from pyvistra.data.shapes import rescale_shape
+
+    sd = ShapeData()
+    sid = sd.add(RECTANGLE, [2, 3, 6, 7])
+    rec = sd.get(sid)
+    new_rec = rescale_shape(rec, None, (1.0, 1.0))
+    np.testing.assert_allclose(new_rec.params[:4], rec.params[:4])
+    assert new_rec is not rec  # copy, not the same object
+
+
+def test_rescale_shape_rectangle_per_axis():
+    from pyvistra.data.shapes import rescale_shape
+
+    sd = ShapeData()
+    # 10x20 px rectangle in a window with 0.1 um/px (isotropic).
+    sid = sd.add(RECTANGLE, [0, 0, 10, 20])
+    rec = sd.get(sid)
+
+    # Target window has 0.2 um/px in x, 0.05 um/px in y -- anisotropic
+    # relative to source, so x and y must scale independently.
+    new_rec = rescale_shape(rec, scale_src_yx=(0.1, 0.1), scale_dst_yx=(0.05, 0.2))
+    x0, y0, x1, y1 = new_rec.params[:4]
+    # physical width = 10*0.1=1.0um -> new width = 1.0/0.2 = 5 px
+    # physical height = 20*0.1=2.0um -> new height = 2.0/0.05 = 40 px
+    assert abs((x1 - x0) - 5.0) < 1e-4
+    assert abs((y1 - y0) - 40.0) < 1e-4
+
+
+def test_rescale_shape_circle_stays_circular():
+    from pyvistra.data.shapes import rescale_shape
+
+    sd = ShapeData()
+    sid = sd.add(CIRCLE, [50, 50, 60, 50])  # center (50,50), radius 10 px
+    rec = sd.get(sid)
+
+    new_rec = rescale_shape(rec, scale_src_yx=(0.1, 0.1), scale_dst_yx=(0.2, 0.2))
+    cx, cy, ex, ey = new_rec.params[:4]
+    new_radius = float(np.hypot(ex - cx, ey - cy))
+    # physical radius = 10*0.1 = 1.0um -> new radius = 1.0/0.2 = 5 px
+    assert abs(new_radius - 5.0) < 1e-4
+    # Center itself: physical (5.0, 5.0)um -> new pixel (25.0, 25.0)
+    assert abs(cx - 25.0) < 1e-4
+    assert abs(cy - 25.0) < 1e-4
+
+
+def test_rescale_shape_polyline_vertices_per_axis():
+    from pyvistra.data.shapes import rescale_shape
+
+    sd = ShapeData()
+    sid = sd.add(POLYLINE, vertices=[(0, 0), (10, 20)])
+    rec = sd.get(sid)
+
+    new_rec = rescale_shape(rec, scale_src_yx=(0.1, 0.1), scale_dst_yx=(0.05, 0.2))
+    # x: 10px*0.1um/px=1.0um -> 1.0/0.2=5px; y: 20px*0.1=2.0um -> 2.0/0.05=40px
+    assert abs(new_rec.vertices[1, 0] - 5.0) < 1e-3
+    assert abs(new_rec.vertices[1, 1] - 40.0) < 1e-3
+    assert new_rec.vertices is not rec.vertices  # copy, not aliased
+
+
+def test_rescale_shape_then_mask_for_lands_on_same_physical_region():
+    """End-to-end: a rectangle drawn on a fine-pixel window, rescaled onto a
+    coarse-pixel window covering the same physical field of view, should
+    mask approximately the same physical area."""
+    from pyvistra.data.shapes import mask_for, rescale_shape
+
+    sd = ShapeData()
+    # Window A: 200x200px at 0.1um/px (20x20um FOV). Rect spans physical
+    # (2,2)-(10,10)um -> pixel (20,20)-(100,100) in A.
+    sid = sd.add(RECTANGLE, [20, 20, 100, 100])
+    rec = sd.get(sid)
+
+    # Window B: 100x100px at 0.2um/px -- same 20x20um FOV.
+    new_rec = rescale_shape(rec, scale_src_yx=(0.1, 0.1), scale_dst_yx=(0.2, 0.2))
+    mask = mask_for(new_rec, Y=100, X=100)
+    assert mask is not None
+    # Physical (2,2)-(10,10)um at 0.2um/px -> pixel (10,10)-(50,50) in B.
+    assert mask[10:50, 10:50].all()
+    assert not mask[0, 0]

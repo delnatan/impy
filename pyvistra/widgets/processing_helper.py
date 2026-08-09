@@ -57,12 +57,21 @@ class BufferProcessingRunner:
         output_meta,
         *,
         reuse_existing_buffer: bool = False,
+        source_window=None,
     ) -> Tuple[Readable5D, Writable5D]:
         from pyvistra.io import ImageBuffer
 
+        # `source_window` lets a dialog read from a window other than the
+        # one it's attached to (e.g. KymographDialog sampling a shape drawn
+        # on `self.viewer` against a different, currently-selected target
+        # window) while output routing still goes through `self.viewer`'s
+        # ImageOutputSelector, unaffected. Defaults to `self.viewer` so
+        # every existing caller (e.g. z_projection_dialog.py, which never
+        # passes this) is unaffected.
+        source = source_window if source_window is not None else self.viewer
         # Every 5D proxy/buffer is refcounted via RefCountMixin, so
         # acquire() is always available.
-        self.source_data = self.viewer.img_data.acquire()
+        self.source_data = source.img_data.acquire()
         self.output_meta = output_meta
         self.output_type = self.output_selector.get_selection_type()
         self.output_viewer = None

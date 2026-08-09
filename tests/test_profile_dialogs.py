@@ -131,3 +131,111 @@ def test_radial_profile_skips_mismatched_pixel_space():
     assert len(dlg._computed_series) == 1
     assert dlg._computed_series[0]["window_id"] == win_a.window_id
     assert "skipped" in dlg.status_label.text()
+
+
+# ---------------------------------------------------------------------------
+# WindowSeriesMixin lifecycle: line profile and radial profile deliberately
+# diverge in a couple of spots (see hook docstrings in
+# window_series_mixin.py); these exercise exactly those spots so a future
+# refactor can't silently unify them by accident.
+# ---------------------------------------------------------------------------
+
+def test_line_profile_source_window_close_preserves_shape_data():
+    img = np.zeros((20, 20), dtype=np.float32)
+    win = imshow(img[None, None, None, :, :], "A")
+    layer = win.add_shape_layer("Shapes")
+    cmd = AddShape(LINE, [0, 10, 19, 10], t=0, z=0, label="line")
+    layer.undo_stack.push(cmd, layer.data)
+    sid = cmd.shape_id
+
+    dlg = get_line_profile_dialog()
+    dlg._clear_series()
+    dlg.set_shape_source(win, layer, sid)
+    assert dlg.current_line_data is not None
+
+    win.close()
+
+    assert dlg.source_window is None
+    # Deliberately NOT reset on window close (only on _clear_series/cleanup)
+    # -- see WindowSeriesMixin._on_source_window_closed's docstring.
+    assert dlg.current_line_data is not None
+    assert win.window_id not in dlg.series_config
+
+
+def test_radial_profile_source_window_close_clears_circle_data():
+    img = np.zeros((20, 20), dtype=np.float32)
+    win = imshow(img[None, None, None, :, :], "A")
+    layer = win.add_shape_layer("Shapes")
+    cmd = AddShape(CIRCLE, [10, 10, 15, 10], t=0, z=0, label="c")
+    layer.undo_stack.push(cmd, layer.data)
+    sid = cmd.shape_id
+
+    dlg = get_radial_profile_dialog()
+    dlg._clear_series()
+    dlg.set_shape_source(win, layer, sid)
+    assert dlg.current_circle_data is not None
+
+    win.close()
+
+    assert dlg.source_window is None
+    assert dlg.current_circle_data is None
+    assert win.window_id not in dlg.series_config
+
+
+def test_line_profile_series_window_removed_on_close():
+    img_a = np.zeros((20, 20), dtype=np.float32)
+    win_a = imshow(img_a[None, None, None, :, :], "A")
+    img_b = np.zeros((20, 20), dtype=np.float32)
+    win_b = imshow(img_b[None, None, None, :, :], "B")
+
+    layer = win_a.add_shape_layer("Shapes")
+    cmd = AddShape(LINE, [0, 10, 19, 10], t=0, z=0, label="line")
+    layer.undo_stack.push(cmd, layer.data)
+    sid = cmd.shape_id
+
+    dlg = get_line_profile_dialog()
+    dlg._clear_series()
+    dlg.set_shape_source(win_a, layer, sid)
+    dlg._add_series_for_window(win_b)
+    assert win_b.window_id in dlg.series_config
+
+    win_b.close()
+
+    assert win_b.window_id not in dlg.series_config
+    assert all(s["window_id"] != win_b.window_id for s in dlg._computed_series)
+
+
+def test_line_profile_refreshes_on_window_activation():
+    img = np.zeros((20, 20), dtype=np.float32)
+    win = imshow(img[None, None, None, :, :], "A")
+    layer = win.add_shape_layer("Shapes")
+    cmd = AddShape(LINE, [0, 10, 19, 10], t=0, z=0, label="line")
+    layer.undo_stack.push(cmd, layer.data)
+    sid = cmd.shape_id
+
+    dlg = get_line_profile_dialog()
+    dlg._clear_series()
+    dlg.set_shape_source(win, layer, sid)
+
+    calls = []
+    dlg._refresh_profiles = lambda: calls.append(1)
+    win.window_activated.emit(win)
+    assert calls, "LineProfileDialog should refresh when a window activates while it has shape data"
+
+
+def test_radial_profile_does_not_refresh_on_window_activation():
+    img = np.zeros((20, 20), dtype=np.float32)
+    win = imshow(img[None, None, None, :, :], "A")
+    layer = win.add_shape_layer("Shapes")
+    cmd = AddShape(CIRCLE, [10, 10, 15, 10], t=0, z=0, label="c")
+    layer.undo_stack.push(cmd, layer.data)
+    sid = cmd.shape_id
+
+    dlg = get_radial_profile_dialog()
+    dlg._clear_series()
+    dlg.set_shape_source(win, layer, sid)
+
+    calls = []
+    dlg._refresh_profiles = lambda: calls.append(1)
+    win.window_activated.emit(win)
+    assert not calls, "RadialProfileDialog historically doesn't refresh on window activation"

@@ -17,31 +17,25 @@ from collections import OrderedDict
 
 import numpy as np
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QListWidget,
-    QListWidgetItem,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
 
 from .. import colors as tokens
-from .line_profile import (
-    LineProfileWidget,
-    FALLBACK_COLORS,
-    _to_qcolor,
-    window_is_frequency_space,
-)
+from ..data import calibration
+from ..data.calibration import window_is_frequency_space
+from .line_profile import LineProfileWidget
+from .window_series_mixin import WindowSeriesMixin
 from ..ui.comparison import paired_window
-from ..ui.manager import manager
 from ..data.shapes import CIRCLE, EVT_EDITED, EVT_REMOVED, EVT_BULK
 
 # Singleton instance
@@ -102,9 +96,10 @@ def radial_profile_dialog_exists():
     return _radial_profile_dialog is not None
 
 
-class RadialProfileDialog(QDialog):
+class RadialProfileDialog(WindowSeriesMixin, QDialog):
     """Floating dialog comparing radial/perimeter intensity profiles of a
-    CIRCLE shape across one or more windows."""
+    CIRCLE shape across one or more windows. Window/series bookkeeping is
+    shared with LineProfileDialog via :class:`WindowSeriesMixin`."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -124,14 +119,10 @@ class RadialProfileDialog(QDialog):
         self.series_config = OrderedDict()
         self._computed_series = []
 
-        self._connected_windows = set()
         self._is_shutting_down = False
 
         self._setup_ui()
-
-        manager.window_registered.connect(self._on_window_registered)
-        for window in manager.get_all().values():
-            self._connect_window(window)
+        self._init_window_series()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -203,55 +194,24 @@ class RadialProfileDialog(QDialog):
     # ------------------------------------------------------------------
     # Window bookkeeping (mirrors LineProfileDialog)
     # ------------------------------------------------------------------
-    def _on_window_registered(self, window):
-        if self._is_shutting_down:
-            return
-        self._connect_window(window)
-
-    def _connect_window(self, window):
-        if window in self._connected_windows:
-            return
-        window.window_activated.connect(self._on_window_activated)
-        window.window_closing.connect(self._on_window_closing)
+    # -- WindowSeriesMixin hooks --------------------------------------
+    def _connect_extra_series_signals(self, window):
         window.view_changed.connect(self._on_view_changed)
-        self._connected_windows.add(window)
 
-    def _disconnect_window(self, window):
-        if window not in self._connected_windows:
-            return
-        try:
-            window.window_activated.disconnect(self._on_window_activated)
-            window.window_closing.disconnect(self._on_window_closing)
-            window.view_changed.disconnect(self._on_view_changed)
-        except (TypeError, RuntimeError):
-            pass
-        self._connected_windows.discard(window)
+    def _disconnect_extra_series_signals(self, window):
+        window.view_changed.disconnect(self._on_view_changed)
 
-    def _on_window_activated(self, window):
-        if self._is_shutting_down:
-            return
-        self.active_window = window
+    def _on_source_window_closed(self):
+        self.current_circle_data = None
 
-    def _on_window_closing(self, window):
-        self._disconnect_window(window)
-        wid = window.window_id
-        if wid in self.series_config:
-            self.series_config.pop(wid, None)
-            self._refresh_series_list()
-            self._refresh_profiles()
-        if window == self.active_window:
-            self.active_window = None
-        if window == self.source_window:
-            self.source_window = None
-            self.current_circle_data = None
-            self._unsubscribe_from_shape_source()
+    def _has_shape_source(self) -> bool:
+        return self.current_circle_data is not None
 
-    def _on_view_changed(self, window):
-        if self._is_shutting_down or self.current_circle_data is None:
-            return
-        source_wid = getattr(self.source_window, "window_id", None)
-        if window.window_id in self.series_config or window.window_id == source_wid:
-            self._refresh_profiles()
+    def _reset_shape_source_data(self):
+        self.current_circle_data = None
+
+    def _empty_status_text(self) -> str:
+        return "Select a circle shape to start"
 
     # ------------------------------------------------------------------
     # Circle shape source
@@ -327,154 +287,6 @@ class RadialProfileDialog(QDialog):
         self._source_shape_id = None
 
     # ------------------------------------------------------------------
-    # Series management (mirrors LineProfileDialog)
-    # ------------------------------------------------------------------
-    def _add_active_window_series(self):
-        if self.active_window is None:
-            self.status_label.setText("No active window")
-            return
-        self._add_series_for_window(self.active_window)
-        self._refresh_profiles()
-
-    def _add_window_series_dialog(self):
-        windows = list(manager.get_all().values())
-        labels = [f"[{w.window_id}] {w.windowTitle()}" for w in windows]
-        if not windows:
-            self.status_label.setText("No image windows available")
-            return
-        item, ok = QInputDialog.getItem(
-            self, "Add Window", "Select window to compare:", labels, 0, False,
-        )
-        if not ok or not item:
-            return
-        idx = labels.index(item)
-        self._add_series_for_window(windows[idx])
-        self._refresh_profiles()
-
-    def _add_series_for_window(self, window, channel_idx=None):
-        wid = window.window_id
-        if wid in self.series_config:
-            return
-        if channel_idx is None:
-            channel_idx = int(window.c_idx)
-        num_channels = int(window.C)
-        channel_idx = int(np.clip(channel_idx, 0, max(0, num_channels - 1)))
-        color = self._get_window_channel_color(window, channel_idx, len(self.series_config))
-        self.series_config[wid] = {
-            "window": window,
-            "channel": channel_idx,
-            "visible": True,
-            "label": f"[{window.window_id}] {window.windowTitle()}",
-            "color": color,
-        }
-        self._refresh_series_list(select_wid=wid)
-
-    def _remove_selected_series(self):
-        item = self.series_list.currentItem()
-        if item is None:
-            return
-        wid = item.data(Qt.UserRole)
-        self.series_config.pop(wid, None)
-        self._refresh_series_list()
-        self._refresh_profiles()
-
-    def _clear_series(self):
-        self.series_config.clear()
-        self._computed_series = []
-        self.current_circle_data = None
-        self.source_window = None
-        self._unsubscribe_from_shape_source()
-        self._refresh_series_list()
-        self.profile_widget.clear()
-        self.status_label.setText("Select a circle shape to start")
-
-    def _refresh_series_list(self, select_wid=None):
-        selected_wid = None
-        current_item = self.series_list.currentItem()
-        if current_item is not None:
-            selected_wid = current_item.data(Qt.UserRole)
-
-        self.series_list.blockSignals(True)
-        self.series_list.clear()
-
-        all_ch = self.all_channels_cb.isChecked()
-        for wid, cfg in self.series_config.items():
-            label = cfg.get("label", f"[{wid}] Window")
-            if all_ch:
-                n_ch = self._num_channels(cfg.get("window")) if cfg.get("window") else 1
-                ch_text = f"All ({n_ch}ch)"
-            else:
-                ch_text = f"Ch{int(cfg.get('channel', 0)) + 1}"
-            item = QListWidgetItem(f"{label} | {ch_text}")
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            item.setCheckState(Qt.Checked if cfg.get("visible", True) else Qt.Unchecked)
-            item.setData(Qt.UserRole, wid)
-            self.series_list.addItem(item)
-
-        target_wid = select_wid if select_wid is not None else selected_wid
-        if target_wid is not None:
-            for i in range(self.series_list.count()):
-                item = self.series_list.item(i)
-                if item.data(Qt.UserRole) == target_wid:
-                    self.series_list.setCurrentItem(item)
-                    break
-
-        self.series_list.blockSignals(False)
-        self._on_series_selection_changed()
-
-    def _on_series_item_changed(self, item):
-        wid = item.data(Qt.UserRole)
-        if wid not in self.series_config:
-            return
-        self.series_config[wid]["visible"] = item.checkState() == Qt.Checked
-        self._refresh_profiles()
-
-    def _on_series_selection_changed(self):
-        item = self.series_list.currentItem()
-        if item is None:
-            self.series_channel_spin.blockSignals(True)
-            self.series_channel_spin.setRange(1, 1)
-            self.series_channel_spin.setValue(1)
-            self.series_channel_spin.blockSignals(False)
-            self.series_channel_spin.setEnabled(False)
-            return
-        wid = item.data(Qt.UserRole)
-        if wid not in self.series_config:
-            return
-        cfg = self.series_config[wid]
-        window = cfg["window"]
-        n_channels = int(window.C)
-        ch = int(cfg.get("channel", 0)) + 1
-        self.series_channel_spin.blockSignals(True)
-        self.series_channel_spin.setRange(1, max(1, n_channels))
-        self.series_channel_spin.setValue(int(np.clip(ch, 1, max(1, n_channels))))
-        self.series_channel_spin.blockSignals(False)
-        self.series_channel_spin.setEnabled(
-            n_channels > 1 and not self.all_channels_cb.isChecked()
-        )
-
-    def _on_all_channels_toggled(self, checked):
-        self.series_channel_spin.setEnabled(not checked and self.series_list.currentItem() is not None)
-        self._refresh_series_list()
-        self._refresh_profiles()
-
-    def _on_selected_channel_changed(self, value):
-        item = self.series_list.currentItem()
-        if item is None:
-            return
-        wid = item.data(Qt.UserRole)
-        if wid not in self.series_config:
-            return
-        cfg = self.series_config[wid]
-        window = cfg["window"]
-        n_channels = int(window.C)
-        new_channel = int(np.clip(value - 1, 0, max(0, n_channels - 1)))
-        cfg["channel"] = new_channel
-        cfg["color"] = self._get_window_channel_color(window, new_channel, 0)
-        self._refresh_series_list(select_wid=wid)
-        self._refresh_profiles()
-
-    # ------------------------------------------------------------------
     # Sampling + plotting
     # ------------------------------------------------------------------
     def _refresh_profiles(self):
@@ -490,12 +302,8 @@ class RadialProfileDialog(QDialog):
         mode = self.mode_combo.currentData()
 
         is_frequency_space = window_is_frequency_space(self.source_window)
-        src_scale = (
-            getattr(self.source_window, "meta", {}).get("scale")
-            if self.source_window
-            else None
-        )
-        has_phys = src_scale is not None and len(src_scale) >= 3
+        src_scale_yx = calibration.window_scale_yx(self.source_window)
+        has_phys = src_scale_yx is not None
 
         if has_phys:
             # Physical-space center/radius: the coordinate space shared
@@ -504,10 +312,10 @@ class RadialProfileDialog(QDialog):
             # anisotropic generalization (that would make them ellipses),
             # so radius uses the same averaged sx/sy approximation as the
             # rest of this dialog.
-            radial_scale_src = 0.5 * (float(src_scale[1]) + float(src_scale[2]))
-            cx_phys = cx * float(src_scale[2])
-            cy_phys = cy * float(src_scale[1])
-            radius_phys = radius * radial_scale_src
+            cx_phys, cy_phys = calibration.points_px_to_phys(
+                np.array([[cx, cy]]), src_scale_yx
+            )[0]
+            radius_phys = calibration.radius_px_to_phys(radius, src_scale_yx)
         else:
             cx_phys = cy_phys = radius_phys = None
 
@@ -544,19 +352,16 @@ class RadialProfileDialog(QDialog):
                     # same physical quantity -- skip rather than mislabel.
                     skipped_labels.append(label)
                     continue
-                win_scale = window.meta.get("scale")
-                if win_scale is not None and len(win_scale) >= 3:
-                    sy_w, sx_w = float(win_scale[1]), float(win_scale[2])
-                else:
-                    sy_w, sx_w = 1.0, 1.0
-                radial_scale_w = 0.5 * (sy_w + sx_w)
+                win_scale_yx = calibration.window_scale_yx(window) or (1.0, 1.0)
+                radial_scale_w = 0.5 * (win_scale_yx[0] + win_scale_yx[1])
                 # Convert the shared physical circle into *this* window's
                 # own pixel grid -- reusing the source window's raw pixel
                 # center/radius would sample the wrong physical region
                 # whenever pixel sizes differ between windows.
-                cx_w = cx_phys / sx_w
-                cy_w = cy_phys / sy_w
-                radius_w = radius_phys / radial_scale_w
+                cx_w, cy_w = calibration.points_phys_to_px(
+                    np.array([[cx_phys, cy_phys]]), win_scale_yx
+                )[0]
+                radius_w = calibration.radius_phys_to_px(radius_phys, win_scale_yx)
             else:
                 cx_w, cy_w, radius_w = cx, cy, radius
                 radial_scale_w = None
@@ -629,15 +434,11 @@ class RadialProfileDialog(QDialog):
         if image_2d is None:
             return None, channel_idx
 
-        from scipy.ndimage import map_coordinates
-
         theta = np.linspace(0.0, 2 * np.pi, n_samples, endpoint=False)
         xs = cx + radius * np.cos(theta)
         ys = cy + radius * np.sin(theta)
-        coords = np.array([ys, xs], dtype=float)
-        profile = map_coordinates(
-            np.asarray(image_2d, dtype=float), coords, order=1, mode="nearest",
-        )
+        path_xy = np.column_stack([xs, ys])
+        profile = calibration.sample_along_path(image_2d, path_xy)
         return profile, channel_used
 
     @staticmethod
@@ -651,19 +452,6 @@ class RadialProfileDialog(QDialog):
             channel_used = int(np.clip(channel_idx, 0, max(0, cache.shape[0] - 1)))
             return cache[channel_used], channel_used
         return None, channel_idx
-
-    @staticmethod
-    def _num_channels(window):
-        cache = window.renderer.current_slice_cache
-        if cache is not None and cache.ndim == 3:
-            return cache.shape[0]
-        return int(window.C)
-
-    def _get_window_channel_color(self, window, channel_idx, fallback_idx):
-        colors = window.renderer.channel_colors
-        if channel_idx < len(colors):
-            return _to_qcolor(colors[channel_idx], QColor(FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)])).name()
-        return FALLBACK_COLORS[fallback_idx % len(FALLBACK_COLORS)]
 
     # ------------------------------------------------------------------
     # Export
@@ -751,22 +539,3 @@ class RadialProfileDialog(QDialog):
 
         self.status_label.setText(f"Exported {len(visible)} series to {path}")
 
-    def closeEvent(self, event):
-        if self._is_shutting_down:
-            super().closeEvent(event)
-        else:
-            event.ignore()
-            self.hide()
-
-    def cleanup(self):
-        self._is_shutting_down = True
-        try:
-            manager.window_registered.disconnect(self._on_window_registered)
-        except (TypeError, RuntimeError):
-            pass
-        for window in list(self._connected_windows):
-            self._disconnect_window(window)
-        self._unsubscribe_from_shape_source()
-        self.active_window = None
-        self.source_window = None
-        self.current_circle_data = None
