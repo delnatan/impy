@@ -11,6 +11,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
+from .. import colors as tokens
 from ..io import coerce_scale_zyx
 from .output_selector import ImageOutputSelector
 
@@ -111,12 +112,12 @@ class FFTDialog(QDialog):
         main_layout.addLayout(buttons)
 
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color: #888;")
+        self.status_label.setStyleSheet(f"color: {tokens.TEXT_FAINT};")
         main_layout.addWidget(self.status_label)
 
     def _set_error(self, message):
         self.status_label.setText(f"Error: {message}")
-        self.status_label.setStyleSheet("color: #F44;")
+        self.status_label.setStyleSheet(f"color: {tokens.DANGER};")
 
     def _compute(self):
         T, Z, C, Y, X = self.viewer.img_data.shape
@@ -132,7 +133,7 @@ class FFTDialog(QDialog):
         out_shape = (T, Z, C, Y, x_out)
 
         self.status_label.setText("Computing...")
-        self.status_label.setStyleSheet("color: #888;")
+        self.status_label.setStyleSheet(f"color: {tokens.TEXT_FAINT};")
         self.compute_btn.setEnabled(False)
         QApplication.processEvents()
 
@@ -194,10 +195,10 @@ class FFTDialog(QDialog):
             sent = self.output_selector.send(buffer, out_meta)
             if sent is not None:
                 self.status_label.setText("Done")
-                self.status_label.setStyleSheet("color: #4A4;")
+                self.status_label.setStyleSheet(f"color: {tokens.SUCCESS};")
             else:
                 self.status_label.setText("Computed (output cancelled)")
-                self.status_label.setStyleSheet("color: #888;")
+                self.status_label.setStyleSheet(f"color: {tokens.TEXT_FAINT};")
         except Exception as exc:
             self._set_error(str(exc))
         finally:

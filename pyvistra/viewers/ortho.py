@@ -13,6 +13,7 @@ from qtpy.QtWidgets import (
 from vispy import scene
 from vispy.visuals.transforms import STTransform
 
+from .. import colors as tokens
 from ..visuals.overlays import ScaleTimestampOverlay
 from ..visuals.image import CompositeImageVisual, MultiViewChannelProxy
 from ..widgets import (
@@ -334,7 +335,7 @@ class OrthoViewer(QMainWindow):
         # -- 4. Info Bar --
         self.info_label = QLabel("Hover over image")
         self.info_label.setStyleSheet(
-            "background-color: #333; color: #EEE; padding: 4px;"
+            f"background-color: {tokens.BG_SURFACE}; color: {tokens.TEXT_PRIMARY}; padding: 4px;"
         )
         self.info_label.setFixedHeight(25)
         self.main_layout.addWidget(self.info_label, 0)

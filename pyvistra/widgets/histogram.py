@@ -3,10 +3,12 @@ from qtpy.QtCore import QRectF, Qt, Signal
 from qtpy.QtGui import QBrush, QColor, QPainter, QPen, QFont
 from qtpy.QtWidgets import QWidget
 
+from .. import colors as tokens
+
 # Theme Constants
-WIDGET_BG = QColor(32, 32, 32)
-TEXT_COLOR = QColor(224, 224, 224)
-HANDLE_COLOR = QColor(255, 255, 255)
+WIDGET_BG = QColor(tokens.BG_ELEVATED)
+TEXT_COLOR = QColor(tokens.TEXT_PRIMARY)
+HANDLE_COLOR = QColor(tokens.TEXT_PRIMARY)
 HANDLE_WIDTH = 6
 
 

@@ -33,6 +33,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
+from .. import colors as tokens
 from .line_profile import (
     LineProfileWidget,
     FALLBACK_COLORS,
@@ -196,7 +197,7 @@ class RadialProfileDialog(QDialog):
         layout.addWidget(self.profile_widget, 1)
 
         self.status_label = QLabel("Select a circle shape to start")
-        self.status_label.setStyleSheet("color: #AAA; font-size: 10px;")
+        self.status_label.setStyleSheet(f"color: {tokens.TEXT_SECONDARY}; font-size: 10px;")
         layout.addWidget(self.status_label)
 
     # ------------------------------------------------------------------

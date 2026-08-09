@@ -35,6 +35,8 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
+from .. import colors as tokens
+
 
 class SourceSelector(QGroupBox):
     """Group box exposing a window-or-file input source.
@@ -72,7 +74,7 @@ class SourceSelector(QGroupBox):
         outer.addLayout(row)
 
         self.info_label = QLabel("")
-        self.info_label.setStyleSheet("color: #888; font-size: 10px;")
+        self.info_label.setStyleSheet(f"color: {tokens.TEXT_FAINT}; font-size: 10px;")
         outer.addWidget(self.info_label)
 
         from pyvistra.ui.manager import manager

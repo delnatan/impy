@@ -15,6 +15,7 @@ from qtpy.QtCore import QRect, Qt, Signal
 from qtpy.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from qtpy.QtWidgets import QMenu, QWidget
 
+from .. import colors as tokens
 from ..data.overlay_state import ADDITIVE, DEFAULT_COLORS
 from ..data.thumbnail_cache import (
     DecodeCache,
@@ -265,7 +266,7 @@ class ThumbnailGridWidget(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(event.rect(), QColor("#1a1a1a"))
+        painter.fillRect(event.rect(), QColor(tokens.BG_BASE))
 
         if self._paths:
             cell_h = self._cell_size()[1]
@@ -285,14 +286,14 @@ class ThumbnailGridWidget(QWidget):
         image_rect = QRect(rect.x(), rect.y(), self._tile_size, self._tile_size)
 
         pixmap = self._get_pixmap(path)
-        painter.fillRect(image_rect, QColor("#111111"))
+        painter.fillRect(image_rect, QColor(tokens.BG_BASE))
         if pixmap is not None:
             x = image_rect.x() + (image_rect.width() - pixmap.width()) // 2
             y = image_rect.y() + (image_rect.height() - pixmap.height()) // 2
             painter.drawPixmap(x, y, pixmap)
 
         selected = path in self._selected_set
-        pen = QPen(QColor("#4da6ff") if selected else QColor("#333333"))
+        pen = QPen(QColor(tokens.ACCENT) if selected else QColor(tokens.BORDER))
         pen.setWidth(2 if selected else 1)
         painter.setPen(pen)
         # drawRect fills with the *current brush*, not just strokes the
@@ -308,7 +309,7 @@ class ThumbnailGridWidget(QWidget):
             self._paint_badge(painter, image_rect, label, color_hex)
 
         if self._show_info:
-            painter.setPen(QColor("#aaaaaa"))
+            painter.setPen(QColor(tokens.TEXT_SECONDARY))
             name = Path(path).stem
             text_rect = QRect(
                 rect.x(),

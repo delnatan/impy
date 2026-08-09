@@ -26,6 +26,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
+from .. import colors as tokens
 from ..data.shapes import (
     ALL_FRAMES,
     LINE,
@@ -206,7 +207,7 @@ class KymographDialog(QDialog):
         outer.addWidget(self._progress)
 
         self._status = QLabel("Ready")
-        self._status.setStyleSheet("color: #888;")
+        self._status.setStyleSheet(f"color: {tokens.TEXT_FAINT};")
         outer.addWidget(self._status)
 
         btn_row = QHBoxLayout()
@@ -229,7 +230,7 @@ class KymographDialog(QDialog):
             return
         if self._shape_id not in self._layer.data:
             self._status.setText("Shape no longer exists.")
-            self._status.setStyleSheet("color: #F44;")
+            self._status.setStyleSheet(f"color: {tokens.DANGER};")
             return
         t0, t1 = sorted(
             (int(self._t_start.value()), int(self._t_end.value()))
@@ -261,7 +262,7 @@ class KymographDialog(QDialog):
         self._progress.setRange(0, max(1, total))
         self._progress.setValue(0)
         self._status.setText(f"Running kymograph... 0/{total}")
-        self._status.setStyleSheet("color: #888;")
+        self._status.setStyleSheet(f"color: {tokens.TEXT_FAINT};")
         self._start_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
 
@@ -279,7 +280,7 @@ class KymographDialog(QDialog):
         if self._runner.worker is not None:
             self._runner.cancel()
             self._status.setText("Cancelling...")
-            self._status.setStyleSheet("color: #C84;")
+            self._status.setStyleSheet(f"color: {tokens.WARNING};")
             self._cancel_btn.setEnabled(False)
 
     def _on_progress(self, done, total):
@@ -291,25 +292,25 @@ class KymographDialog(QDialog):
             result = self._runner.finalize_output()
             if result:
                 self._status.setText(f"Completed: saved to {result}")
-                self._status.setStyleSheet("color: #4A4;")
+                self._status.setStyleSheet(f"color: {tokens.SUCCESS};")
             else:
                 self._status.setText("Completed (save cancelled)")
-                self._status.setStyleSheet("color: #C84;")
+                self._status.setStyleSheet(f"color: {tokens.WARNING};")
         else:
             self._status.setText("Completed")
-            self._status.setStyleSheet("color: #4A4;")
+            self._status.setStyleSheet(f"color: {tokens.SUCCESS};")
         self._start_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
 
     def _on_cancelled(self):
         self._status.setText("Cancelled (partial result kept)")
-        self._status.setStyleSheet("color: #C84;")
+        self._status.setStyleSheet(f"color: {tokens.WARNING};")
         self._start_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
 
     def _on_error(self, msg):
         self._status.setText(f"Error: {msg}")
-        self._status.setStyleSheet("color: #F44;")
+        self._status.setStyleSheet(f"color: {tokens.DANGER};")
         self._start_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
 

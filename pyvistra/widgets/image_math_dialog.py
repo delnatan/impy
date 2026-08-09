@@ -13,6 +13,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from pyvistra import colors as tokens
 from pyvistra.ui.manager import manager
 
 from .output_selector import ImageOutputSelector
@@ -104,7 +105,7 @@ class ImageMathDialog(QDialog):
         main_layout.addLayout(buttons)
 
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color: #888;")
+        self.status_label.setStyleSheet(f"color: {tokens.TEXT_FAINT};")
         main_layout.addWidget(self.status_label)
 
         self._on_operand_changed(self.operand_combo.currentIndex())
@@ -134,7 +135,7 @@ class ImageMathDialog(QDialog):
 
     def _set_error(self, message):
         self.status_label.setText(f"Error: {message}")
-        self.status_label.setStyleSheet("color: #F44;")
+        self.status_label.setStyleSheet(f"color: {tokens.DANGER};")
 
     def _apply(self):
         a = np.asarray(self.viewer.img_data[:]).astype(np.float32, copy=False)
@@ -178,7 +179,7 @@ class ImageMathDialog(QDialog):
         sent = self.output_selector.send(buffer, out_meta)
         if sent is not None:
             self.status_label.setText("Done")
-            self.status_label.setStyleSheet("color: #4A4;")
+            self.status_label.setStyleSheet(f"color: {tokens.SUCCESS};")
         else:
             self.status_label.setText("Computed (output cancelled)")
-            self.status_label.setStyleSheet("color: #888;")
+            self.status_label.setStyleSheet(f"color: {tokens.TEXT_FAINT};")

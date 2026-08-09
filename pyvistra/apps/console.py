@@ -27,6 +27,8 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from .. import colors as tokens
+
 
 class OutputCapture:
     """Context manager to capture stdout/stderr."""
@@ -121,12 +123,12 @@ class ConsoleOutput(QPlainTextEdit):
         self.setTabStopDistance(tab_width)
 
     def _setup_style(self):
-        self.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
+        self.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {tokens.BG_ELEVATED};
+                color: {tokens.TEXT_PRIMARY};
                 border: none;
-            }
+            }}
         """)
 
     def append_text(self, text, color=None):
@@ -151,7 +153,7 @@ class ConsoleOutput(QPlainTextEdit):
         lines = code.split("\n")
         for i, line in enumerate(lines):
             prefix = ">>> " if i == 0 else "... "
-            self.append_text(prefix + line, "#569cd6")
+            self.append_text(prefix + line, tokens.ACCENT)
 
     def append_output(self, text):
         """Append output text."""
@@ -161,12 +163,12 @@ class ConsoleOutput(QPlainTextEdit):
     def append_error(self, text):
         """Append error text in red."""
         if text.strip():
-            self.append_text(text.rstrip(), "#f44747")
+            self.append_text(text.rstrip(), tokens.DANGER)
 
     def append_result(self, text):
         """Append result text in green."""
         if text.strip():
-            self.append_text(text.rstrip(), "#4ec9b0")
+            self.append_text(text.rstrip(), tokens.SUCCESS)
 
 
 class PythonConsole(QWidget):
@@ -230,7 +232,7 @@ class PythonConsole(QWidget):
         header = QLabel(
             "Python Console - Access pyvistra objects interactively"
         )
-        header.setStyleSheet("color: #888; font-size: 11px;")
+        header.setStyleSheet(f"color: {tokens.TEXT_FAINT}; font-size: 11px;")
         layout.addWidget(header)
 
         # Splitter for output/input
@@ -369,7 +371,7 @@ Example:
   >>> w.layers          # Shapes/points/tracks/labels layers
   >>> reload('my_module')
 """
-        self.output.append_text(welcome, "#888888")
+        self.output.append_text(welcome, tokens.TEXT_FAINT)
 
     def _execute(self, code_str):
         """Execute Python code and display results."""

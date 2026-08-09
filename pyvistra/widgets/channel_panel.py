@@ -34,6 +34,7 @@ from qtpy.QtWidgets import (
 )
 
 from pyvistra import colormaps as _colormaps
+from pyvistra import colors as tokens
 from pyvistra.contrast import compute_percentile_clim
 from .histogram import (
     CompactHistogramWidget,
@@ -108,21 +109,21 @@ class ChannelRow(QWidget):
         self.color_btn.setCursor(Qt.PointingHandCursor)
         self.color_btn.setToolTip("Change colormap")
         self.color_btn.setStyleSheet(
-            "QPushButton { border: 1px solid #555; border-radius: 3px; "
-            "background: #1f2937; }"
-            "QPushButton:hover { border-color: #9ca3af; }"
+            f"QPushButton {{ border: 1px solid {tokens.BORDER}; border-radius: {tokens.RADIUS}; "
+            f"background: {tokens.BG_ELEVATED}; }}"
+            f"QPushButton:hover {{ border-color: {tokens.TEXT_SECONDARY}; }}"
         )
         self._update_color_swatch(colormap_name)
         self.color_btn.clicked.connect(self._show_colormap_menu)
         top_row.addWidget(self.color_btn)
 
         self.name_label = QLabel(channel_name)
-        self.name_label.setStyleSheet("color: #EEE; font-size: 11px;")
+        self.name_label.setStyleSheet(f"color: {tokens.TEXT_PRIMARY}; font-size: 11px;")
         self.name_label.setToolTip(channel_name)
         top_row.addWidget(self.name_label, 1)
 
         gamma_label = QLabel("γ")
-        gamma_label.setStyleSheet("color: #AAA; font-size: 10px;")
+        gamma_label.setStyleSheet(f"color: {tokens.TEXT_SECONDARY}; font-size: 10px;")
         top_row.addWidget(gamma_label)
 
         self.gamma_spin = QDoubleSpinBox()
@@ -390,7 +391,7 @@ class ChannelPanel(QWidget):
             if c < n_channels - 1:
                 separator = QFrame()
                 separator.setFrameShape(QFrame.HLine)
-                separator.setStyleSheet("color: #3a3a3a;")
+                separator.setStyleSheet(f"color: {tokens.BORDER};")
                 self.rows_layout.addWidget(separator)
 
         self.rows_layout.addStretch()

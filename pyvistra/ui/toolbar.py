@@ -19,6 +19,7 @@ from qtpy.QtWidgets import (
 )
 from vispy import app
 
+from .. import colors as tokens
 from .._version import get_version
 from ..apps.console import console_exists, get_console
 from .manager import manager
@@ -75,9 +76,9 @@ class Toolbar(QMainWindow):
         self.tools.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.tools.setIconSize(QSize(18, 18))
         self.tools.setStyleSheet(
-            "QToolButton { padding: 3px; border-radius: 4px; }"
-            "QToolButton:checked { background: rgba(45, 106, 79, 0.8); }"
-            "QToolButton:hover { background: rgba(255, 255, 255, 0.2); }"
+            f"QToolButton {{ padding: 3px; border-radius: {tokens.RADIUS}; background: transparent; }}"
+            f"QToolButton:checked {{ background: {tokens.ACCENT_PRESSED}; }}"
+            f"QToolButton:hover {{ background: {tokens.BG_ELEVATED_HOVER}; }}"
         )
 
         self._tool_labels = {
@@ -206,7 +207,7 @@ class Toolbar(QMainWindow):
         self.tools.addSeparator()
         self.mode_indicator = QLabel("Mode: Pan/Zoom")
         self.mode_indicator.setStyleSheet(
-            "QLabel { color: #d2d2d2; font-size: 11px; padding: 0 4px; }"
+            f"QLabel {{ color: {tokens.TEXT_SECONDARY}; font-size: 11px; padding: 0 4px; }}"
         )
         self.tools.addWidget(self.mode_indicator)
 
@@ -220,7 +221,7 @@ class Toolbar(QMainWindow):
         # load_image() call.
         self.loading_label = QLabel("")
         self.loading_label.setStyleSheet(
-            "QLabel { color: #d2d2d2; font-size: 11px; padding: 0 4px; }"
+            f"QLabel {{ color: {tokens.TEXT_SECONDARY}; font-size: 11px; padding: 0 4px; }}"
         )
         self.loading_label.setVisible(False)
         self.statusBar().addWidget(self.loading_label)

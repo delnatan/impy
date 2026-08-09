@@ -19,10 +19,12 @@ from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QColor, QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from qtpy.QtWidgets import QListWidget, QListWidgetItem
 
+from .. import colors as tokens
+
 _FLAG_COLORS = {
     "ok": None,
-    "warn": "#e0a030",
-    "error": "#f44444",
+    "warn": tokens.WARNING,
+    "error": tokens.DANGER,
 }
 
 _ICON_SIZE = 10

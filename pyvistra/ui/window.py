@@ -28,6 +28,7 @@ from qtpy.QtWidgets import (
 from superqt import QRangeSlider
 from vispy import app, scene
 
+from .. import colors as tokens
 from ..io import (
     Imaris5DProxy,
     Numpy5DProxy,
@@ -329,7 +330,7 @@ class ImageWindow(QMainWindow):
         # 4. Info Bar
         self.info_label = QLabel("Hover over image")
         self.info_label.setStyleSheet(
-            "background-color: #333; color: #EEE; padding: 4px;"
+            f"background-color: {tokens.BG_SURFACE}; color: {tokens.TEXT_PRIMARY}; padding: 4px;"
         )
         self.info_label.setFixedHeight(25)
         self.layout.addWidget(self.info_label, 0)

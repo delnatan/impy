@@ -25,6 +25,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from .. import colors as tokens
 from .histogram import WIDGET_BG, TEXT_COLOR
 from ..ui.comparison import paired_window
 from ..ui.manager import manager
@@ -479,7 +480,7 @@ class LineProfileDialog(QDialog):
         layout.addWidget(self.profile_widget, 1)
 
         self.status_label = QLabel("Select a line/polyline shape to start")
-        self.status_label.setStyleSheet("color: #AAA; font-size: 10px;")
+        self.status_label.setStyleSheet(f"color: {tokens.TEXT_SECONDARY}; font-size: 10px;")
         layout.addWidget(self.status_label)
 
     def _on_window_registered(self, window):

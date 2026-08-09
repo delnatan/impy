@@ -38,6 +38,7 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
 )
 
+from .. import colors as tokens
 from ..data.shapes import rectangle_bounds
 
 
@@ -74,7 +75,7 @@ class RegionSelector(QGroupBox):
         outer.addLayout(rect_row)
 
         self.rect_info = QLabel("")
-        self.rect_info.setStyleSheet("color: #888; font-size: 10px;")
+        self.rect_info.setStyleSheet(f"color: {tokens.TEXT_FAINT}; font-size: 10px;")
         outer.addWidget(self.rect_info)
 
         # --- Z range row ---
@@ -94,7 +95,7 @@ class RegionSelector(QGroupBox):
         outer.addLayout(z_row)
 
         self.z_info = QLabel("")
-        self.z_info.setStyleSheet("color: #888; font-size: 10px;")
+        self.z_info.setStyleSheet(f"color: {tokens.TEXT_FAINT}; font-size: 10px;")
         outer.addWidget(self.z_info)
 
         # Signal wiring (after construction).

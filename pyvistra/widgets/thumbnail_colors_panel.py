@@ -34,6 +34,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from .. import colors as tokens
 from ..data.overlay_state import ADDITIVE, OVERLAY
 
 
@@ -130,7 +131,7 @@ class _ColorRow(QWidget):
         this programmatic update."""
         self._color_hex = overlay_state.color_hex
         self.swatch.setStyleSheet(
-            f"background-color: {overlay_state.color_hex}; border: 1px solid #555;"
+            f"background-color: {overlay_state.color_hex}; border: 1px solid {tokens.BORDER};"
         )
         radio = (
             self.overlay_radio
@@ -165,7 +166,7 @@ class _ColorRow(QWidget):
             hex_color = chosen.name()
             self._color_hex = hex_color
             self.swatch.setStyleSheet(
-                f"background-color: {hex_color}; border: 1px solid #555;"
+                f"background-color: {hex_color}; border: 1px solid {tokens.BORDER};"
             )
             self.colorChanged.emit(self.channel_idx, hex_color)
 
@@ -213,7 +214,7 @@ class ThumbnailColorsPanel(QWidget):
             "up correctly.</i>"
         )
         note.setWordWrap(True)
-        note.setStyleSheet("color: #888; font-size: 10px;")
+        note.setStyleSheet(f"color: {tokens.TEXT_FAINT}; font-size: 10px;")
         layout.addWidget(note)
 
         scroll = QScrollArea()

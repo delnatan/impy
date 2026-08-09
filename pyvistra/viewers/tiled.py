@@ -37,6 +37,7 @@ from superqt import QRangeSlider
 from vispy import scene
 
 from .. import colormaps as _colormaps
+from .. import colors as tokens
 from ..contrast import compute_percentile_clim
 from ..data.annotations import TileAnnotations
 from ..data.channel_state import ChannelDisplayList
@@ -271,7 +272,7 @@ class TiledChannelPanel(QWidget):
             "<i>Adjust min/max to set global contrast. "
             "Use Auto Contrast All for per-tile optimization.</i>"
         )
-        note_label.setStyleSheet("color: #888; font-size: 10px;")
+        note_label.setStyleSheet(f"color: {tokens.TEXT_FAINT}; font-size: 10px;")
         note_label.setWordWrap(True)
         layout.addWidget(note_label)
 
@@ -559,17 +560,17 @@ class TileWidget(QFrame):
         self.setFrameStyle(QFrame.Box | QFrame.Plain)
         self.setLineWidth(1)
         self.setStyleSheet(
-            """
-            TileWidget {
-                background-color: #1a1a1a;
-                border: 1px solid #333;
-            }
-            TileWidget:hover {
-                border: 1px solid #555;
-            }
-            TileWidget[selected="true"] {
-                border: 2px solid #4da6ff;
-            }
+            f"""
+            TileWidget {{
+                background-color: {tokens.BG_BASE};
+                border: 1px solid {tokens.BORDER};
+            }}
+            TileWidget:hover {{
+                border: 1px solid {tokens.TEXT_FAINT};
+            }}
+            TileWidget[selected="true"] {{
+                border: 2px solid {tokens.ACCENT};
+            }}
             """
         )
 
@@ -579,7 +580,7 @@ class TileWidget(QFrame):
 
         # Vispy canvas
         self.canvas = scene.SceneCanvas(
-            keys=None, bgcolor="#1a1a1a", show=False
+            keys=None, bgcolor=tokens.BG_BASE, show=False
         )
         self.view = self.canvas.central_widget.add_view()
         self.view.camera = "panzoom"
@@ -607,7 +608,7 @@ class TileWidget(QFrame):
         # Info label (shows filename + view state)
         self.info_label = QLabel("")
         self.info_label.setStyleSheet(
-            "color: #aaa; font-size: 10px; padding: 2px; background: transparent;"
+            f"color: {tokens.TEXT_SECONDARY}; font-size: 10px; padding: 2px; background: transparent;"
         )
         self.info_label.setAlignment(Qt.AlignCenter)
         self.info_label.setWordWrap(True)
@@ -679,7 +680,7 @@ class TileWidget(QFrame):
         except Exception as e:
             print(f"Error loading {path}: {e}")
             self.info_label.setText("Load error")
-            self.info_label.setStyleSheet("color: #ff6666; font-size: 10px;")
+            self.info_label.setStyleSheet(f"color: {tokens.DANGER}; font-size: 10px;")
 
     def unload(self):
         """Release memory and close file handles."""
@@ -1705,7 +1706,7 @@ class TiledViewer(QMainWindow):
         # window title already carries the short name, so this stays out
         # of the way while still being one hover away.
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #888; padding: 5px;")
+        self.status_label.setStyleSheet(f"color: {tokens.TEXT_FAINT}; padding: 5px;")
         self.status_label.setToolTip(self.annotations.root_dir)
         main_layout.addWidget(self.status_label)
 
