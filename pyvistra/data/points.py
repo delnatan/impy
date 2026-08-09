@@ -12,6 +12,21 @@ class PointTable:
     """Columnar point container for localization-style annotations.
 
     Rows are sorted by (t, point_id) for efficient current-frame filtering.
+
+    ``pixel_index_coordinates`` declares which coordinate frame x/y are in,
+    set once by whoever actually knows the answer — the code constructing
+    this table — rather than guessed downstream from the data's shape or
+    provenance:
+
+    - ``False`` (default): x/y are already scene coordinates, e.g. captured
+      directly from a mouse click (``ImageWindow._map_event_to_image``).
+    - ``True``: x/y are array-index coordinates (integer detector output,
+      *or* a sub-pixel-refined position still expressed in that same frame —
+      e.g. spotfitlm's MLE Gaussian fit reports ``xc = xc_seed_int +
+      offset``, so refinement doesn't change the frame, only the precision).
+      vispy's ``Image`` places array index i's center at scene coordinate
+      i+0.5, so this table's x/y need that same +0.5 to render/hit-test in
+      the right place; see ``PointLayerVisual.pixel_offset``.
     """
 
     point_id: np.ndarray
@@ -20,6 +35,7 @@ class PointTable:
     y: np.ndarray
     z: np.ndarray | None = None
     properties: dict[str, np.ndarray] = field(default_factory=dict)
+    pixel_index_coordinates: bool = False
 
     def __post_init__(self):
         n = len(self.point_id)
@@ -71,6 +87,7 @@ class PointTable:
         t=None,
         z=None,
         properties: dict[str, object] | None = None,
+        pixel_index_coordinates: bool = False,
     ) -> "PointTable":
         x_arr = np.asarray(x, dtype=np.float32)
         y_arr = np.asarray(y, dtype=np.float32)
@@ -115,6 +132,7 @@ class PointTable:
                 y=y_arr,
                 z=z_arr,
                 properties=prop_arrays,
+                pixel_index_coordinates=bool(pixel_index_coordinates),
             )
 
         order = np.lexsort((point_id_arr, t_arr))
@@ -127,6 +145,7 @@ class PointTable:
             y=y_arr[order],
             z=None if z_arr is None else z_arr[order],
             properties=sorted_props,
+            pixel_index_coordinates=bool(pixel_index_coordinates),
         )
 
     @classmethod
@@ -139,6 +158,7 @@ class PointTable:
         point_id_col="point_id",
         t_col="t",
         z_col="z",
+        pixel_index_coordinates: bool = False,
     ) -> "PointTable":
         for col in (x_col, y_col):
             if col not in df.columns:
@@ -158,6 +178,7 @@ class PointTable:
             y=df[y_col].to_numpy(),
             z=df[z_col].to_numpy() if z_col in df.columns else None,
             properties=props,
+            pixel_index_coordinates=pixel_index_coordinates,
         )
 
     def to_dataframe(self):
@@ -180,6 +201,19 @@ class PointTable:
     @property
     def has_z(self) -> bool:
         return self.z is not None
+
+    @property
+    def scene_offset(self) -> float:
+        """Shift between this table's stored x/y and scene (display) x/y.
+
+        0.5 when ``pixel_index_coordinates`` is set, else 0.0 — the single
+        place both readers (``PointLayerVisual.pixel_offset``, hit-testing)
+        and writers (mouse-driven ``AddPoint``/drag in ``ImageWindow``)
+        derive the conversion from, so a click into an already-loaded
+        pixel-index table is converted to this table's storage convention
+        on the way in, not just compensated for on the way out.
+        """
+        return 0.5 if self.pixel_index_coordinates else 0.0
 
     @property
     def n_rows(self) -> int:
@@ -229,6 +263,7 @@ class PointTable:
             y=self.y[keep],
             z=None if self.z is None else self.z[keep],
             properties={k: v[keep] for k, v in self.properties.items()},
+            pixel_index_coordinates=self.pixel_index_coordinates,
         )
 
     def update_point(
@@ -280,6 +315,7 @@ class PointTable:
             y=y_arr,
             z=z_arr,
             properties=props,
+            pixel_index_coordinates=self.pixel_index_coordinates,
         )
 
 
@@ -298,7 +334,17 @@ def _coerce_csv_scalar(value: str):
         return value
 
 
-def load_points_csv(path) -> PointTable:
+def load_points_csv(path, *, pixel_index_coordinates: bool = False) -> PointTable:
+    """Load a PointTable from a CSV file with ``x, y[, point_id, t, z]`` columns.
+
+    ``pixel_index_coordinates`` must be supplied by the caller — it can't be
+    inferred from the file (e.g. from whether x/y look integer-valued: a
+    sub-pixel-refined position, such as from spotfitlm's MLE Gaussian fit,
+    is still expressed in array-index units, not scene units — refinement
+    only adds precision, it doesn't change the coordinate frame). Pass
+    ``True`` for detections/localizations sourced from an array-index
+    pipeline; leave ``False`` (default) for already-scene-space data.
+    """
     x = []
     y = []
     point_id = []
@@ -345,10 +391,11 @@ def load_points_csv(path) -> PointTable:
         y=y,
         z=z if has_z else None,
         properties=properties,
+        pixel_index_coordinates=pixel_index_coordinates,
     )
 
 
-def load_points_json(path) -> PointTable:
+def load_points_json(path, *, pixel_index_coordinates: bool = False) -> PointTable:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -369,6 +416,7 @@ def load_points_json(path) -> PointTable:
                     y=data["y"],
                     z=data.get("z"),
                     properties=props,
+                    pixel_index_coordinates=pixel_index_coordinates,
                 )
             raise ValueError(
                 "JSON must be a list of rows or contain a 'points'/'rows' list"
@@ -379,7 +427,7 @@ def load_points_json(path) -> PointTable:
         raise ValueError("Invalid JSON point format")
 
     if not rows:
-        return PointTable.from_arrays(x=[], y=[])
+        return PointTable.from_arrays(x=[], y=[], pixel_index_coordinates=pixel_index_coordinates)
 
     if "x" not in rows[0] or "y" not in rows[0]:
         raise ValueError("Missing required keys 'x'/'y' in JSON row records")
@@ -413,6 +461,7 @@ def load_points_json(path) -> PointTable:
         y=[float(r["y"]) for r in rows],
         z=z,
         properties=props,
+        pixel_index_coordinates=pixel_index_coordinates,
     )
 
 

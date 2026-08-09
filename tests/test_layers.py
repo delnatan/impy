@@ -118,6 +118,7 @@ def _make_layer(name="test", layer_type="shapes"):
 def test_layer_defaults():
     layer = _make_layer()
     assert layer.visible is True
+    assert layer.locked is False
     assert layer.style == {}
     assert layer.selected_ids == set()
     assert isinstance(layer.undo_stack, UndoStack)
@@ -127,6 +128,14 @@ def test_layer_set_visible():
     layer = _make_layer()
     layer.set_visible(False)
     assert layer.visible is False
+
+
+def test_layer_set_locked():
+    layer = _make_layer()
+    layer.set_locked(True)
+    assert layer.locked is True
+    layer.set_locked(False)
+    assert layer.locked is False
 
 
 # ---------------------------------------------------------------------------

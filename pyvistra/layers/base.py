@@ -29,6 +29,13 @@ class Layer:
         The vispy visual renderer for this layer.
     visible : bool
         Whether the layer is currently rendered.
+    locked : bool
+        Whether the layer is protected from edits (move, resize, add/
+        remove) — see ``window.py``'s hit-test helpers, which skip locked
+        layers so a click falls through to panning instead, and
+        ``_current_shape_selection``, which excludes locked layers so a
+        shape selected before the layer was locked can't still be deleted/
+        nudged/renamed via keyboard.
     style : dict
         Type-specific style overrides (colors, line widths, etc.).
     selected_ids : set[int]
@@ -42,6 +49,7 @@ class Layer:
     data: Any
     visual: Any
     visible: bool = True
+    locked: bool = False
     style: dict = field(default_factory=dict)
     selected_ids: set[int] = field(default_factory=set)
     undo_stack: UndoStack = field(default_factory=UndoStack)
@@ -50,6 +58,9 @@ class Layer:
         self.visible = visible
         if self.visual is not None:
             self.visual.visible = visible
+
+    def set_locked(self, locked: bool) -> None:
+        self.locked = bool(locked)
 
 
 VALID_LAYER_TYPES = {"shapes", "points", "tracks", "labels"}

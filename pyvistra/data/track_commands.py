@@ -74,6 +74,7 @@ class AddTrack:
         data.table = TrackTable.from_arrays(
             track_id=new_tid, t=new_t, x=new_x, y=new_y, z=new_z,
             properties=new_props,
+            pixel_index_coordinates=old.pixel_index_coordinates,
         )
 
     def undo(self, data: TrackDataHolder) -> None:
@@ -99,6 +100,7 @@ class RemoveTrack:
             y=old.y[keep],
             z=None if old.z is None else old.z[keep],
             properties={k: v[keep] for k, v in old.properties.items()},
+            pixel_index_coordinates=old.pixel_index_coordinates,
         )
 
     def undo(self, data: TrackDataHolder) -> None:

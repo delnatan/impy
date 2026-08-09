@@ -36,6 +36,7 @@ from qtpy.QtWidgets import (
 from pyvistra import colormaps as _colormaps
 from pyvistra import colors as tokens
 from pyvistra.contrast import compute_percentile_clim
+from .dock_utils import make_dock_float_resize_resilient
 from .histogram import (
     CompactHistogramWidget,
     configure_spinbox_for_range,
@@ -586,6 +587,7 @@ def show_channel_dock(
         dock.setObjectName("channel_dock")
         dock.setWidget(panel)
         window.addDockWidget(Qt.RightDockWidgetArea, dock)
+        make_dock_float_resize_resilient(dock, window)
         window.channel_panel = panel
         window._channel_dock = dock
     window._channel_dock.show()

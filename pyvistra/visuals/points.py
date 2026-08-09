@@ -4,6 +4,12 @@ import numpy as np
 from vispy import scene
 
 from ..data.points import PointTable
+from ..data.property_filter import (
+    PropertyFilterSpec,
+    SelectionEffect,
+    compute_mask,
+    resolve_row_effects,
+)
 
 DEFAULT_STYLE = {
     "size": 9.0,
@@ -64,6 +70,9 @@ class PointLayerVisual:
         self._label_template = str(label_template)
         self._label_font_size = int(label_font_size)
         self._dense_label_threshold = int(dense_label_threshold)
+        self._selection_spec = PropertyFilterSpec()
+        self._selection_effect = SelectionEffect()
+        self._hidden_point_ids: frozenset[int] = frozenset()
 
         self._cross_line = scene.visuals.Line(
             pos=np.zeros((0, 2), dtype=np.float32),
@@ -134,6 +143,7 @@ class PointLayerVisual:
 
     def set_points(self, points: PointTable | None):
         self._points = points
+        self._recompute_hidden_point_ids()
         self.refresh()
 
     def set_time_z(self, t_idx: int, z_idx: int = 0):
@@ -148,6 +158,54 @@ class PointLayerVisual:
     def set_label_fields(self, template: str):
         self._label_template = str(template)
         self.refresh()
+
+    def set_property_selection(self, spec: PropertyFilterSpec, effect: SelectionEffect):
+        self._selection_spec = spec
+        self._selection_effect = effect
+        self._recompute_hidden_point_ids()
+        self.refresh()
+
+    def get_property_selection(self) -> tuple[PropertyFilterSpec, SelectionEffect]:
+        return self._selection_spec, self._selection_effect
+
+    def _recompute_hidden_point_ids(self) -> None:
+        """Point IDs removed from view by the selection's ``hidden`` effect.
+
+        A point has exactly one row (``point_id`` is unique table-wide), so
+        this can be derived once over the whole table rather than per
+        time-slice — the single source both ``refresh()`` (rendering) and
+        callers doing hit-testing (``ImageWindow._nearest_point``) read,
+        instead of each re-deriving or forgetting the filter.
+        """
+        if self._points is None or not self._selection_effect.hidden or self._selection_spec.is_empty():
+            self._hidden_point_ids = frozenset()
+            return
+        selected = compute_mask(
+            self._points.n_rows, self._points.properties, self._selection_spec
+        )
+        self._hidden_point_ids = frozenset(self._points.point_id[selected].tolist())
+
+    @property
+    def hidden_point_ids(self) -> frozenset[int]:
+        """Point IDs currently excluded from view by the property selection."""
+        return self._hidden_point_ids
+
+    @property
+    def pixel_offset(self) -> float:
+        """Scene-space shift applied to this layer's x/y at render time.
+
+        Delegates to ``self._points.scene_offset`` — see ``PointTable`` for
+        what ``pixel_index_coordinates`` means and why it's declared on the
+        data rather than set here. Exposed so ``ImageWindow._nearest_point``
+        /hover/mouse-driven writes (``AddPoint``, drag) all read/write in the
+        same coordinate space this renders in, converting through this same
+        offset on the way in (see ``ImageWindow.on_mouse_press``/
+        ``on_mouse_move``) rather than only compensating for it on the way
+        out — so editing a pixel-index-sourced point layer stays consistent.
+        """
+        if self._points is None:
+            return 0.0
+        return self._points.scene_offset
 
     def set_style(self, **kwargs):
         if "size" in kwargs:
@@ -224,22 +282,38 @@ class PointLayerVisual:
         if s is None:
             return []
 
+        sliced_properties = {
+            key: arr[s] for key, arr in self._points.properties.items()
+        }
+        n_sliced = s.stop - s.start
+        visible, color_override = resolve_row_effects(
+            n_sliced, sliced_properties, self._selection_spec, self._selection_effect
+        )
+
+        offset = self.pixel_offset
         rows = []
         for i in range(s.start, s.stop):
+            j = i - s.start
+            if not visible[j]:
+                continue
             if self._points.z is not None:
                 if abs(float(self._points.z[i]) - self._z_idx) > self._z_tolerance:
                     continue
             row = {
                 "point_id": int(self._points.point_id[i]),
                 "t": int(self._points.t[i]),
-                "x": float(self._points.x[i]),
-                "y": float(self._points.y[i]),
+                "x": float(self._points.x[i]) + offset,
+                "y": float(self._points.y[i]) + offset,
             }
             if self._points.z is not None:
                 row["z"] = float(self._points.z[i])
             for key, arr in self._points.properties.items():
                 value = arr[i]
                 row[key] = value.item() if hasattr(value, "item") else value
+            if color_override is not None and not np.isnan(color_override[j]).any():
+                row["_selection_color"] = tuple(color_override[j].tolist())
+            else:
+                row["_selection_color"] = None
             rows.append(row)
         return rows
 
@@ -285,7 +359,12 @@ class PointLayerVisual:
         cy = np.sin(angles)
 
         for i, (x, y) in enumerate(pos):
-            color = self._selected_color if selected_mask[i] else self._layer_color
+            if selected_mask[i]:
+                color = self._selected_color
+            elif rows[i]["_selection_color"] is not None:
+                color = rows[i]["_selection_color"]
+            else:
+                color = self._layer_color
 
             # Crosshair: horizontal + vertical arms
             cross_segments.extend([

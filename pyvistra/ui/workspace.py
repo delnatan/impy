@@ -45,7 +45,7 @@ explicit (``compare_with_dialog`` creates it, ``_end_comparison`` or a
 member closing ends it) instead of inferred from group emptiness.
 """
 
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import Qt
 from qtpy.QtGui import QKeySequence
 from qtpy.QtWidgets import (
     QAction,
@@ -56,6 +56,7 @@ from qtpy.QtWidgets import (
     QTabWidget,
 )
 
+from ..widgets.dock_utils import nudge_window_size
 from .comparison import ComparisonPair, ComparisonView
 from .manager import compatible_windows, manager
 
@@ -504,13 +505,9 @@ class Workspace(QMainWindow):
         # the next event-loop tick (after the OS has assigned the new
         # top-level window's real frame) so both the Qt layout and the
         # canvas recompute immediately instead of waiting on a manual
-        # resize.
-        def _nudge_size():
-            size = window.size()
-            window.resize(size.width() + 1, size.height())
-            window.resize(size)
-
-        QTimer.singleShot(0, _nudge_size)
+        # resize. Same fix used for dock float/redock, see
+        # widgets.dock_utils.make_dock_float_resize_resilient.
+        nudge_window_size(window)
         self._collapse_empty_groups()
 
     # ------------------------------------------------------------------

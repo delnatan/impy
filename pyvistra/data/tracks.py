@@ -11,6 +11,14 @@ class TrackTable:
     """Columnar track container optimized for viewer-side queries.
 
     Rows are sorted by (track_id, t) and indexed per-track for efficient slicing.
+
+    ``pixel_index_coordinates`` declares which coordinate frame x/y are in —
+    see the matching field on :class:`~pyvistra.data.points.PointTable` for
+    the full rationale. Defaults to ``True`` here (rather than ``False`` as
+    on ``PointTable``) because every current source of track data is an
+    external array-index pipeline (``load_tracks_csv``, e.g. from magikit);
+    there is currently no interactive/scene-space way to create a track (see
+    ``AddTrack`` in ``data/track_commands.py``, which has no callers yet).
     """
 
     track_id: np.ndarray
@@ -19,6 +27,7 @@ class TrackTable:
     y: np.ndarray
     z: np.ndarray | None = None
     properties: dict[str, np.ndarray] = field(default_factory=dict)
+    pixel_index_coordinates: bool = True
 
     def __post_init__(self):
         n = len(self.track_id)
@@ -65,6 +74,7 @@ class TrackTable:
         y,
         z=None,
         properties: dict[str, object] | None = None,
+        pixel_index_coordinates: bool = True,
     ) -> "TrackTable":
         track_id_arr = np.asarray(track_id, dtype=np.int32)
         t_arr = np.asarray(t, dtype=np.int32)
@@ -84,7 +94,10 @@ class TrackTable:
                 prop_arrays[key] = arr
 
         if n == 0:
-            return cls(track_id_arr, t_arr, x_arr, y_arr, z_arr, prop_arrays)
+            return cls(
+                track_id_arr, t_arr, x_arr, y_arr, z_arr, prop_arrays,
+                pixel_index_coordinates=bool(pixel_index_coordinates),
+            )
 
         order = np.lexsort((t_arr, track_id_arr))
         sorted_props = {k: v[order] for k, v in prop_arrays.items()}
@@ -95,6 +108,7 @@ class TrackTable:
             y_arr[order],
             None if z_arr is None else z_arr[order],
             sorted_props,
+            pixel_index_coordinates=bool(pixel_index_coordinates),
         )
 
     @classmethod
@@ -108,6 +122,7 @@ class TrackTable:
         y_col="y",
         z_col="z",
         use_z=True,
+        pixel_index_coordinates: bool = True,
     ) -> "TrackTable":
         if track_id_col not in df.columns:
             raise ValueError(f"Missing required column: {track_id_col}")
@@ -133,6 +148,7 @@ class TrackTable:
             y=df[y_col].to_numpy(),
             z=z_data,
             properties=props,
+            pixel_index_coordinates=pixel_index_coordinates,
         )
 
     def to_dataframe(self):
@@ -155,6 +171,16 @@ class TrackTable:
     @property
     def has_z(self) -> bool:
         return self.z is not None
+
+    @property
+    def scene_offset(self) -> float:
+        """Shift between this table's stored x/y and scene (display) x/y.
+
+        See ``PointTable.scene_offset`` for the full rationale. No writer
+        needs this yet (no interactive track-creation path exists), but it
+        keeps the conversion defined in one place if/when one is added.
+        """
+        return 0.5 if self.pixel_index_coordinates else 0.0
 
     @property
     def n_rows(self) -> int:
@@ -195,6 +221,7 @@ class TrackTable:
             y=self.y[keep],
             z=None if self.z is None else self.z[keep],
             properties={k: v[keep] for k, v in self.properties.items()},
+            pixel_index_coordinates=self.pixel_index_coordinates,
         )
 
     def iter_track_slices(self):
@@ -203,11 +230,31 @@ class TrackTable:
             end = start + int(self._track_counts[i])
             yield int(tid), slice(start, end)
 
+    def aggregate_property(self, values: np.ndarray) -> np.ndarray:
+        """Per-track nanmean of a per-row array, aligned with ``track_ids``.
 
-def load_tracks_csv(path) -> TrackTable:
+        A track has one value per frame, but selection/coloring/inspection
+        all need a single scalar per trajectory — this is the one place
+        that reduction happens, so callers agree on what a track's "value"
+        of a property is.
+        """
+        arr = np.asarray(values)
+        out = np.empty(self.n_tracks, dtype=np.float64)
+        for i, (_tid, sl) in enumerate(self.iter_track_slices()):
+            vals = np.asarray(arr[sl], dtype=np.float64)
+            out[i] = float(np.nanmean(vals)) if vals.size else 0.0
+        return out
+
+
+def load_tracks_csv(path, *, pixel_index_coordinates: bool = True) -> TrackTable:
     """Load a TrackTable from a CSV file with ``track_id, t, x, y[, z]`` columns.
 
     Any additional columns are loaded as per-row properties.
+
+    ``pixel_index_coordinates`` defaults to ``True`` since track CSVs
+    currently only ever come from array-index tracking pipelines (see
+    ``TrackTable.pixel_index_coordinates``); pass ``False`` if the source
+    for a given file is already in scene coordinates.
     """
     from .points import _coerce_csv_scalar
 
@@ -253,6 +300,7 @@ def load_tracks_csv(path) -> TrackTable:
         y=y,
         z=z if has_z else None,
         properties=properties,
+        pixel_index_coordinates=pixel_index_coordinates,
     )
 
 

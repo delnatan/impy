@@ -1762,7 +1762,11 @@ class ImageWindow(QMainWindow):
 
         Tests layers in reverse order (top-most first). For each layer,
         first tries handles of currently-selected shapes (so an edge grab
-        wins over a body click), then tests bodies.
+        wins over a body click), then tests bodies. Locked layers are
+        skipped entirely (as if nothing were there), which is what makes
+        every caller's existing "None -> click missed" handling double as
+        "None -> layer is locked" for free, including the context menu and
+        gel-marker/polyline shortcuts nested inside those call sites.
 
         Returns
         -------
@@ -1772,6 +1776,8 @@ class ImageWindow(QMainWindow):
         layers = list(self.layers.by_type("shapes"))
         for layer in reversed(layers):
             if not layer.visible:
+                continue
+            if layer.locked:
                 continue
             data = layer.data
             # Handle hits on selected shapes take priority.
@@ -1913,9 +1919,19 @@ class ImageWindow(QMainWindow):
         return best_idx
 
     def _current_shape_selection(self):
-        """Return ``(layer, shape_id)`` if exactly one shape is selected, else None."""
+        """Return ``(layer, shape_id)`` if exactly one shape is selected, else None.
+
+        Skips locked layers: a shape can stay selected (``selected_ids`` isn't
+        cleared by locking) across a lock toggle, so this is the single place
+        that keeps every keyboard shortcut (delete, nudge, rename, edit-
+        properties — all of which resolve their target through this method)
+        from acting on it, matching the click-driven paths that already skip
+        locked layers via ``_hit_test``.
+        """
         hit = None
         for lyr in self.layers.by_type("shapes"):
+            if lyr.locked:
+                continue
             for sid in lyr.selected_ids:
                 if hit is not None:
                     return None  # multiple selections — ambiguous
@@ -2601,22 +2617,37 @@ class ImageWindow(QMainWindow):
         visual = entry.get("visual")
         if visual is not None and hasattr(visual, "_px_per_data"):
             px_per_data = max(float(visual._px_per_data()), 1e-6)
+        hidden_ids = visual.hidden_point_ids if visual is not None else frozenset()
+        # Search in the same coordinate space the points are drawn in — see
+        # PointLayerVisual.pixel_offset for why this can be nonzero.
+        offset = visual.pixel_offset if visual is not None else 0.0
         best = None
         best_px = float("inf")
         for i in range(s.start, s.stop):
+            if int(points.point_id[i]) in hidden_ids:
+                continue
             if points.z is not None:
                 ztol = float(entry["style"].get("z_tolerance", 0.5))
                 if abs(float(points.z[i]) - float(self.z_idx)) > ztol:
                     continue
-            dx = float(points.x[i]) - float(x)
-            dy = float(points.y[i]) - float(y)
+            dx = float(points.x[i]) + offset - float(x)
+            dy = float(points.y[i]) + offset - float(y)
             dpx = (dx * dx + dy * dy) ** 0.5 * px_per_data
             if dpx < best_px:
                 best_px = dpx
                 best = int(points.point_id[i])
         if best is None or best_px > float(radius_px):
             return None
-        return {"layer": self._active_point_layer, "point_id": best, "distance_px": best_px}
+        locked = (
+            self._active_point_layer in self.layers
+            and self.layers[self._active_point_layer].locked
+        )
+        return {
+            "layer": self._active_point_layer,
+            "point_id": best,
+            "distance_px": best_px,
+            "locked": locked,
+        }
 
     def _get_brush_coords(self, cx, cy):
         """
@@ -3690,7 +3721,7 @@ class ImageWindow(QMainWindow):
 
             if hit_roi is None:
                 near = self._nearest_point(x, y, radius_px=10.0)
-                if near is not None:
+                if near is not None and not near["locked"]:
                     self.focus_point(near["layer"], near["point_id"])
                     hit_roi = self._focused_point_roi
                     hit_handle = "center"
@@ -3931,6 +3962,11 @@ class ImageWindow(QMainWindow):
 
             near = self._nearest_point(x, y, radius_px=10.0)
             if near is not None and near["layer"] == layer_name:
+                if near["locked"]:
+                    # Claim the click: don't drag/remove it, and don't fall
+                    # through to "no hit -> drop a new point" and stack a
+                    # duplicate on top of the locked one.
+                    return
                 pid = int(near["point_id"])
                 if has_alt:
                     from ..data.point_commands import RemovePoint
@@ -3947,10 +3983,15 @@ class ImageWindow(QMainWindow):
                     self.view.camera.interactive = False
                 return
 
-            # No hit — drop a new point.
+            # No hit — drop a new point. The click is already an exact scene
+            # coordinate (see PointTable.scene_offset); convert it into this
+            # table's own storage convention so a click into an existing
+            # pixel-index-sourced layer lands where it was actually clicked,
+            # not 0.5px off.
             from ..data.point_commands import AddPoint
+            offset = holder.table.scene_offset
             layer.undo_stack.push(
-                AddPoint(x=float(x), y=float(y), t=self.t_idx), holder
+                AddPoint(x=float(x) - offset, y=float(y) - offset, t=self.t_idx), holder
             )
             return
 
@@ -3980,8 +4021,6 @@ class ImageWindow(QMainWindow):
                         row = self._get_point_row(near["layer"], near["point_id"])
                         if row is not None:
                             info_text += f"  Point: {row.get('point_id')}"
-                            if "amplitude" in row:
-                                info_text += f" amp={row.get('amplitude')}"
                             self.info_label.setToolTip(str(row))
                             # On-canvas hover tooltip
                             entry = self._point_layers.get(near["layer"])
@@ -4104,8 +4143,9 @@ class ImageWindow(QMainWindow):
                 tbl = holder.table
                 idx = tbl._id_to_index.get(int(self._point_dragging_id))
                 if idx is not None:
-                    tbl.x[idx] = float(x)
-                    tbl.y[idx] = float(y)
+                    offset = tbl.scene_offset
+                    tbl.x[idx] = float(x) - offset
+                    tbl.y[idx] = float(y) - offset
                     visual = entry["visual"]
                     if visual is not None:
                         visual.set_points(tbl)

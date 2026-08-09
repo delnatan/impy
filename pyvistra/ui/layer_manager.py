@@ -84,8 +84,8 @@ class LayerManager(QWidget):
 
         # Layer tree
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Layer", "Type"])
-        self._tree.setColumnCount(2)
+        self._tree.setHeaderLabels(["Layer", "Type", "Lock"])
+        self._tree.setColumnCount(3)
         self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._on_context_menu)
         self._tree.itemChanged.connect(self._on_item_changed)
@@ -235,6 +235,7 @@ class LayerManager(QWidget):
             item.setText(1, _TYPE_LABELS.get(layer.layer_type, layer.layer_type))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(0, Qt.Checked if layer.visible else Qt.Unchecked)
+            item.setCheckState(2, Qt.Checked if layer.locked else Qt.Unchecked)
             item.setData(0, _ROLE_LAYER_NAME, layer.name)
             item.setData(0, _ROLE_KIND, "layer")
             self._tree.addTopLevelItem(item)
@@ -297,23 +298,25 @@ class LayerManager(QWidget):
     # Tree-item interactions
     # ------------------------------------------------------------------
     def _on_item_changed(self, item, column):
-        """Handle checkbox toggle for visibility on layer rows."""
+        """Handle checkbox toggle for visibility/lock on layer rows."""
         if self._current_window is None:
             return
-        if column != 0:
+        if column not in (0, 2):
             return
         if item.data(0, _ROLE_KIND) != "layer":
             return
         name = item.data(0, _ROLE_LAYER_NAME)
         if name is None:
             return
-        visible = item.checkState(0) == Qt.Checked
         try:
             layer = self._current_window.layers[name]
-            layer.set_visible(visible)
-            self._current_window.canvas.update()
         except KeyError:
-            pass
+            return
+        if column == 0:
+            layer.set_visible(item.checkState(0) == Qt.Checked)
+        else:
+            layer.set_locked(item.checkState(2) == Qt.Checked)
+        self._current_window.canvas.update()
 
     def _resolve_shape_item(self, item):
         """Return (layer, shape_id) for a shape-row item, or (None, None)."""
@@ -422,8 +425,10 @@ class LayerManager(QWidget):
 
         menu = QMenu(self)
         display_settings_action = None
+        inspect_action = None
         if layer is not None and layer.layer_type in ("points", "tracks"):
             display_settings_action = menu.addAction("Display Settings…")
+            inspect_action = menu.addAction("Inspect Properties…")
             menu.addSeparator()
         rename_action = menu.addAction("Rename")
         remove_action = menu.addAction("Remove")
@@ -434,6 +439,8 @@ class LayerManager(QWidget):
             self._remove_layer(name)
         elif chosen is not None and chosen is display_settings_action:
             self._open_display_settings_dialog(layer)
+        elif chosen is not None and chosen is inspect_action:
+            self._open_property_inspector(layer)
 
     def _open_display_settings_dialog(self, layer) -> None:
         if layer.layer_type == "points":
@@ -443,14 +450,20 @@ class LayerManager(QWidget):
             if dlg.exec_() == QDialog.Accepted:
                 self._current_window.set_point_layer_style(layer.name, **dlg.get_style())
         elif layer.layer_type == "tracks":
+            from ..widgets.property_filter_widget import numeric_property_infos
             from ..widgets.track_display_settings_dialog import TrackDisplaySettingsDialog
 
-            available_properties = sorted(layer.data.properties.keys())
+            available_properties = numeric_property_infos(layer.data.properties)
             dlg = TrackDisplaySettingsDialog(
                 dict(layer.style), available_properties, parent=self._current_window
             )
             if dlg.exec_() == QDialog.Accepted:
                 self._current_window.set_track_layer_style(layer.name, **dlg.get_style())
+
+    def _open_property_inspector(self, layer) -> None:
+        from ..widgets.property_inspector_panel import show_property_inspector_dock
+
+        show_property_inspector_dock(self._current_window, layer)
 
     def _show_shape_menu(self, item, global_pos) -> None:
         layer, sid = self._resolve_shape_item(item)

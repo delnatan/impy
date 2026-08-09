@@ -4,6 +4,10 @@ Exposes the full style dict understood by
 :class:`pyvistra.visuals.points.PointLayerVisual` (marker size, screen-space
 clamps, colors, optional circle overlay, and label display) so it can be
 tuned from the UI instead of only via ``window.set_point_layer_style(...)``.
+
+Property-based selection/highlighting lives in the separate Property
+Inspector dock (``pyvistra.widgets.property_inspector_panel``), not here —
+this dialog is pure visual styling, independent of the layer's data.
 """
 
 from __future__ import annotations

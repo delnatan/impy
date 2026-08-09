@@ -9,6 +9,11 @@ Color-by-property colors one whole trajectory by the mean of a numeric
 properties column (not per-vertex/time-varying) — a general viewing concern,
 independent of what produced the property (e.g. a tracking pipeline like
 magikit).
+
+Property-based selection/highlighting lives in the separate Property
+Inspector dock (``pyvistra.widgets.property_inspector_panel``), not here —
+this dialog is pure visual styling, independent of the layer's data (aside
+from ``available_properties``, still needed for the color-by-property combo).
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from qtpy.QtWidgets import (
 
 from .. import colormaps as cmap
 from .color_button import ColorButton
+from .property_filter_widget import PropertyRangeInfo
 
 _COLOR_MODES = [
     ("Auto (by Track ID)", "auto"),
@@ -35,7 +41,7 @@ _COLOR_MODES = [
 
 
 class TrackDisplaySettingsDialog(QDialog):
-    def __init__(self, style: dict, available_properties: list[str], parent=None):
+    def __init__(self, style: dict, available_properties: list[PropertyRangeInfo], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Track Display Settings")
 
@@ -104,7 +110,7 @@ class TrackDisplaySettingsDialog(QDialog):
         form.addRow("Fixed Color", self.fixed_color)
 
         self.color_property = QComboBox()
-        self.color_property.addItems(available_properties)
+        self.color_property.addItems([info.name for info in available_properties])
         color_property = cfg.get("color_property")
         if color_property is not None:
             idx = self.color_property.findText(str(color_property))

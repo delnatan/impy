@@ -116,6 +116,7 @@ class AddPoint:
         data.table = PointTable.from_arrays(
             point_id=new_pid, t=new_t, x=new_x, y=new_y, z=new_z,
             properties=props,
+            pixel_index_coordinates=old.pixel_index_coordinates,
         )
         data._emit(PEVT_ADDED, int(pid))
 
