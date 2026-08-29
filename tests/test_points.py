@@ -1,13 +1,16 @@
 import json
 
 import numpy as np
+import pytest
 
 from pyvistra.data.points import (
     PointTable,
     load_points_csv,
     load_points_json,
+    load_points_parquet,
     save_points_csv,
     save_points_json,
+    save_points_parquet,
 )
 
 
@@ -160,7 +163,7 @@ def test_point_json_dict_of_columns(tmp_path):
     data = {
         "x": [1.0, 2.0],
         "y": [3.0, 4.0],
-        "t": [0, 1],
+        "frame": [0, 1],
         "point_id": [9, 10],
         "amplitude": [10.5, 20.5],
     }
@@ -174,6 +177,51 @@ def test_point_json_dict_of_columns(tmp_path):
     assert points.point_id.tolist() == [9, 10]
     assert points.t.tolist() == [0, 1]
     assert np.allclose(points.properties["amplitude"], [10.5, 20.5])
+
+
+def test_point_csv_requires_frame_column(tmp_path):
+    path = tmp_path / "points.csv"
+    path.write_text("x,y\n1.0,2.0\n")
+
+    with pytest.raises(ValueError, match="frame"):
+        load_points_csv(str(path))
+
+
+def test_point_csv_treats_extra_t_column_as_feature(tmp_path):
+    # Regression case: a localizer file (e.g. spotsolve output) has both a
+    # 'frame' column (the frame index) and a 't' column (real acquisition
+    # time in seconds) — 't' must not be mistaken for the frame index.
+    path = tmp_path / "points.csv"
+    path.write_text("frame,x,y,t\n0,1.0,2.0,0.123\n1,3.0,4.0,0.456\n")
+
+    points = load_points_csv(str(path))
+
+    assert points.t.tolist() == [0, 1]
+    assert np.allclose(points.properties["t"], [0.123, 0.456])
+
+
+def test_point_parquet_roundtrip_preserves_properties(tmp_path):
+    pytest.importorskip("pyarrow")
+
+    points = PointTable.from_arrays(
+        point_id=[1, 2],
+        t=[0, 1],
+        x=[12.3, 45.6],
+        y=[78.9, 10.2],
+        z=[3.0, 4.0],
+        properties={"amplitude": [111.0, 222.0], "label": ["a", "b"]},
+    )
+
+    path = tmp_path / "points.parquet"
+    save_points_parquet(str(path), points)
+    loaded = load_points_parquet(str(path))
+
+    assert loaded.n_rows == points.n_rows
+    assert loaded.point_id.tolist() == [1, 2]
+    assert loaded.t.tolist() == [0, 1]
+    assert np.allclose(loaded.z, [3.0, 4.0])
+    assert np.allclose(loaded.properties["amplitude"], [111.0, 222.0])
+    assert loaded.properties["label"].tolist() == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------

@@ -40,7 +40,7 @@ class PointDisplaySettingsDialog(QDialog):
         self.size = QDoubleSpinBox()
         self.size.setRange(0.1, 1000.0)
         self.size.setDecimals(2)
-        self.size.setValue(float(cfg.get("size", 9.0)))
+        self.size.setValue(float(cfg.get("size", 2.0)))
         form.addRow("Marker Size", self.size)
 
         self.min_screen_px = QDoubleSpinBox()
@@ -102,6 +102,12 @@ class PointDisplaySettingsDialog(QDialog):
         self.dense_label_threshold.setValue(int(cfg.get("dense_label_threshold", 2000)))
         form.addRow("Label Count Threshold", self.dense_label_threshold)
 
+        self.feature_tooltip_visible = QCheckBox()
+        self.feature_tooltip_visible.setChecked(
+            bool(cfg.get("feature_tooltip_visible", True))
+        )
+        form.addRow("Show Feature Tooltip on Hover", self.feature_tooltip_visible)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self
         )
@@ -124,4 +130,5 @@ class PointDisplaySettingsDialog(QDialog):
             "label_template": self.label_template.text(),
             "label_font_size": self.label_font_size.value(),
             "dense_label_threshold": self.dense_label_threshold.value(),
+            "feature_tooltip_visible": self.feature_tooltip_visible.isChecked(),
         }

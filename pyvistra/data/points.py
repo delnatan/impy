@@ -319,6 +319,10 @@ class PointTable:
         )
 
 
+_REQUIRED_COLUMNS = {"x", "y", "frame"}
+_SPECIAL_COLUMNS = {"point_id", "frame", "x", "y", "z"}
+
+
 def _coerce_csv_scalar(value: str):
     text = value.strip()
     if text == "":
@@ -335,7 +339,12 @@ def _coerce_csv_scalar(value: str):
 
 
 def load_points_csv(path, *, pixel_index_coordinates: bool = False) -> PointTable:
-    """Load a PointTable from a CSV file with ``x, y[, point_id, t, z]`` columns.
+    """Load a PointTable from a CSV file with required ``x, y, frame``
+    columns (optional ``point_id``, ``z``). Any other column is carried
+    through as a per-point feature — data available for filtering or for
+    mapping onto the canvas (e.g. localizer output like ``flux``, ``sigma``,
+    or a raw acquisition ``t`` in seconds, which is a feature here, not the
+    frame index).
 
     ``pixel_index_coordinates`` must be supplied by the caller — it can't be
     inferred from the file (e.g. from whether x/y look integer-valued: a
@@ -355,29 +364,25 @@ def load_points_csv(path, *, pixel_index_coordinates: bool = False) -> PointTabl
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
             raise ValueError("CSV has no header row")
-        missing = {"x", "y"} - set(reader.fieldnames)
+        missing = _REQUIRED_COLUMNS - set(reader.fieldnames)
         if missing:
             raise ValueError(
                 f"Missing required columns: {', '.join(sorted(missing))}"
             )
 
         has_point_id = "point_id" in reader.fieldnames
-        has_t = "t" in reader.fieldnames
         has_z = "z" in reader.fieldnames
         prop_cols = [
-            col
-            for col in reader.fieldnames
-            if col not in {"point_id", "t", "z", "x", "y"}
+            col for col in reader.fieldnames if col not in _SPECIAL_COLUMNS
         ]
         properties = {col: [] for col in prop_cols}
 
         for row in reader:
             x.append(float(row["x"]))
             y.append(float(row["y"]))
+            t.append(int(float(row["frame"])))
             if has_point_id:
                 point_id.append(int(float(row["point_id"])))
-            if has_t:
-                t.append(int(float(row["t"])))
             if has_z:
                 z_val = row.get("z", "")
                 z.append(float(z_val) if z_val != "" else 0.0)
@@ -386,7 +391,7 @@ def load_points_csv(path, *, pixel_index_coordinates: bool = False) -> PointTabl
 
     return PointTable.from_arrays(
         point_id=point_id if has_point_id else None,
-        t=t if has_t else None,
+        t=t,
         x=x,
         y=y,
         z=z if has_z else None,
@@ -402,16 +407,15 @@ def load_points_json(path, *, pixel_index_coordinates: bool = False) -> PointTab
     if isinstance(data, dict):
         rows = data.get("points", data.get("rows", None))
         if rows is None:
-            if {"x", "y"}.issubset(data.keys()):
-                excluded = {"point_id", "t", "z", "x", "y"}
+            if _REQUIRED_COLUMNS.issubset(data.keys()):
                 props = {
                     str(k): np.asarray(v)
                     for k, v in data.items()
-                    if k not in excluded
+                    if k not in _SPECIAL_COLUMNS
                 }
                 return PointTable.from_arrays(
                     point_id=data.get("point_id"),
-                    t=data.get("t"),
+                    t=data["frame"],
                     x=data["x"],
                     y=data["y"],
                     z=data.get("z"),
@@ -429,12 +433,14 @@ def load_points_json(path, *, pixel_index_coordinates: bool = False) -> PointTab
     if not rows:
         return PointTable.from_arrays(x=[], y=[], pixel_index_coordinates=pixel_index_coordinates)
 
-    if "x" not in rows[0] or "y" not in rows[0]:
-        raise ValueError("Missing required keys 'x'/'y' in JSON row records")
+    missing = _REQUIRED_COLUMNS - set(rows[0].keys())
+    if missing:
+        raise ValueError(
+            f"Missing required keys in JSON row records: {', '.join(sorted(missing))}"
+        )
 
-    excluded = {"point_id", "t", "z", "x", "y"}
     prop_keys = sorted(
-        {key for row in rows for key in row.keys() if key not in excluded}
+        {key for row in rows for key in row.keys() if key not in _SPECIAL_COLUMNS}
     )
 
     props = {key: [row.get(key) for row in rows] for key in prop_keys}
@@ -443,11 +449,7 @@ def load_points_json(path, *, pixel_index_coordinates: bool = False) -> PointTab
         if all("point_id" in r for r in rows)
         else None
     )
-    t = (
-        [int(float(r["t"])) for r in rows]
-        if any("t" in r for r in rows)
-        else None
-    )
+    t = [int(float(r["frame"])) for r in rows]
     z = (
         [float(r.get("z", 0.0)) for r in rows]
         if any("z" in r for r in rows)
@@ -466,7 +468,7 @@ def load_points_json(path, *, pixel_index_coordinates: bool = False) -> PointTab
 
 
 def save_points_csv(path, points: PointTable) -> None:
-    fieldnames = ["point_id", "t", "x", "y"]
+    fieldnames = ["point_id", "frame", "x", "y"]
     if points.z is not None:
         fieldnames.append("z")
     fieldnames.extend(sorted(points.properties.keys()))
@@ -477,7 +479,7 @@ def save_points_csv(path, points: PointTable) -> None:
         for i in range(points.n_rows):
             row = {
                 "point_id": int(points.point_id[i]),
-                "t": int(points.t[i]),
+                "frame": int(points.t[i]),
                 "x": float(points.x[i]),
                 "y": float(points.y[i]),
             }
@@ -494,7 +496,7 @@ def save_points_json(path, points: PointTable) -> None:
     for i in range(points.n_rows):
         row = {
             "point_id": int(points.point_id[i]),
-            "t": int(points.t[i]),
+            "frame": int(points.t[i]),
             "x": float(points.x[i]),
             "y": float(points.y[i]),
         }
@@ -511,3 +513,69 @@ def save_points_json(path, points: PointTable) -> None:
             f,
             indent=2,
         )
+
+
+def load_points_parquet(path, *, pixel_index_coordinates: bool = False) -> PointTable:
+    """Load a PointTable from a Parquet file with required ``x, y, frame``
+    columns (optional ``point_id``, ``z``). Any other column is carried
+    through as a per-point feature, same convention as :func:`load_points_csv`.
+
+    Requires the optional ``pyarrow`` dependency (``pip install
+    pyvistra[parquet]``).
+    """
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ImportError(
+            "pyarrow is required to read Parquet point files "
+            "(pip install pyvistra[parquet])"
+        ) from exc
+
+    table = pq.read_table(path)
+    columns = set(table.column_names)
+    missing = _REQUIRED_COLUMNS - columns
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(sorted(missing))}")
+
+    has_point_id = "point_id" in columns
+    has_z = "z" in columns
+    prop_cols = [c for c in table.column_names if c not in _SPECIAL_COLUMNS]
+
+    return PointTable.from_arrays(
+        point_id=table.column("point_id").to_pylist() if has_point_id else None,
+        t=table.column("frame").to_pylist(),
+        x=table.column("x").to_pylist(),
+        y=table.column("y").to_pylist(),
+        z=table.column("z").to_pylist() if has_z else None,
+        properties={col: table.column(col).to_pylist() for col in prop_cols},
+        pixel_index_coordinates=pixel_index_coordinates,
+    )
+
+
+def save_points_parquet(path, points: PointTable) -> None:
+    """Save a PointTable to a Parquet file with ``point_id, frame, x, y[,
+    z]`` columns plus one column per feature.
+
+    Requires the optional ``pyarrow`` dependency (``pip install
+    pyvistra[parquet]``).
+    """
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ImportError(
+            "pyarrow is required to write Parquet point files "
+            "(pip install pyvistra[parquet])"
+        ) from exc
+
+    data: dict[str, object] = {
+        "point_id": points.point_id,
+        "frame": points.t,
+        "x": points.x,
+        "y": points.y,
+    }
+    if points.z is not None:
+        data["z"] = points.z
+    data.update(points.properties)
+
+    pq.write_table(pa.table(data), path)

@@ -32,6 +32,7 @@ dependencies = [
 [project.optional-dependencies]
 czi = ["aicspylibczi"]
 nd2 = ["nd2"]
+parquet = ["pyarrow"]
 
 [project.scripts]
 pyvistra = "pyvistra.__main__:main"

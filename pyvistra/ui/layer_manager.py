@@ -8,13 +8,17 @@ opens the numerical properties dialog.
 
 from __future__ import annotations
 
+import os
+
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QMenu,
+    QMessageBox,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -22,6 +26,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from ..data.points import load_points_csv, load_points_json, load_points_parquet
 from ..data.shapes import (
     AddShape,
     RemoveShape,
@@ -29,6 +34,15 @@ from ..data.shapes import (
 )
 from ..data.point_commands import RemovePoint
 from .manager import manager
+
+# Point file loaders keyed by extension, shared by the "Load Points from
+# File..." action -- one dispatch table instead of an if/elif chain, so
+# adding a format later is a one-line addition here.
+_POINT_LOADERS = {
+    ".csv": load_points_csv,
+    ".json": load_points_json,
+    ".parquet": load_points_parquet,
+}
 
 
 # Type icons for display
@@ -96,7 +110,12 @@ class LayerManager(QWidget):
         # Buttons
         btn_row = QHBoxLayout()
         self._add_btn = QPushButton("Add Layer")
-        self._add_btn.clicked.connect(self._on_add_layer)
+        add_menu = QMenu(self)
+        add_menu.addAction("New Shape Layer...", self._on_add_shape_layer)
+        add_menu.addAction("New Points Layer...", self._on_add_points_layer)
+        add_menu.addSeparator()
+        add_menu.addAction("Load Points from File...", self._on_load_points_file)
+        self._add_btn.setMenu(add_menu)
         btn_row.addWidget(self._add_btn)
 
         self._remove_btn = QPushButton("Remove")
@@ -560,13 +579,83 @@ class LayerManager(QWidget):
     # ------------------------------------------------------------------
     # Layer-level actions (unchanged)
     # ------------------------------------------------------------------
-    def _on_add_layer(self):
+    def _prompt_new_layer_name(self, title: str) -> str | None:
+        """Prompt for a layer name, rejecting one already taken in the
+        active window's unified layer namespace. Returns None if the user
+        cancelled or the name collided (a warning is shown in that case)."""
+        name, ok = QInputDialog.getText(self, title, "Layer name:")
+        if not ok or not name:
+            return None
+        if name in self._current_window.layers:
+            QMessageBox.warning(
+                self, "Duplicate Name", f"A layer named '{name}' already exists."
+            )
+            return None
+        return name
+
+    def _on_add_shape_layer(self):
         if self._current_window is None:
             return
-        # For now, default to adding a shape layer
-        name, ok = QInputDialog.getText(self, "Add Layer", "Layer name:")
-        if ok and name:
+        name = self._prompt_new_layer_name("New Shape Layer")
+        if name:
             self._current_window.add_shape_layer(name)
+
+    def _on_add_points_layer(self):
+        if self._current_window is None:
+            return
+        name = self._prompt_new_layer_name("New Points Layer")
+        if name:
+            self._current_window.add_point_layer(name)
+
+    def _on_load_points_file(self):
+        if self._current_window is None:
+            return
+
+        default_dir = "."
+        if self._current_window.filepath:
+            default_dir = os.path.dirname(self._current_window.filepath)
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Points",
+            default_dir,
+            "Point Files (*.csv *.json *.parquet);;CSV (*.csv);;"
+            "JSON (*.json);;Parquet (*.parquet);;All Files (*)",
+        )
+        if not path:
+            return
+
+        loader = _POINT_LOADERS.get(os.path.splitext(path)[1].lower())
+        if loader is None:
+            QMessageBox.warning(
+                self,
+                "Unsupported Format",
+                "Points can be loaded from .csv, .json, or .parquet files.",
+            )
+            return
+
+        name = os.path.splitext(os.path.basename(path))[0]
+        if name in self._current_window.layers:
+            QMessageBox.warning(
+                self, "Duplicate Name", f"A layer named '{name}' already exists."
+            )
+            return
+
+        pixel_index = QMessageBox.question(
+            self,
+            "Point Coordinates",
+            "Are the x/y coordinates in pixel/array-index space (e.g. raw "
+            "localizer or curve-fit output)?\n\n"
+            "Choose No if coordinates are already in scene/display space.",
+        ) == QMessageBox.Yes
+
+        try:
+            points = loader(path, pixel_index_coordinates=pixel_index)
+        except (ImportError, ValueError) as e:
+            QMessageBox.critical(self, "Load Failed", str(e))
+            return
+
+        self._current_window.add_point_layer(name, points=points)
 
     def _on_remove_layer(self):
         item = self._tree.currentItem()

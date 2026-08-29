@@ -12,7 +12,7 @@ from ..data.property_filter import (
 )
 
 DEFAULT_STYLE = {
-    "size": 9.0,
+    "size": 2.0,
     "min_screen_px": 3.0,
     "max_screen_px": 80.0,
     "edge_width": 1.2,
@@ -25,6 +25,7 @@ DEFAULT_STYLE = {
     "label_template": "{point_id}",
     "label_font_size": 9,
     "dense_label_threshold": 2000,
+    "feature_tooltip_visible": True,
 }
 
 
@@ -35,7 +36,7 @@ class PointLayerVisual:
         self,
         view,
         *,
-        size=9.0,
+        size=2.0,
         min_screen_px=3.0,
         max_screen_px=80.0,
         edge_width=1.2,
@@ -48,6 +49,7 @@ class PointLayerVisual:
         label_template="{point_id}",
         label_font_size=9,
         dense_label_threshold=2000,
+        feature_tooltip_visible=True,
     ):
         self.view = view
         self._points: PointTable | None = None
@@ -70,6 +72,7 @@ class PointLayerVisual:
         self._label_template = str(label_template)
         self._label_font_size = int(label_font_size)
         self._dense_label_threshold = int(dense_label_threshold)
+        self._feature_tooltip_visible = bool(feature_tooltip_visible)
         self._selection_spec = PropertyFilterSpec()
         self._selection_effect = SelectionEffect()
         self._hidden_point_ids: frozenset[int] = frozenset()
@@ -135,11 +138,20 @@ class PointLayerVisual:
             "label_template": self._label_template,
             "label_font_size": self._label_font_size,
             "dense_label_threshold": self._dense_label_threshold,
+            "feature_tooltip_visible": self._feature_tooltip_visible,
         }
 
     @property
     def label_template(self) -> str:
         return self._label_template
+
+    @property
+    def feature_tooltip_visible(self) -> bool:
+        """Whether the hover feature-inspector pop-out (all of a point's
+        properties, shown via ``QToolTip`` in ``ImageWindow.on_mouse_move``)
+        is enabled for this layer. Toggled from the Point Display Settings
+        dialog, alongside the layer's other display preferences."""
+        return self._feature_tooltip_visible
 
     def set_points(self, points: PointTable | None):
         self._points = points
@@ -235,6 +247,8 @@ class PointLayerVisual:
             self._labels.font_size = self._label_font_size
         if "dense_label_threshold" in kwargs:
             self._dense_label_threshold = int(kwargs["dense_label_threshold"])
+        if "feature_tooltip_visible" in kwargs:
+            self._feature_tooltip_visible = bool(kwargs["feature_tooltip_visible"])
         self.refresh()
 
     def remove(self):

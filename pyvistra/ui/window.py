@@ -1,3 +1,4 @@
+import html
 import os
 import sys
 from collections import OrderedDict
@@ -5,7 +6,7 @@ from datetime import datetime
 
 import numpy as np
 from qtpy import API_NAME
-from qtpy.QtCore import QPoint, Qt, QTimer, Signal
+from qtpy.QtCore import QPoint, QRect, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QAction,
     QApplication,
@@ -22,6 +23,7 @@ from qtpy.QtWidgets import (
     QPushButton,
     QSlider,
     QSpinBox,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -2601,6 +2603,25 @@ class ImageWindow(QMainWindow):
         except Exception:
             return str(row.get("point_id", ""))
 
+    def _format_point_features_html(self, row: dict) -> str:
+        """Render every value on a point's row — coordinates plus all
+        features — as an HTML tooltip body for :meth:`on_mouse_move`'s
+        hover popup."""
+        lines = [f"<b>Point {row.get('point_id')}</b>&nbsp;&nbsp;frame {row.get('t')}"]
+
+        coords = [f"{axis}={row[axis]:.2f}" for axis in ("x", "y", "z") if axis in row]
+        if coords:
+            lines.append(", ".join(coords))
+
+        for key in sorted(row.keys()):
+            if key in ("point_id", "t", "x", "y", "z"):
+                continue
+            value = row[key]
+            text = f"{value:.6g}" if isinstance(value, float) else str(value)
+            lines.append(f"{html.escape(str(key))}: {html.escape(text)}")
+
+        return "<br>".join(lines)
+
     def _nearest_point(self, x: float, y: float, *, radius_px=8.0):
         if self._active_point_layer is None:
             return None
@@ -4021,8 +4042,8 @@ class ImageWindow(QMainWindow):
                         row = self._get_point_row(near["layer"], near["point_id"])
                         if row is not None:
                             info_text += f"  Point: {row.get('point_id')}"
-                            self.info_label.setToolTip(str(row))
-                            # On-canvas hover tooltip
+                            self.info_label.setToolTip("")
+                            # On-canvas hover label (per label_template)
                             entry = self._point_layers.get(near["layer"])
                             visual = entry["visual"] if entry else None
                             template = visual.label_template if visual else "{point_id}"
@@ -4033,16 +4054,33 @@ class ImageWindow(QMainWindow):
                                 [[x + offset, y - offset, 0.0]], dtype=np.float32
                             )
                             self._hover_label.visible = True
+                            # Feature-inspector pop-out (all properties) --
+                            # per-layer opt-out via Point Display Settings.
+                            if visual is not None and visual.feature_tooltip_visible:
+                                ex, ey = int(event.pos[0]), int(event.pos[1])
+                                global_pos = self.canvas.native.mapToGlobal(QPoint(ex, ey))
+                                hot_rect = QRect(ex - 12, ey - 12, 24, 24)
+                                QToolTip.showText(
+                                    global_pos,
+                                    self._format_point_features_html(row),
+                                    self.canvas.native,
+                                    hot_rect,
+                                )
+                            else:
+                                QToolTip.hideText()
                         else:
                             self.info_label.setToolTip("")
                             self._hover_label.visible = False
+                            QToolTip.hideText()
                     else:
                         self.info_label.setToolTip("")
                         self._hover_label.visible = False
+                        QToolTip.hideText()
                     self.info_label.setText(info_text)
             else:
                 self.info_label.setText("")
                 self._hover_label.visible = False
+                QToolTip.hideText()
 
         # 1b. Polyline drawing — update preview vertex (no button held).
         if self._polyline_drawing_id is not None and self._polyline_drawing_layer is not None:
