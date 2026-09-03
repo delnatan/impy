@@ -545,7 +545,12 @@ def load_image(filepath, use_memmap=True):
     scale = (1.0, 1.0, 1.0)
 
     if use_memmap:
-        img = tifffile.memmap(filepath)
+        try:
+            img = tifffile.memmap(filepath)
+        except ValueError:
+            # Not all TIFFs are memory-mappable (e.g. compressed or tiled
+            # data) - fall back to reading the whole file into memory.
+            img = tifffile.imread(filepath)
     else:
         img = tifffile.imread(filepath)
 
