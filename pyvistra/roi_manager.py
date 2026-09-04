@@ -8,7 +8,15 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt
 from .manager import manager
-from .rois import CoordinateROI, RectangleROI, CircleROI, LineROI, LaneROI, FreehandROI
+from .rois import (
+    CoordinateROI,
+    RectangleROI,
+    CircleROI,
+    LineROI,
+    LaneROI,
+    FreehandROI,
+    PaintbrushROI,
+)
 from .analysis import plot_profile, crop_image, measure_intensity, align_lanes
 from .gel_analyzer import show_gel_analyzer
 
@@ -60,6 +68,16 @@ class ROIManager(QWidget):
         self.z_slice_input.editingFinished.connect(self._validate_z_slice)
         z_layout.addWidget(self.z_slice_input)
         self.layout.addLayout(z_layout)
+
+        # Paintbrush Radius Input
+        radius_layout = QHBoxLayout()
+        radius_layout.addWidget(QLabel("Brush radius:"))
+        self.radius_input = QLineEdit()
+        self.radius_input.setPlaceholderText("eg. 5")
+        self.radius_input.textChanged.connect(self._on_radius_text_changed)
+        self.radius_input.editingFinished.connect(self._validate_radius)
+        radius_layout.addWidget(self.radius_input)
+        self.layout.addLayout(radius_layout)
 
         # List
         self.roi_list = QListWidget()
@@ -396,6 +414,23 @@ class ROIManager(QWidget):
         self.z_slice_input.clear()
         self.z_slice_input.setPlaceholderText("Invalid Input")
 
+    def _on_radius_text_changed(self, text):
+        """When the user types anything, restore the normal placeholder."""
+        if text:
+            self.radius_input.setPlaceholderText("eg. 5")
+
+    def _validate_radius(self):
+        """Validate on focus-out / Enter. Clear and show 'Invalid Input' if bad."""
+        text = self.radius_input.text().strip()
+        if not text:
+            return
+        if text.isdigit() and int(text) > 0:
+            manager.paintbrush_radius = int(text)
+            return  # Valid
+        # Invalid: clear the field and hint the user
+        self.radius_input.clear()
+        self.radius_input.setPlaceholderText("Invalid Input")
+
     def _get_z_range(self):
         """Return [zstart, zend] (1-indexed) from the Z slices field.
 
@@ -487,6 +522,8 @@ class ROIManager(QWidget):
                 roi = LaneROI(self.active_window.view, name=item["name"])
             elif cls_name == "FreehandROI":
                 roi = FreehandROI(self.active_window.view, name=item["name"])
+            elif cls_name == "PaintbrushROI":
+                roi = PaintbrushROI(self.active_window.view, name=item["name"])
             else:
                 continue
                 

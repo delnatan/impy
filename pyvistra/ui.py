@@ -29,7 +29,14 @@ from .io import Imaris5DProxy, Numpy5DProxy, load_image, normalize_to_5d
 from .manager import manager
 from .ortho import OrthoViewer
 from .roi_manager import get_roi_manager, roi_manager_exists
-from .rois import CircleROI, CoordinateROI, FreehandROI, LineROI, RectangleROI
+from .rois import (
+    CircleROI,
+    CoordinateROI,
+    FreehandROI,
+    LineROI,
+    PaintbrushROI,
+    RectangleROI,
+)
 from .visuals import CompositeImageVisual
 from .widgets import (
     AlignmentDialog,
@@ -581,13 +588,17 @@ class ImageWindow(QMainWindow):
             self.drawing_roi = LineROI(self.view, name=roi_index)
         elif tool == "freehand":
             self.drawing_roi = FreehandROI(self.view, name=roi_index)
+        elif tool == "paintbrush":
+            self.drawing_roi = PaintbrushROI(
+                self.view, name=roi_index, radius=manager.paintbrush_radius
+            )
 
         if self.drawing_roi:
             self.rois.append(self.drawing_roi)
             self.roi_added.emit(self.drawing_roi)
             # Initial update
-            if tool == "freehand":
-                # For freehand, add the first point
+            if tool in ("freehand", "paintbrush"):
+                # For freehand/paintbrush, add the first point
                 self.drawing_roi.add_point((x, y))
             else:
                 # For other tools, update with start/end (zero size/length)
@@ -725,12 +736,17 @@ class Toolbar(QMainWindow):
         self.act_freehand.setCheckable(True)
         self.act_freehand.triggered.connect(lambda: self.set_tool("freehand"))
 
+        self.act_paintbrush = QAction("Paintbrush", self)
+        self.act_paintbrush.setCheckable(True)
+        self.act_paintbrush.triggered.connect(lambda: self.set_tool("paintbrush"))
+
         self.tools.addAction(self.act_pointer)
         self.tools.addAction(self.act_coord)
         self.tools.addAction(self.act_rect)
         self.tools.addAction(self.act_circle)
         self.tools.addAction(self.act_line)
         self.tools.addAction(self.act_freehand)
+        self.tools.addAction(self.act_paintbrush)
 
         # ROI Manager Button
         self.tools.addSeparator()
@@ -753,6 +769,7 @@ class Toolbar(QMainWindow):
         group.addAction(self.act_circle)
         group.addAction(self.act_line)
         group.addAction(self.act_freehand)
+        group.addAction(self.act_paintbrush)
 
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")

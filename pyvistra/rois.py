@@ -1170,3 +1170,35 @@ class FreehandROI(ROI):
         """Rebuild visuals from serialized data."""
         if "points" in self.data:
             self.update(self.data["points"])
+
+
+class PaintbrushROI(FreehandROI):
+    """
+    Paintbrush ROI for freehand drawing with a circular brush radius.
+
+    Behaves like FreehandROI, but the traced path is rendered as a thick
+    stroke whose width reflects the brush radius (the number of pixels
+    included around the path).
+    """
+
+    def __init__(self, view, name="Paintbrush", radius=5):
+        super().__init__(view, name)
+        self.radius = radius
+        self.line.color = "orange"
+        self.line.method = "agg"
+        self.line.width = self.radius * 2
+
+    def set_radius(self, radius):
+        """Update the brush radius and refresh the stroke width."""
+        self.radius = radius
+        self.line.width = self.radius * 2
+
+    def to_dict(self):
+        d = super().to_dict()
+        d["data"]["radius"] = self.radius
+        return d
+
+    def from_dict(self, data):
+        self.radius = data.get("radius", self.radius)
+        super().from_dict(data)
+        self.line.width = self.radius * 2

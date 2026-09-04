@@ -18,6 +18,7 @@ class WindowManager(QObject):
         self.windows = {}
         self._next_id = 1
         self.active_tool = "pointer"  # Global tool state
+        self.paintbrush_radius = 5  # Global paintbrush brush radius (pixels)
 
     def register(self, window):
         """Register a window and return its assigned ID."""
