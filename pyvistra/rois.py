@@ -1184,14 +1184,12 @@ class PaintbrushROI(FreehandROI):
     def __init__(self, view, name="Paintbrush", radius=5):
         super().__init__(view, name)
         self.radius = radius
-        self.line.color = "orange"
-        self.line.method = "agg"
-        self.line.width = self.radius * 2
+        self.line.set_data(color="orange", width=self.radius * 2)
 
     def set_radius(self, radius):
         """Update the brush radius and refresh the stroke width."""
         self.radius = radius
-        self.line.width = self.radius * 2
+        self.line.set_data(width=self.radius * 2)
 
     def to_dict(self):
         d = super().to_dict()
@@ -1201,4 +1199,4 @@ class PaintbrushROI(FreehandROI):
     def from_dict(self, data):
         self.radius = data.get("radius", self.radius)
         super().from_dict(data)
-        self.line.width = self.radius * 2
+        self.line.set_data(width=self.radius * 2)
