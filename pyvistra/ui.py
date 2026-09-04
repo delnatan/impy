@@ -165,6 +165,7 @@ class ImageWindow(QMainWindow):
         self._freed_roi_ids = []  # min-heap of freed IDs for reuse
         self.drawing_roi = None
         self.start_pos = None
+        self.active_paintbrush_roi = None  # Current paintbrush layer, if any
         # Editing State
         self.dragging_roi = None
         self.drag_handle = None
@@ -327,6 +328,8 @@ class ImageWindow(QMainWindow):
             self._free_roi_id(roi)
             roi.remove()
             self.rois.remove(roi)
+            if roi is self.active_paintbrush_roi:
+                self.active_paintbrush_roi = None
             self.roi_removed.emit(roi)
 
     def show_metadata_dialog(self):
@@ -353,6 +356,10 @@ class ImageWindow(QMainWindow):
             self.view.camera.interactive = True
         else:
             self.view.camera.interactive = False
+        if tool != "paintbrush":
+            # Leaving the paintbrush tool ends the current layer; picking
+            # it again later starts a new one.
+            self.active_paintbrush_roi = None
 
     def show_contrast_dialog(self):
         if self.contrast_dialog is None:
@@ -575,6 +582,15 @@ class ImageWindow(QMainWindow):
 
         self.start_pos = (x, y)
 
+        # Paintbrush strokes accumulate onto one ROI/layer until the tool
+        # is switched away (see update_cursor), rather than each mouse
+        # press starting a brand new ROI.
+        if tool == "paintbrush" and self.active_paintbrush_roi is not None:
+            self.drawing_roi = self.active_paintbrush_roi
+            self.drawing_roi.start_new_stroke((x, y))
+            self.canvas.update()
+            return
+
         # Get unique ROI ID (reuses freed IDs via heapq)
         roi_index = str(self._get_next_roi_id())
 
@@ -592,6 +608,7 @@ class ImageWindow(QMainWindow):
             self.drawing_roi = PaintbrushROI(
                 self.view, name=roi_index, radius=manager.paintbrush_radius
             )
+            self.active_paintbrush_roi = self.drawing_roi
 
         if self.drawing_roi:
             self.rois.append(self.drawing_roi)

@@ -1178,13 +1178,92 @@ class PaintbrushROI(FreehandROI):
 
     Behaves like FreehandROI, but the traced path is rendered as a thick
     stroke whose width reflects the brush radius (the number of pixels
-    included around the path).
+    included around the path). A single PaintbrushROI can hold multiple
+    disconnected strokes (see start_new_stroke), so pausing and resuming
+    painting stays on one layer instead of creating a separate ROI.
     """
+
+    # Maximum number of points to backfill for one large mouse jump, so a
+    # stray huge distance (e.g. window resize) can't stall the UI.
+    _MAX_INTERP_STEPS = 200
 
     def __init__(self, view, name="Paintbrush", radius=5):
         super().__init__(view, name)
         self.radius = radius
+        self._stroke_starts = {0}  # point indices that start a new stroke
         self.line.set_data(color="orange", width=self.radius * 2)
+
+    def start_new_stroke(self, point):
+        """Begin a new stroke in this ROI, disconnected from the last one."""
+        self._stroke_starts.add(len(self.points))
+        self.add_point(point)
+
+    def add_point(self, point):
+        """
+        Add a point to the current stroke.
+
+        Backfills intermediate points when the mouse moved farther than
+        half the brush radius since the last point, so fast movement
+        doesn't leave gaps in the stroke.
+        """
+        is_new_stroke = len(self.points) in self._stroke_starts
+        if self.points and not is_new_stroke:
+            last = np.array(self.points[-1])
+            new = np.array(point)
+            dist = np.linalg.norm(new - last)
+            step = max(self.radius / 2, 1)
+            if dist > step:
+                n_steps = min(int(dist // step), self._MAX_INTERP_STEPS)
+                for i in range(1, n_steps + 1):
+                    interp = last + (new - last) * (i / (n_steps + 1))
+                    self.points.append(tuple(interp))
+        super().add_point(point)
+
+    def _update_line_visual(self):
+        """Update the line visual, breaking the strip between strokes."""
+        n = len(self.points)
+        if n < 2:
+            self.line.set_data(pos=np.zeros((0, 3)))
+            return
+
+        pos = np.zeros((n, 3))
+        for i, (x, y) in enumerate(self.points):
+            pos[i, :2] = (x, y)
+
+        connect = np.array(
+            [(i + 1) not in self._stroke_starts for i in range(n - 1)],
+            dtype=bool,
+        )
+        self.line.set_data(pos=pos, connect=connect)
+
+    def hit_test(self, point):
+        """Like FreehandROI.hit_test, but skips the gaps between strokes."""
+        hid = ROI.hit_test(self, point)
+        if hid is not None:
+            return hid
+
+        if len(self.points) < 2:
+            return None
+
+        p = np.array(point)
+        for i in range(len(self.points) - 1):
+            if (i + 1) in self._stroke_starts:
+                continue  # No visible segment here - separate strokes
+            p1 = np.array(self.points[i])
+            p2 = np.array(self.points[i + 1])
+
+            l2 = np.sum((p1 - p2) ** 2)
+            if l2 == 0:
+                continue
+            t = np.dot(p - p1, p2 - p1) / l2
+            t = max(0, min(1, t))
+            projection = p1 + t * (p2 - p1)
+            dist = np.linalg.norm(p - projection)
+
+            if dist < 5:
+                return "center"
+
+        return None
 
     def set_radius(self, radius):
         """Update the brush radius and refresh the stroke width."""
@@ -1194,9 +1273,11 @@ class PaintbrushROI(FreehandROI):
     def to_dict(self):
         d = super().to_dict()
         d["data"]["radius"] = self.radius
+        d["data"]["stroke_starts"] = sorted(self._stroke_starts)
         return d
 
     def from_dict(self, data):
         self.radius = data.get("radius", self.radius)
+        self._stroke_starts = set(data.get("stroke_starts", [0]))
         super().from_dict(data)
         self.line.set_data(width=self.radius * 2)
