@@ -90,7 +90,11 @@ class ROIManager(QWidget):
         self.btn_delete = QPushButton("Delete")
         self.btn_delete.clicked.connect(self.delete_roi)
         btn_layout.addWidget(self.btn_delete)
-        
+
+        self.btn_fill = QPushButton("Fill")
+        self.btn_fill.clicked.connect(self.fill_selected_roi)
+        btn_layout.addWidget(self.btn_fill)
+
         self.btn_save = QPushButton("Save")
         self.btn_save.clicked.connect(self.save_rois)
         btn_layout.addWidget(self.btn_save)
@@ -369,6 +373,20 @@ class ROIManager(QWidget):
         roi = item.data(Qt.UserRole)
         self.active_window.remove_roi(roi)
         self.refresh_list()
+        self.active_window.canvas.update()
+
+    def fill_selected_roi(self):
+        """Flood-fill the area enclosed by the selected PaintbrushROI."""
+        item = self.roi_list.currentItem()
+        if not item or not self.active_window:
+            return
+
+        roi = item.data(Qt.UserRole)
+        if not isinstance(roi, PaintbrushROI):
+            return
+
+        shape = (self.active_window.Y, self.active_window.X)
+        roi.fill(shape)
         self.active_window.canvas.update()
 
     def on_item_clicked(self, item):

@@ -664,8 +664,8 @@ class ImageWindow(QMainWindow):
             x, y = self._map_event_to_image(event)
             end_pos = (x, y)
 
-            # Handle freehand differently - add points during drag
-            if isinstance(self.drawing_roi, FreehandROI):
+            # Handle freehand/paintbrush differently - add points during drag
+            if isinstance(self.drawing_roi, (FreehandROI, PaintbrushROI)):
                 self.drawing_roi.add_point((x, y))
                 self.canvas.update()
                 return

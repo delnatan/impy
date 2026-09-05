@@ -2,6 +2,27 @@ import numpy as np
 from vispy import scene
 
 
+def _encode_mask_rle(mask):
+    """Row-major run-length encoding of a boolean mask: [[start, length], ...]."""
+    flat = mask.reshape(-1)
+    if flat.size == 0:
+        return []
+    changes = np.flatnonzero(np.diff(flat)) + 1
+    starts = np.concatenate(([0], changes))
+    ends = np.concatenate((changes, [flat.size]))
+    return [
+        [int(s), int(e - s)] for s, e in zip(starts, ends) if flat[s]
+    ]
+
+
+def _decode_mask_rle(runs, shape):
+    """Inverse of _encode_mask_rle."""
+    flat = np.zeros(shape[0] * shape[1], dtype=bool)
+    for start, length in runs:
+        flat[start:start + length] = True
+    return flat.reshape(shape)
+
+
 class ROI:
     # Class-level flag to control label visibility for all ROIs
     show_labels = True
@@ -1172,112 +1193,295 @@ class FreehandROI(ROI):
             self.update(self.data["points"])
 
 
-class PaintbrushROI(FreehandROI):
+class PaintbrushROI(ROI):
     """
     Paintbrush ROI for freehand drawing with a circular brush radius.
 
-    Behaves like FreehandROI, but the traced path is rendered as a thick
-    stroke whose width reflects the brush radius (the number of pixels
-    included around the path). A single PaintbrushROI can hold multiple
-    disconnected strokes (see start_new_stroke), so pausing and resuming
-    painting stays on one layer instead of creating a separate ROI.
+    Stores one or more disconnected strokes, each a sequence of (x, y)
+    points. Each stroke is rendered with its own vispy Line using the
+    'agg' method, which fills the joint between segments properly -
+    unlike a plain thick line strip, which leaves visible notches at
+    sharp corners. Painting again after releasing the mouse continues
+    on this same ROI (see start_new_stroke) rather than creating a new
+    layer.
+
+    Call fill() to flood-fill the area enclosed by the strokes (or the
+    image border), producing a boolean mask that gets saved with the ROI.
     """
 
-    # Maximum number of points to backfill for one large mouse jump, so a
-    # stray huge distance (e.g. window resize) can't stall the UI.
-    _MAX_INTERP_STEPS = 200
+    _COLOR = (1.0, 0.55, 0.0, 1.0)  # orange
 
     def __init__(self, view, name="Paintbrush", radius=5):
         super().__init__(view, name)
         self.radius = radius
-        self._stroke_starts = {0}  # point indices that start a new stroke
-        self.line.set_data(color="orange", width=self.radius * 2)
+        self.strokes = [[]]  # list of strokes; each stroke is a list of (x, y)
+        self.stroke_lines = []  # one vispy Line per stroke, parallel to strokes
+        self.mask = None  # Filled boolean (Y, X) array, set by fill()
+
+        self._add_stroke_visual()
+
+        self.mask_visual = scene.visuals.Image(parent=self.view.scene)
+        self.mask_visual.set_gl_state(
+            preset="translucent",
+            blend=True,
+            blend_func=("src_alpha", "one_minus_src_alpha"),
+            depth_test=False,
+        )
+        self.mask_visual.visible = False
+        self.visuals.append(self.mask_visual)
+
+    def _add_stroke_visual(self):
+        line = scene.visuals.Line(
+            pos=np.zeros((0, 2)),
+            color=np.zeros((0, 4)),
+            width=self.radius * 2,
+            connect="strip",
+            method="agg",
+            parent=self.view.scene,
+        )
+        self.stroke_lines.append(line)
+        self.visuals.append(line)
+
+    def _flatten(self):
+        return [p for stroke in self.strokes for p in stroke]
 
     def start_new_stroke(self, point):
         """Begin a new stroke in this ROI, disconnected from the last one."""
-        self._stroke_starts.add(len(self.points))
+        self.strokes.append([])
+        self._add_stroke_visual()
         self.add_point(point)
 
     def add_point(self, point):
-        """
-        Add a point to the current stroke.
+        """Add a point to the current (most recent) stroke."""
+        self.strokes[-1].append(tuple(point))
+        self._update_stroke_visual(len(self.strokes) - 1)
+        self._update_label_position()
+        if self.selected:
+            self._update_handles()
 
-        Backfills intermediate points when the mouse moved farther than
-        half the brush radius since the last point, so fast movement
-        doesn't leave gaps in the stroke.
-        """
-        is_new_stroke = len(self.points) in self._stroke_starts
-        if self.points and not is_new_stroke:
-            last = np.array(self.points[-1])
-            new = np.array(point)
-            dist = np.linalg.norm(new - last)
-            step = max(self.radius / 2, 1)
-            if dist > step:
-                n_steps = min(int(dist // step), self._MAX_INTERP_STEPS)
-                for i in range(1, n_steps + 1):
-                    interp = last + (new - last) * (i / (n_steps + 1))
-                    self.points.append(tuple(interp))
-        super().add_point(point)
-
-    def _update_line_visual(self):
-        """Update the line visual, breaking the strip between strokes."""
-        n = len(self.points)
-        if n < 2:
-            self.line.set_data(pos=np.zeros((0, 3)))
+    def _update_stroke_visual(self, stroke_idx):
+        pts = self.strokes[stroke_idx]
+        line = self.stroke_lines[stroke_idx]
+        if len(pts) < 2:
+            line.set_data(pos=np.zeros((0, 2)), color=np.zeros((0, 4)))
             return
+        pos = np.array(pts, dtype=np.float32)
+        colors = np.tile(self._COLOR, (len(pts), 1)).astype(np.float32)
+        line.set_data(pos=pos, color=colors, width=self.radius * 2)
 
-        pos = np.zeros((n, 3))
-        for i, (x, y) in enumerate(self.points):
-            pos[i, :2] = (x, y)
+    def _update_label_position(self):
+        pts = self._flatten()
+        if not pts:
+            return
+        mx, my = pts[len(pts) // 2]
+        self.label_visual.pos = (mx, my - 5, 0)
 
-        connect = np.array(
-            [(i + 1) not in self._stroke_starts for i in range(n - 1)],
-            dtype=bool,
-        )
-        self.line.set_data(pos=pos, connect=connect)
+    def _update_handles(self):
+        pts = self._flatten()
+        if not pts:
+            return
+        self.handle_points = {i: pts[i] for i in range(len(pts))}
+        self.handle_visual.set_data(pos=np.array(pts), face_color="white", size=10)
 
     def hit_test(self, point):
-        """Like FreehandROI.hit_test, but skips the gaps between strokes."""
+        """Test proximity to any stroke segment/stamp, or inside the fill."""
         hid = ROI.hit_test(self, point)
         if hid is not None:
             return hid
 
-        if len(self.points) < 2:
-            return None
-
         p = np.array(point)
-        for i in range(len(self.points) - 1):
-            if (i + 1) in self._stroke_starts:
-                continue  # No visible segment here - separate strokes
-            p1 = np.array(self.points[i])
-            p2 = np.array(self.points[i + 1])
-
-            l2 = np.sum((p1 - p2) ** 2)
-            if l2 == 0:
+        for stroke in self.strokes:
+            if len(stroke) == 1:
+                if np.linalg.norm(p - np.array(stroke[0])) <= self.radius:
+                    return "center"
                 continue
-            t = np.dot(p - p1, p2 - p1) / l2
-            t = max(0, min(1, t))
-            projection = p1 + t * (p2 - p1)
-            dist = np.linalg.norm(p - projection)
+            for i in range(len(stroke) - 1):
+                p1 = np.array(stroke[i])
+                p2 = np.array(stroke[i + 1])
+                l2 = np.sum((p1 - p2) ** 2)
+                if l2 == 0:
+                    continue
+                t = np.dot(p - p1, p2 - p1) / l2
+                t = max(0, min(1, t))
+                projection = p1 + t * (p2 - p1)
+                if np.linalg.norm(p - projection) <= self.radius:
+                    return "center"
 
-            if dist < 5:
+        if self.mask is not None:
+            ix, iy = int(round(point[0])), int(round(point[1]))
+            Y, X = self.mask.shape
+            if 0 <= iy < Y and 0 <= ix < X and self.mask[iy, ix]:
                 return "center"
 
         return None
 
+    def move(self, delta):
+        """Move every stroke by delta (dx, dy). Clears any existing fill."""
+        dx, dy = delta
+        for i, stroke in enumerate(self.strokes):
+            self.strokes[i] = [(x + dx, y + dy) for x, y in stroke]
+            self._update_stroke_visual(i)
+        self._update_label_position()
+        if self.selected:
+            self._update_handles()
+        if self.mask is not None:
+            self.clear_fill()
+
+    def adjust(self, handle_id, new_pos):
+        """Move a single point (identified by its flat handle index)."""
+        if not isinstance(handle_id, int):
+            return
+        offset = handle_id
+        for i, stroke in enumerate(self.strokes):
+            if offset < len(stroke):
+                stroke[offset] = tuple(new_pos)
+                self._update_stroke_visual(i)
+                self._update_label_position()
+                if self.selected:
+                    self._update_handles()
+                if self.mask is not None:
+                    self.clear_fill()
+                return
+            offset -= len(stroke)
+
     def set_radius(self, radius):
-        """Update the brush radius and refresh the stroke width."""
+        """Update the brush radius and refresh every stroke's width."""
         self.radius = radius
-        self.line.set_data(width=self.radius * 2)
+        for i in range(len(self.strokes)):
+            self._update_stroke_visual(i)
+
+    def rasterize(self, shape):
+        """
+        Rasterize the brush strokes into a boolean mask of the given
+        (Y, X) shape, marking every pixel within `radius` of a drawn
+        segment.
+        """
+        Y, X = shape
+        mask = np.zeros((Y, X), dtype=bool)
+        for stroke in self.strokes:
+            if len(stroke) == 0:
+                continue
+            if len(stroke) == 1:
+                self._stamp_circle(mask, stroke[0])
+                continue
+            for i in range(len(stroke) - 1):
+                self._stamp_segment(mask, stroke[i], stroke[i + 1])
+        return mask
+
+    def _stamp_circle(self, mask, center):
+        Y, X = mask.shape
+        r = self.radius
+        cx, cy = center
+        xmin = max(int(np.floor(cx - r)), 0)
+        xmax = min(int(np.ceil(cx + r)) + 1, X)
+        ymin = max(int(np.floor(cy - r)), 0)
+        ymax = min(int(np.ceil(cy + r)) + 1, Y)
+        if xmax <= xmin or ymax <= ymin:
+            return
+        yy, xx = np.mgrid[ymin:ymax, xmin:xmax]
+        mask[ymin:ymax, xmin:xmax] |= (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+
+    def _stamp_segment(self, mask, p1, p2):
+        Y, X = mask.shape
+        r = self.radius
+        x1, y1 = p1
+        x2, y2 = p2
+        xmin = max(int(np.floor(min(x1, x2) - r)), 0)
+        xmax = min(int(np.ceil(max(x1, x2) + r)) + 1, X)
+        ymin = max(int(np.floor(min(y1, y2) - r)), 0)
+        ymax = min(int(np.ceil(max(y1, y2) + r)) + 1, Y)
+        if xmax <= xmin or ymax <= ymin:
+            return
+
+        yy, xx = np.mgrid[ymin:ymax, xmin:xmax]
+        dx, dy = x2 - x1, y2 - y1
+        l2 = dx * dx + dy * dy
+        if l2 == 0:
+            t = np.zeros_like(xx, dtype=float)
+        else:
+            t = ((xx - x1) * dx + (yy - y1) * dy) / l2
+            t = np.clip(t, 0, 1)
+        proj_x = x1 + t * dx
+        proj_y = y1 + t * dy
+        dist2 = (xx - proj_x) ** 2 + (yy - proj_y) ** 2
+        mask[ymin:ymax, xmin:xmax] |= dist2 <= r * r
+
+    def fill(self, shape):
+        """
+        Flood-fill the area enclosed by the brush strokes (or the image
+        border) and store the result as a boolean mask.
+
+        Args:
+            shape: (Y, X) shape of the target image.
+
+        Returns:
+            The filled boolean (Y, X) mask.
+        """
+        from scipy.ndimage import binary_fill_holes
+
+        stroke_mask = self.rasterize(shape)
+        self.mask = binary_fill_holes(stroke_mask)
+        self._update_mask_visual()
+        return self.mask
+
+    def clear_fill(self):
+        """Discard the filled mask, keeping only the drawn strokes."""
+        self.mask = None
+        self._update_mask_visual()
+
+    def _update_mask_visual(self):
+        if self.mask is None:
+            self.mask_visual.visible = False
+            return
+        rgba = np.zeros(self.mask.shape + (4,), dtype=np.float32)
+        rgba[self.mask] = (1.0, 0.55, 0.0, 0.45)  # translucent orange
+        self.mask_visual.set_data(rgba)
+        self.mask_visual.visible = True
+
+    def set_visible(self, visible):
+        super().set_visible(visible)
+        # The fill overlay should only ever show when a fill exists.
+        self.mask_visual.visible = visible and self.mask is not None
 
     def to_dict(self):
-        d = super().to_dict()
-        d["data"]["radius"] = self.radius
-        d["data"]["stroke_starts"] = sorted(self._stroke_starts)
+        d = {
+            "type": self.__class__.__name__,
+            "name": self.name,
+            "data": {
+                "strokes": [
+                    [[float(x), float(y)] for x, y in stroke]
+                    for stroke in self.strokes
+                ],
+                "radius": self.radius,
+            },
+        }
+        if self.mask is not None:
+            d["data"]["mask_shape"] = list(self.mask.shape)
+            d["data"]["mask_rle"] = _encode_mask_rle(self.mask)
         return d
 
     def from_dict(self, data):
+        self.data = data
         self.radius = data.get("radius", self.radius)
-        self._stroke_starts = set(data.get("stroke_starts", [0]))
-        super().from_dict(data)
-        self.line.set_data(width=self.radius * 2)
+
+        strokes = data.get("strokes", [[]])
+        self.strokes = [[tuple(p) for p in stroke] for stroke in strokes] or [[]]
+
+        for line in self.stroke_lines:
+            line.parent = None
+            if line in self.visuals:
+                self.visuals.remove(line)
+        self.stroke_lines = []
+        for _ in self.strokes:
+            self._add_stroke_visual()
+        for i in range(len(self.strokes)):
+            self._update_stroke_visual(i)
+        self._update_label_position()
+
+        mask_shape = data.get("mask_shape")
+        mask_rle = data.get("mask_rle")
+        if mask_shape and mask_rle is not None:
+            self.mask = _decode_mask_rle(mask_rle, tuple(mask_shape))
+        else:
+            self.mask = None
+        self._update_mask_visual()
